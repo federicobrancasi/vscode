@@ -103,13 +103,16 @@ suite('Sessions - Search editor empty state', () => {
 			const overlay = container.querySelector<HTMLElement>('.sessions-search-empty-state');
 			const content = overlay?.querySelector<HTMLElement>('.sessions-empty-state');
 			assert.ok(overlay && content);
+			// Exercise subpixel flex centering independently of the platform's font metrics.
+			content.style.width = `${size.width / 2 + 1 / 64}px`;
 			const overlayRect = overlay.getBoundingClientRect();
 			const contentRect = content.getBoundingClientRect();
+			// Compare centers at CSS-pixel precision to allow fractional layout rounding.
 			dimensions.push({
 				width: overlayRect.width,
 				height: overlayRect.height,
-				horizontalOffset: Math.abs((contentRect.left + contentRect.right - overlayRect.left - overlayRect.right) / 2),
-				verticalOffset: Math.abs((contentRect.top + contentRect.bottom - overlayRect.top - overlayRect.bottom) / 2),
+				horizontalOffset: Math.round(Math.abs((contentRect.left + contentRect.right - overlayRect.left - overlayRect.right) / 2)),
+				verticalOffset: Math.round(Math.abs((contentRect.top + contentRect.bottom - overlayRect.top - overlayRect.bottom) / 2)),
 				pointerEvents: getWindow(overlay).getComputedStyle(overlay).pointerEvents,
 			});
 		}
