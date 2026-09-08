@@ -8,6 +8,8 @@ import { SearchEditorEmptyStateContribution } from '../../browser/searchEditorEm
 import { $, append, Dimension } from '../../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { Event } from '../../../../../base/common/event.js';
+import { URI } from '../../../../../base/common/uri.js';
+import { generateUuid } from '../../../../../base/common/uuid.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ITextResourceConfigurationService } from '../../../../../editor/common/services/textResourceConfiguration.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
@@ -20,6 +22,7 @@ import { IUriIdentityService } from '../../../../../platform/uriIdentity/common/
 import { INotebookEditorService } from '../../../../../workbench/contrib/notebook/browser/services/notebookEditorService.js';
 import { IReplaceService } from '../../../../../workbench/contrib/search/browser/replace.js';
 import { SearchEditor } from '../../../../../workbench/contrib/searchEditor/browser/searchEditor.js';
+import { SearchEditorScheme } from '../../../../../workbench/contrib/searchEditor/browser/constants.js';
 import { getOrMakeSearchEditorInput } from '../../../../../workbench/contrib/searchEditor/browser/searchEditorInput.js';
 import { IEditorGroupsService } from '../../../../../workbench/services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../../../workbench/services/editor/common/editorService.js';
@@ -76,6 +79,8 @@ async function renderSearchEditor({ container, disposableStore, theme }: Compone
 			from: 'rawData',
 			resultsContents: results,
 			config: { query },
+			// The fixture harness resets Math.random, so each render needs an explicit unique model URI.
+			modelUri: URI.from({ scheme: SearchEditorScheme, fragment: `fixture-${generateUuid()}` }),
 		}));
 		await editor.setInput(input, { preserveFocus: true }, { newInGroup: true }, CancellationToken.None);
 		editor.getControl().getContribution(SearchEditorEmptyStateContribution.ID);
