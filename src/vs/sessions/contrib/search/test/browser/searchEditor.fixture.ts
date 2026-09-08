@@ -9,7 +9,6 @@ import { $, append, Dimension } from '../../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { Event } from '../../../../../base/common/event.js';
 import { URI } from '../../../../../base/common/uri.js';
-import { generateUuid } from '../../../../../base/common/uuid.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ITextResourceConfigurationService } from '../../../../../editor/common/services/textResourceConfiguration.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
@@ -35,6 +34,8 @@ import { INotebookSearchService } from '../../../../../workbench/contrib/search/
 import { ComponentFixtureContext, createEditorServices, defineComponentFixture, defineThemedFixtureGroup, registerWorkbenchServices } from '../../../../../workbench/test/browser/componentFixtures/fixtureUtils.js';
 import { TestEditorGroupsService, TestEditorGroupView, TestEditorService, TestPathService, TestTextResourceConfigurationService, TestWorkingCopyService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
 import { TestFileService } from '../../../../../workbench/test/common/workbenchTestServices.js';
+
+let modelCounter = 0;
 
 async function renderSearchEditor({ container, disposableStore, theme }: ComponentFixtureContext, compact: boolean, results?: string, width = 600, query = ''): Promise<void> {
 	const height = results === undefined ? 200 : 400;
@@ -79,8 +80,7 @@ async function renderSearchEditor({ container, disposableStore, theme }: Compone
 			from: 'rawData',
 			resultsContents: results,
 			config: { query },
-			// The fixture harness resets Math.random, so each render needs an explicit unique model URI.
-			modelUri: URI.from({ scheme: SearchEditorScheme, fragment: `fixture-${generateUuid()}` }),
+			modelUri: URI.from({ scheme: SearchEditorScheme, fragment: `fixture-${modelCounter++}` }),
 		}));
 		await editor.setInput(input, { preserveFocus: true }, { newInGroup: true }, CancellationToken.None);
 		editor.getControl().getContribution(SearchEditorEmptyStateContribution.ID);
