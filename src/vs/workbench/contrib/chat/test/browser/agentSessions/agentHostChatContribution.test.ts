@@ -44,7 +44,7 @@ import { ChatInputAnswerState, ChatInputAnswerValueKind, ChatInputQuestionKind, 
 import { CompletionItemKind as AhpCompletionItemKind, type CompletionsParams, type CompletionsResult, type InitializeResult } from '../../../../../../platform/agentHost/common/state/protocol/commands.js';
 import { sessionReducer, chatReducer } from '../../../../../../platform/agentHost/common/state/sessionReducers.js';
 import { IDefaultAccountService } from '../../../../../../platform/defaultAccount/common/defaultAccount.js';
-import { ICommandService } from '../../../../../../platform/commands/common/commands.js';
+import { CommandsRegistry, ICommandService } from '../../../../../../platform/commands/common/commands.js';
 import { IProgress, IProgressNotificationOptions, IProgressService, IProgressStep } from '../../../../../../platform/progress/common/progress.js';
 import { ITelemetryService } from '../../../../../../platform/telemetry/common/telemetry.js';
 import { NullTelemetryService } from '../../../../../../platform/telemetry/common/telemetryUtils.js';
@@ -85,7 +85,7 @@ import { IWorkbenchEnvironmentService } from '../../../../../services/environmen
 import { IWorkingCopyService } from '../../../../../services/workingCopy/common/workingCopyService.js';
 import { IWorkbenchAssignmentService } from '../../../../../services/assignment/common/assignmentService.js';
 import { NullWorkbenchAssignmentService } from '../../../../../services/assignment/test/common/nullAssignmentService.js';
-import { IChatInputNotificationService } from '../../../browser/widget/input/chatInputNotificationService.js';
+import { IChatInputNotification, IChatInputNotificationService } from '../../../browser/widget/input/chatInputNotificationService.js';
 import { ICustomizationHarnessService } from '../../../common/customizationHarnessService.js';
 import { IAgentPluginService } from '../../../common/plugins/agentPluginService.js';
 import { IStorageService, InMemoryStorageService } from '../../../../../../platform/storage/common/storage.js';
@@ -120,6 +120,7 @@ import { AgentHostCompletionReferenceKind, ChatPasteAttachmentMetadata, createCh
 import { messageAttachmentsToVariableData } from '../../../browser/agentSessions/agentHost/stateToProgressAdapter.js';
 import { AgentHostSessionReferenceAttachmentDisplayKind, AgentHostSessionReferenceAttachmentMetadataKey, AgentHostSessionReferenceTrajectoryAttachmentDisplayKind, toSessionReferenceModelRepresentation } from '../../../browser/agentSessions/agentHost/agentHostSessionReferenceAttachment.js';
 import { IAgentHostEnablementService } from '../../../../../../platform/agentHost/common/agentHostEnablementService.js';
+import { IAgentHostRoom, IAgentHostRoomPostOptions, IAgentHostRoomsService, OpenCollaborationRoomCommandId } from '../../../../../../platform/agentHost/common/agentHostRooms.js';
 import { CellUri } from '../../../../notebook/common/notebookCommon.js';
 
 type ILegacyTimedChatAction =
@@ -156,6 +157,7 @@ type SeededSessionState = SessionState & Partial<Pick<ISessionWithDefaultChat, '
 
 class MockAgentHostService extends mock<IAgentHostService>() {
 	declare readonly _serviceBrand: undefined;
+	override rooms: IAgentHostRoomsService | undefined;
 
 	override resourceUris = identityAgentHostResourceUriMapper;
 
@@ -4040,6 +4042,41 @@ suite('AgentHostChatContribution', () => {
 
 	suite('session ID resolution', () => {
 
+		test('a finished room member follow-up completes through room delivery without creating or dispatching a raw turn', async () => {
+			const { agentHostService, chatAgentService } = createContribution(disposables);
+			const sessionResource = URI.parse('agent-host-copilot:/finished-room-member');
+			const room: IAgentHostRoom = {
+				id: 'room-a', title: 'Shared goal', goal: 'Build a page', instructions: '', revision: 1,
+				repositoryUri: 'file:///repo', baseRevision: 'a'.repeat(40), createdAt: 0, updatedAt: 0,
+				state: 'stopped', artifacts: [], latestMessageSequence: 0,
+				members: [{ id: 'member-a', name: 'Copilot-1', sessionUri: AgentSession.uri('copilot', 'finished-room-member').toString(), state: 'stopped', turns: 1 }],
+			};
+			const posts: IAgentHostRoomPostOptions[] = [];
+			agentHostService.rooms = new class extends mock<IAgentHostRoomsService>() {
+				override async listRooms() { return [room]; }
+				override async postMessage(_roomId: string, message: IAgentHostRoomPostOptions) {
+					posts.push(message);
+					return { ...message, authorId: 'human', authorName: 'You', authorKind: 'human' as const, kind: 'message' as const, timestamp: 0, sequence: 1, deliveries: [] };
+				}
+			};
+			agentHostService.dispatchedActions.length = 0;
+			const progress: IChatProgress[] = [];
+			const result = await chatAgentService.registeredAgents.get('agent-host-copilot')!.impl.invoke(
+				makeRequest({ message: 'The page does not work', sessionResource }),
+				parts => progress.push(...parts), [], CancellationToken.None,
+			);
+			assert.deepStrictEqual({
+				result, posts,
+				createdSessions: agentHostService.createSessionCalls.length,
+				rawTurns: agentHostService.turnActions.length,
+				explained: progress.some(part => part.kind === 'markdownContent' && part.content.value.includes('Only the addressed peer')),
+			}, {
+				result: {},
+				posts: [{ id: 'followup-req-1', text: 'The page does not work', mentions: ['member-a'] }],
+				createdSessions: 0, rawTurns: 0, explained: true,
+			});
+		});
+
 		test('requests backend session for provider-owned new resource', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
 			const { sessionHandler, agentHostService, chatAgentService } = createContribution(disposables);
 
@@ -7420,6 +7457,42 @@ suite('AgentHostChatContribution', () => {
 	// ---- History loading ---------------------------------------------------
 
 	suite('history loading', () => {
+
+		test('room members disable native pending requests without disabling the transcript or idle input', async () => {
+			const { sessionHandler, agentHostService, instantiationService } = createContribution(disposables);
+			const sessionUri = AgentSession.uri('copilot', 'room-worker');
+			const room = upcastPartial<IAgentHostRoom>({
+				id: 'room-a', title: 'Shared goal',
+				members: [{ id: 'member-a', name: 'Copilot-1', sessionUri: sessionUri.toString(), state: 'idle', turns: 1 }],
+			});
+			agentHostService.rooms = new class extends mock<IAgentHostRoomsService>() {
+				override async listRooms() { return [room]; }
+			};
+			const notifications = new Map<string, IChatInputNotification>();
+			instantiationService.stub(IChatInputNotificationService, {
+				setNotification: notification => notifications.set(notification.id, notification),
+				deleteNotification: id => { notifications.delete(id); },
+			});
+			disposables.add(CommandsRegistry.registerCommand(OpenCollaborationRoomCommandId, () => { }));
+			const resource = URI.parse('agent-host-copilot:/room-worker');
+			const session = await sessionHandler.provideChatSessionContent(resource, CancellationToken.None);
+			disposables.add(toDisposable(() => session.dispose()));
+			const notification = [...notifications.values()][0];
+			const state = {
+				supportsPendingRequests: session.supportsPendingRequests,
+				readOnly: session.isReadOnly?.get(),
+				actions: notification?.actions,
+				resources: notification?.sessionResources?.map(resource => resource.toString()),
+			};
+			session.dispose();
+			assert.deepStrictEqual({ ...state, notificationsAfterClose: notifications.size }, {
+				supportsPendingRequests: false,
+				readOnly: false,
+				actions: [{ kind: 'command', label: 'Back to Room', commandId: OpenCollaborationRoomCommandId, commandArgs: ['room-a'] }],
+				resources: [resource.toString()],
+				notificationsAfterClose: 0,
+			});
+		});
 
 		test('archived session read-only state follows session status', async () => {
 			const { sessionHandler, agentHostService } = createContribution(disposables);

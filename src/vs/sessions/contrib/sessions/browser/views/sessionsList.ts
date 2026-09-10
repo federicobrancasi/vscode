@@ -6,6 +6,7 @@
 import '../media/sessionsList.css';
 import * as DOM from '../../../../../base/browser/dom.js';
 import { pauseCSSAnimationsWhenHidden, synchronizeCSSAnimations } from '../../../../../base/browser/animationSync.js';
+import { StandardKeyboardEvent } from '../../../../../base/browser/keyboardEvent.js';
 import { Gesture } from '../../../../../base/browser/touch.js';
 import { IListVirtualDelegate, ListDragOverEffectPosition, ListDragOverEffectType, NotSelectableGroupId } from '../../../../../base/browser/ui/list/list.js';
 import { IListStyles } from '../../../../../base/browser/ui/list/listWidget.js';
@@ -96,6 +97,9 @@ import { SessionStatusIcon } from '../../../../browser/sessionStatusIcon.js';
 import { ChatAutomationsEnabledContext } from '../../../../../workbench/contrib/chat/common/automations/automationsEnabled.js';
 import { IAutomationService } from '../../../../../workbench/contrib/chat/common/automations/automationService.js';
 import { ICustomViewService } from '../../../../services/customView/browser/customViewService.js';
+import { ICustomViewDescriptor } from '../../../../services/customView/browser/customView.js';
+import { COLLABORATION_CUSTOM_VIEW_ID, COLLABORATION_SECTION_ID, CollaborationSidebarContext } from '../../../../services/collaboration/common/collaboration.js';
+import { OpenCollaborationRoomCommandId } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { AUTOMATIONS_CUSTOM_VIEW_ID } from '../automationsConstants.js';
 import { AutomationsNewBadgeState, type AutomationsNewBadgeStyle } from '../automationsNewBadge.js';
 import { Menus } from '../../../../browser/menus.js';
@@ -245,6 +249,8 @@ function getSessionSectionIcon(sectionId: string): ThemeIcon | undefined {
 			return Codicon.pinned;
 		case AUTOMATIONS_SECTION_ID:
 			return Codicon.calendar;
+		case COLLABORATION_SECTION_ID:
+			return Codicon.organization;
 		case 'archived':
 			return Codicon.archive;
 		case 'recent':
@@ -255,6 +261,17 @@ function getSessionSectionIcon(sectionId: string): ThemeIcon | undefined {
 			return sectionId.startsWith('workspace:')
 				? Codicon.folder
 				: undefined;
+	}
+}
+
+function getSessionSectionCustomViewId(sectionId: string): string | undefined {
+	switch (sectionId) {
+		case AUTOMATIONS_SECTION_ID:
+			return AUTOMATIONS_CUSTOM_VIEW_ID;
+		case COLLABORATION_SECTION_ID:
+			return COLLABORATION_CUSTOM_VIEW_ID;
+		default:
+			return undefined;
 	}
 }
 
@@ -1405,15 +1422,19 @@ export class SessionSectionRenderer implements ITreeRenderer<SessionListItem, Fu
 		this.templatesByElement.set(element, template);
 		this.templatesById.set(element.id, template);
 		template.container.classList.remove(SESSION_HEADER_DROP_TARGET_CLASS);
-		template.container.classList.remove('session-section-shortcut');
+		template.container.classList.remove('active', 'session-section-shortcut');
 		template.newBadge.style.display = 'none';
 		template.newBadge.classList.remove(
 			'session-section-new-badge-accent',
 			'session-section-new-badge-soft',
 			'session-section-new-badge-outline',
 		);
-		if (element.id === AUTOMATIONS_SECTION_ID) {
+		const customViewId = getSessionSectionCustomViewId(element.id);
+		if (customViewId) {
 			template.container.classList.add('session-section-shortcut');
+			template.elementDisposables.add(autorun(reader => {
+				template.container.classList.toggle('active', this.customViewService.activeCustomView.read(reader)?.id === customViewId);
+			}));
 		}
 
 		// Leading icon for the "Pinned" and "Chats" (quick chats) section headers.
@@ -1425,8 +1446,6 @@ export class SessionSectionRenderer implements ITreeRenderer<SessionListItem, Fu
 
 		if (element.id === AUTOMATIONS_SECTION_ID) {
 			template.elementDisposables.add(autorun(reader => {
-				const activeCustomView = this.customViewService.activeCustomView.read(reader);
-				template.container.classList.toggle('active', activeCustomView?.id === AUTOMATIONS_CUSTOM_VIEW_ID);
 				const badgeStyle = this.automationNewBadgePresentation.read(reader);
 				template.newBadge.style.display = badgeStyle && badgeStyle !== 'unread' ? 'inline-flex' : 'none';
 				template.newBadge.classList.toggle('session-section-new-badge-accent', badgeStyle === 'accent');
@@ -1457,7 +1476,7 @@ export class SessionSectionRenderer implements ITreeRenderer<SessionListItem, Fu
 		}
 
 		template.label.textContent = element.label;
-		if (this.hideSectionCount || element.id === AUTOMATIONS_SECTION_ID) {
+		if (this.hideSectionCount || customViewId) {
 			template.count.textContent = '';
 			template.count.style.display = 'none';
 		} else {
@@ -1772,6 +1791,7 @@ interface ISessionsAccessibilityProviderOptions {
 	readonly isRenderedInCustomGroup?: (session: ISession) => boolean;
 	readonly includeQuickChatInAriaLabel?: boolean;
 	readonly automationNewBadgeVisible?: IObservable<boolean>;
+	readonly activeCustomView?: IObservable<ICustomViewDescriptor | undefined>;
 	/** Mirrors {@link SessionItemRenderer}'s option of the same name — see there for rationale. */
 	readonly deriveStatusFromMainChat?: boolean;
 }
@@ -1800,6 +1820,11 @@ class SessionsAccessibilityProvider {
 			return `${element.group.name}, ${element.sessions.length}`;
 		}
 		if (isSessionSection(element)) {
+			if (element.id === COLLABORATION_SECTION_ID) {
+				return derived(this, reader => this.options?.activeCustomView?.read(reader)?.id === COLLABORATION_CUSTOM_VIEW_ID
+					? localize('agentCollabActiveAria', "{0}, current view, create or open a collaboration room", element.label)
+					: localize('agentCollabAria', "{0}, create or open a collaboration room", element.label));
+			}
 			if (element.id === AUTOMATIONS_SECTION_ID) {
 				return derived(this, reader => {
 					let label = element.label;
@@ -2670,6 +2695,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 					isRenderedInCustomGroup: session => this.isRenderedInCustomGroup(session),
 					deriveStatusFromMainChat: true,
 					automationNewBadgeVisible: this.automationsNewBadgeState.showNewBadge,
+					activeCustomView: derived(this, reader => this.customViewService.activeCustomView.read(reader)),
 				}),
 				dnd: this._register(new SessionsListDragAndDrop({
 					isReorderable: session => this.isReorderable(session),
@@ -2766,6 +2792,18 @@ export class SessionsList extends Disposable implements ISessionsList {
 		));
 		const focusedChatItemContext = SessionsListFocusedChatItemContext.bindTo(this.tree.contextKeyService);
 		this.tree.updateOptions({ indent: 0, defaultIndent: 0, expandOnDoubleClick: false });
+		this._register(this.tree.onKeyDown(event => {
+			if (event.target !== this.tree.getHTMLElement()) {
+				return;
+			}
+			const key = new StandardKeyboardEvent(event);
+			const focused = this.tree.getFocus()[0];
+			if ((key.equals(KeyCode.Enter) || key.equals(KeyCode.Space)) && focused && isSessionSection(focused) && getSessionSectionCustomViewId(focused.id)) {
+				key.preventDefault();
+				key.stopPropagation();
+				this.openCustomViewSection(focused);
+			}
+		}));
 
 		// Hierarchy guides: resolve any row (a session or one of its chats) to
 		// the session whose guides it belongs to, so hovering/selecting/focusing
@@ -2850,9 +2888,8 @@ export class SessionsList extends Disposable implements ISessionsList {
 				}
 				return;
 			}
-			if (isSessionSection(element) && element.id === AUTOMATIONS_SECTION_ID) {
-				this.tree.setSelection([]);
-				this.commandService.executeCommand('sessionsView.manageAutomations');
+			if (isSessionSection(element) && getSessionSectionCustomViewId(element.id)) {
+				this.openCustomViewSection(element);
 				return;
 			}
 			if (!isSessionSection(element) && !isSessionGroupItem(element)) {
@@ -2902,9 +2939,9 @@ export class SessionsList extends Disposable implements ISessionsList {
 		// the `IsPhoneLayoutContext` reactive signal already maintained by
 		// the agents workbench.
 		const phoneKeys = new Set<string>([IsPhoneLayoutContext.key]);
-		const automationKeys = new Set<string>([ChatAutomationsEnabledContext.key]);
+		const shortcutKeys = new Set<string>([ChatAutomationsEnabledContext.key, ...CollaborationSidebarContext.keys()]);
 		this._register(this.contextKeyService.onDidChangeContext(e => {
-			if (e.affectsSome(automationKeys)) {
+			if (e.affectsSome(shortcutKeys)) {
 				this.update();
 			}
 			if (!e.affectsSome(phoneKeys)) {
@@ -3246,7 +3283,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 		};
 
 		const renderSection = (section: ISessionSection): IObjectTreeElement<SessionListItem> => {
-			if (section.id === AUTOMATIONS_SECTION_ID) {
+			if (getSessionSectionCustomViewId(section.id)) {
 				return {
 					element: section as SessionListItem,
 					children: [],
@@ -3316,6 +3353,9 @@ export class SessionsList extends Disposable implements ISessionsList {
 		if (this.contextKeyService.getContextKeyValue<boolean>(ChatAutomationsEnabledContext.key)) {
 			void this.automationsNewBadgeState.initialize().catch(onUnexpectedError);
 			children.push(renderSection({ id: AUTOMATIONS_SECTION_ID, label: localize('automations', "Automations"), sessions: [] }));
+		}
+		if (this.contextKeyService.contextMatchesRules(CollaborationSidebarContext)) {
+			children.push(renderSection({ id: COLLABORATION_SECTION_ID, label: localize('agentCollab', "Agent Collab"), sessions: [] }));
 		}
 
 		const pinnedSection = sections.find(s => s.id === 'pinned');
@@ -3559,6 +3599,11 @@ export class SessionsList extends Disposable implements ISessionsList {
 
 	layout(height: number, width: number): void {
 		this.tree.layout(height, width);
+	}
+
+	private openCustomViewSection(section: ISessionSection): void {
+		this.tree.setSelection([]);
+		void this.commandService.executeCommand(section.id === COLLABORATION_SECTION_ID ? OpenCollaborationRoomCommandId : 'sessionsView.manageAutomations').catch(onUnexpectedError);
 	}
 
 	focus(): void {

@@ -60,6 +60,8 @@ import { AgentSessionRegistry, IRegisteredSession, IStoredRegisteredSession } fr
 import { IAgentHostGitService } from '../common/agentHostGitService.js';
 import { IAgentHostSubscriptionService, resolveAgentHostSession } from '../common/agentHostSubscriptionService.js';
 import { AgentSideEffects, type IAgentSideEffectsOptions } from './agentSideEffects.js';
+import { IAgentHostRoomsController } from './agentHostRoomsController.js';
+import type { IRoomSessionLifecycle } from './agentHostRoomsRuntime.js';
 import { AgentHostLocalTurns } from './agentHostLocalTurns.js';
 import { AgentSessionResidency } from './agentSessionResidency.js';
 import { IAgentHostSessionOpenTelemetry, type IAgentHostSessionOpenTelemetryScope } from './agentHostSessionOpenTelemetry.js';
@@ -393,6 +395,7 @@ export interface IAgentServiceOptions {
 }
 
 export interface IAgentServiceCallbacks {
+	readonly roomSessionLifecycle: IRoomSessionLifecycle;
 	readonly canEvictChangeset: (changeset: string) => boolean;
 	readonly startAgentMergeTurn: IAgentMergeControllerOptions['startTurn'];
 	readonly cancelAgentMergeTurn: IAgentMergeControllerOptions['cancelTurn'];
@@ -621,6 +624,7 @@ export class AgentService extends Disposable implements IAgentService {
 		@IAgentHostProviderService private readonly _providerService: IAgentHostProviderService,
 		@IAgentHostTurnService private readonly _turnService: IAgentHostTurnService,
 		@IAgentHostStorageService private readonly _storageService: IAgentHostStorageService,
+		@IAgentHostRoomsController private readonly _rooms: IAgentHostRoomsController,
 	) {
 		super();
 		this._authService = core.authenticationService;
@@ -682,11 +686,18 @@ export class AgentService extends Disposable implements IAgentService {
 			{
 				limit: options.sessionResidencyLimit,
 				releaseRetryMs: options.sessionReleaseRetryMs,
-				holdsSession: session => this._agentMergeController.holdsSession(session),
+				holdsSession: session => this._rooms.isRoomSessionUri(session.toString()) || this._agentMergeController.holdsSession(session),
 				onDidReleaseHold: this._agentMergeController.onDidReleaseHold,
 			},
 		));
 		core.callbackBinder.bind({
+			roomSessionLifecycle: {
+				createSession: config => this.createSession(config),
+				listSessions: () => this.listSessions(),
+				subscribe: (resource, clientId, isActive) => this.subscribe(resource, clientId, isActive),
+				unsubscribe: (resource, clientId) => this.unsubscribe(resource, clientId),
+				abortTurn: (chat, turnId) => this._abortRoomTurn(chat, turnId),
+			},
 			canEvictChangeset: changeset => this._canEvictChangeset(changeset),
 			startAgentMergeTurn: (session, turnId, prompt) => this._startAgentMergePrompt(session, turnId, prompt),
 			cancelAgentMergeTurn: (session, turnId) => this._cancelAgentMergePrompt(session, turnId),
@@ -1301,6 +1312,28 @@ export class AgentService extends Disposable implements IAgentService {
 		this._stateManager.dispatchServerAction(chat, action);
 		this._sideEffects.handleAction(chat, action);
 		return true;
+	}
+
+	private async _abortRoomTurn(chat: URI, expectedTurnId?: string): Promise<void> {
+		const channel = chat.toString();
+		const session = parseRequiredSessionUriFromChatUri(channel);
+		if (!this._rooms.isRoomSessionUri(session)) {
+			throw new Error(localize('rooms.chatNotInRoom', "The chat does not belong to a collaboration room."));
+		}
+		const activeTurn = this._stateManager.getChatState(channel)?.activeTurn;
+		if (activeTurn && expectedTurnId && activeTurn.id !== expectedTurnId) {
+			return;
+		}
+		if (activeTurn) {
+			const action = {
+				type: ActionType.ChatTurnCancelled, turnId: activeTurn.id,
+				duration: Math.max(0, Date.now() - Date.parse(activeTurn.startedAt)),
+			} as const;
+			this._stateManager.dispatchServerAction(channel, action);
+			await this._sideEffects.handleAction(channel, action);
+		} else {
+			await this._providerService.getProviderForSession(session)?.chats.abort(chat, createAgentChatContext(this._stateManager, session, channel));
+		}
 	}
 
 	private _startAgentMergePrompt(session: string, turnId: string, prompt: string): boolean {
@@ -3195,6 +3228,9 @@ export class AgentService extends Disposable implements IAgentService {
 
 	async createChat(session: URI, chat: URI, options?: IAgentCreateChatRequestOptions): Promise<void> {
 		const sessionKey = session.toString();
+		if (this._rooms.isRoomSessionUri(sessionKey)) {
+			throw new Error(localize('rooms.oneChatPerMember', "Room members have one preserved chat. Create a separate collaboration room instead of adding workers here."));
+		}
 		const provider = this._providerService.getProviderForSession(session);
 		if (!provider) {
 			throw new Error(`[AgentService] createChat: no provider for session ${sessionKey}`);
@@ -3394,6 +3430,9 @@ export class AgentService extends Disposable implements IAgentService {
 
 	async disposeChat(session: URI, chat: URI): Promise<void> {
 		const sessionKey = session.toString();
+		if (this._rooms.isRoomSessionUri(sessionKey)) {
+			throw new Error(localize('rooms.preserveChat', "Stop the collaboration room member instead of deleting its preserved chat."));
+		}
 		const chatKey = chat.toString();
 		const provider = this._providerService.getProviderForSession(session);
 		this._disposingPeerChats.add(chatKey);
@@ -4227,10 +4266,16 @@ export class AgentService extends Disposable implements IAgentService {
 	}
 
 	canAutomaticallyDeleteArchivedSession(session: URI): Promise<boolean> {
+		if (this._rooms.isRoomSessionUri(session.toString())) {
+			return Promise.resolve(false);
+		}
 		return this._worktree.canAutomaticallyDeleteArchivedSession(session);
 	}
 
 	archiveSession(session: URI): void {
+		if (this._rooms.isRoomSessionUri(session.toString())) {
+			return;
+		}
 		const channel = session.toString();
 		const action = {
 			type: ActionType.SessionIsArchivedChanged,
@@ -4241,11 +4286,17 @@ export class AgentService extends Disposable implements IAgentService {
 	}
 
 	cleanupWorktree(session: URI, sessionId: string): Promise<void> {
+		if (this._rooms.isRoomSessionUri(session.toString())) {
+			return Promise.resolve();
+		}
 		return this._worktree.cleanupWorktree(session, sessionId);
 	}
 
 	private async _doDisposeSession(session: URI): Promise<void> {
 		const sessionKey = session.toString();
+		if (this._rooms.isRoomSessionUri(sessionKey)) {
+			throw new Error(localize('rooms.preserveSession', "Stop the collaboration room member instead of deleting its preserved session."));
+		}
 		this._cancelPendingSessionGc(session);
 		const isEphemeral = this._stateManager.isEphemeralSession(sessionKey);
 		const isIdleProvisional = this._stateManager.isIdleProvisionalSession(sessionKey);
@@ -4941,6 +4992,17 @@ export class AgentService extends Disposable implements IAgentService {
 
 	private _dispatchActionNow(channel: string, sessionChannel: string, action: SessionAction | ChatAction | TerminalAction | ClientChangesetAction | ClientAnnotationsAction | IRootConfigChangedAction, clientId: string, clientSeq: number, clientContext: IAgentHostClientTelemetryContext): void {
 		const origin = { clientId, clientSeq };
+		if (this._rooms.isRoomSessionUri(sessionChannel) && (
+			action.type === ActionType.ChatTurnStarted || action.type === ActionType.ChatTurnResume
+			|| action.type === ActionType.ChatPendingMessageSet || action.type === ActionType.ChatPendingMessageRemoved
+			|| action.type === ActionType.ChatQueuedMessagesReordered
+			|| action.type === ActionType.ChatTruncated || action.type === ActionType.SessionConfigChanged
+			|| action.type === ActionType.SessionIsArchivedChanged || action.type === ActionType.SessionWorkingDirectorySet
+			|| action.type === ActionType.SessionWorkingDirectoryRemoved || action.type === ActionType.SessionWorkingDirectoryReplaced
+		)) {
+			this._stateManager.rejectClientAction(channel, action, origin, localize('rooms.controlMembers', "Use the collaboration room to control its members; their worktrees and approval settings are preserved."));
+			return;
+		}
 		if (action.type === ActionType.SessionIsArchivedChanged && !action.isArchived && this._sessionResidency.isBeingDisposed(sessionChannel)) {
 			this._stateManager.rejectClientAction(channel, action, origin, 'Cannot unarchive a session while it is being deleted.');
 			return;
@@ -6990,6 +7052,11 @@ export class AgentService extends Disposable implements IAgentService {
 	}
 
 	async shutdown(): Promise<void> {
+		try {
+			await this._rooms.shutdown();
+		} catch (error) {
+			this._logService.error('[AgentService] Room shutdown failed', error);
+		}
 		this._logService.info('AgentService: shutting down all providers...');
 		try {
 			await this._providerService.shutdown();

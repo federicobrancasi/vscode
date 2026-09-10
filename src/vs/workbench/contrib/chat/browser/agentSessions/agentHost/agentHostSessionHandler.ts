@@ -29,6 +29,8 @@ import type { ITextModel } from '../../../../../../editor/common/model.js';
 import { IModelService } from '../../../../../../editor/common/services/model.js';
 import { localize } from '../../../../../../nls.js';
 import { AgentHostAllowSignedOutWhenUsableSettingId, AgentProvider, AgentSession, CODEX_AGENT_PROVIDER_ID, type IAgentConnection } from '../../../../../../platform/agentHost/common/agentService.js';
+import { IAgentHostRoom, OpenCollaborationRoomCommandId } from '../../../../../../platform/agentHost/common/agentHostRooms.js';
+import { forwardRoomFollowUp } from './agentHostRoomFollowUp.js';
 import { agentHostAuthority, LOCAL_AGENT_HOST_AUTHORITY } from '../../../../../../platform/agentHost/common/agentHostUri.js';
 import { isCustomizationEnabled } from '../../../../../../platform/agentHost/common/customizationEnablement.js';
 import { findDeepestContainingWorkingDirectory } from '../../../../../../platform/agentHost/common/agentHostWorkingDirectories.js';
@@ -100,6 +102,8 @@ import { getChatSessionType, isUntitledChatSession } from '../../../common/model
 import { IChatAgentData, IChatAgentImplementation, IChatAgentRequest, IChatAgentResult, IChatAgentService } from '../../../common/participants/chatAgents.js';
 import { ILanguageModelToolsService, IToolData, IToolResult, stringifyPromptTsxPart, ToolInvocationPresentation } from '../../../common/tools/languageModelToolsService.js';
 import { IChatWidgetService } from '../../chat.js';
+import { ChatInputNotificationActionKind, ChatInputNotificationSeverity, IChatInputNotificationService } from '../../widget/input/chatInputNotificationService.js';
+import { CommandsRegistry } from '../../../../../../platform/commands/common/commands.js';
 import { getAgentSessionProviderIcon } from '../agentSessions.js';
 import { IAgentCustomizationScope, IAgentHostActiveClientService } from './agentHostActiveClientService.js';
 import { IAgentHostCustomizationService } from './agentHostCustomizationService.js';
@@ -705,6 +709,7 @@ class AgentHostChatSession extends Disposable implements IChatSession {
 	readonly progressObs = observableValue<IChatProgress[]>('agentHostProgress', []);
 	readonly isCompleteObs = observableValue<boolean>('agentHostComplete', true);
 	readonly isReadOnly: IObservable<boolean>;
+	readonly supportsPendingRequests: boolean;
 	private readonly _sessionState = observableValue<IObservable<SessionState | undefined>>(this, constObservable(undefined));
 	private readonly _chatState = observableValue<IObservable<ChatState | undefined>>(this, constObservable(undefined));
 	private readonly _promptCacheTracking = this._register(new MutableDisposable<IDisposable>());
@@ -725,6 +730,7 @@ class AgentHostChatSession extends Disposable implements IChatSession {
 		readonly sessionResource: URI,
 		readonly history: readonly IChatSessionHistoryItem[],
 		readonly title: string | undefined,
+		room: IAgentHostRoom | undefined,
 		sessionSubscription: IAgentSubscription<SessionState> | undefined,
 		chatSubscription: IAgentSubscription<ChatState> | undefined,
 		private readonly _promptCacheNotification: AgentHostPromptCacheNotification | undefined,
@@ -736,8 +742,31 @@ class AgentHostChatSession extends Disposable implements IChatSession {
 		onDispose: () => void,
 		interruptActiveResponse: () => boolean,
 		@ILogService private readonly _logService: ILogService,
+		@IChatInputNotificationService notificationService: IChatInputNotificationService,
 	) {
 		super();
+
+		this.supportsPendingRequests = !room;
+		if (room) {
+			const notificationId = generateUuid();
+			this._register(toDisposable(() => notificationService.deleteNotification(notificationId)));
+			notificationService.setNotification({
+				id: notificationId,
+				telemetryId: 'agentHost.collaborationRoom',
+				severity: ChatInputNotificationSeverity.Info,
+				message: localize('room.memberInput', "This peer belongs to {0}", room.title),
+				description: localize('room.memberInputDescription', "Send follow-ups here when the peer is idle. To send guidance while it is working, open the collaboration room and use Steer Agents."),
+				actions: CommandsRegistry.getCommand(OpenCollaborationRoomCommandId) ? [{
+					kind: ChatInputNotificationActionKind.Command,
+					label: localize('room.memberBack', "Back to Room"),
+					commandId: OpenCollaborationRoomCommandId,
+					commandArgs: [room.id],
+				}] : [],
+				dismissible: false,
+				autoDismissOnMessage: false,
+				sessionResources: [sessionResource],
+			});
+		}
 
 		this.setStateSubscriptions(sessionSubscription, chatSubscription);
 		this.isReadOnly = derived(this, reader => {
@@ -1451,6 +1480,7 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 		// arrives so the user-selected model is available. The chat resource still
 		// carries the raw session id that will be used when createSession runs.
 		const resolvedSession = this._resolveSessionUri(sessionResource);
+		const room = (await this._config.connection.rooms?.listRooms())?.find(room => room.members.some(member => member.sessionUri === resolvedSession.toString()));
 		let chatURI: string | undefined;
 
 		// The point of this is to check with the session provider or controller
@@ -1647,6 +1677,7 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 				sessionResource,
 				history,
 				chatTitle,
+				room,
 				sessionSubscription,
 				chatSubscription,
 				this._config.promptCacheNotification,
@@ -1863,6 +1894,15 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 			const provisionalBackend = this._provisionalService.get(request.sessionResource);
 			if (provisionalBackend) {
 				this._ensureSessionSubscription(sessionKey);
+			}
+
+			failureStage = 'prepareTurn';
+			if (await forwardRoomFollowUp(this._config.connection.rooms, resolvedSession, request, progress, cancellationToken, async () => {
+				failureStage = 'authentication';
+				await this._ensureRequiredAuthentication(this._createModelSelection(request.userSelectedModelId, request.modelConfiguration));
+				failureStage = 'prepareTurn';
+			})) {
+				return {};
 			}
 
 			failureStage = 'sessionState';
@@ -5696,6 +5736,9 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 	 * No-ops if already subscribed.
 	 */
 	private _ensurePendingMessageSubscription(sessionResource: URI, backendSession: URI): void {
+		if (this._activeSessions.get(sessionResource)?.supportsPendingRequests === false) {
+			return;
+		}
 		if (this._pendingMessageSubscriptions.has(sessionResource)) {
 			return;
 		}

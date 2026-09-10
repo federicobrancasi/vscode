@@ -26,7 +26,7 @@ export interface IDeferredAgentHostTurn {
 /** Starts host-authored turns through the standard admission and provider-send path. */
 export interface IAgentHostTurnService {
 	readonly _serviceBrand: undefined;
-	startTurnMessage(chat: URI, message: Message): void;
+	startTurnMessage(chat: URI, message: Message, turnId?: string): void;
 	beginDeferredTurnMessage(chat: URI, message: Message): IDeferredAgentHostTurn;
 	continueDeferredTurnMessage(chat: URI, turn: IDeferredAgentHostTurn, message: Message): boolean;
 	failDeferredTurnMessage(chat: URI, turn: IDeferredAgentHostTurn, error: ErrorInfo): boolean;
@@ -46,9 +46,9 @@ export class AgentHostTurnService implements IAgentHostTurnService {
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 	) { }
 
-	startTurnMessage(chat: URI, message: Message): void {
+	startTurnMessage(chat: URI, message: Message, turnId?: string): void {
 		const channel = chat.toString();
-		const action = this._dispatchTurnStarted(channel, message);
+		const action = this._dispatchTurnStarted(channel, message, turnId);
 		this.handleTurnStarted(channel, action);
 	}
 
@@ -145,10 +145,10 @@ export class AgentHostTurnService implements IAgentHostTurnService {
 		});
 	}
 
-	private _dispatchTurnStarted(channel: ProtocolURI, message: Message): ChatTurnStartedAction {
+	private _dispatchTurnStarted(channel: ProtocolURI, message: Message, turnId = generateUuid()): ChatTurnStartedAction {
 		const action: ChatTurnStartedAction = {
 			type: ActionType.ChatTurnStarted,
-			turnId: generateUuid(),
+			turnId,
 			startedAt: new Date().toISOString(),
 			message,
 		};

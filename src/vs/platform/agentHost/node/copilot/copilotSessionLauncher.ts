@@ -30,6 +30,9 @@ import { IAgentConfigurationService } from '../agentConfigurationService.js';
 import { IAgentHostManagedSettingsService } from '../agentHostManagedSettingsService.js';
 import { IAgentHostTerminalManager } from '../agentHostTerminalManager.js';
 import { IAgentHostSessionOpenTelemetry } from '../agentHostSessionOpenTelemetry.js';
+import { IAgentHostRoomsController } from '../agentHostRoomsController.js';
+import { roomExcludedTools } from '../agentHostRoomsTypes.js';
+import { createCopilotRoomTools } from './copilotRoomTools.js';
 import { IByokLmBridgeRegistry } from '../byokLmBridgeRegistry.js';
 import { IByokLmProxyService, type IByokLmProxyHandle } from './byokLmProxyService.js';
 import type { ICopilotMcpServerInfo, ICopilotPluginInfo } from './copilotAgent.js';
@@ -612,6 +615,7 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		@IByokLmBridgeRegistry private readonly _byokLmBridgeRegistry: IByokLmBridgeRegistry,
 		@IAgentHostOTelService private readonly _otelService: IAgentHostOTelService,
 		@IAgentHostSessionOpenTelemetry private readonly _sessionOpenTelemetry: IAgentHostSessionOpenTelemetry,
+		@IAgentHostRoomsController private readonly _rooms: IAgentHostRoomsController,
 	) { }
 
 	async launch(plan: CopilotSessionLaunchPlan, runtime: ICopilotSessionRuntime): Promise<CopilotSessionWrapper> {
@@ -898,6 +902,9 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		// exception: the SDK validates the session-start `agent:` against `customAgents`
 		// by name, so the selected agent is force-included (see `toSdkSessionCustomAgents`).
 		const pluginsWithoutDirs = plugins.filter(p => !p.pluginDir || p.pluginDir.scheme !== Schemas.file);
+		const rooms = this._rooms.isRoomSessionUri(runtime.configurationResource.toString()) ? this._rooms : undefined;
+		const roomSessionId = AgentSession.id(runtime.configurationResource);
+		const roomTools = rooms ? createCopilotRoomTools(roomSessionId, rooms) : [];
 		const explicitMcpServers = plan.isEphemeral ? [] : plugins.flatMap(plugin => plugin.mcpServers.filter(server =>
 			!plugin.disabledMcpServers?.includes(server.name)
 			&& isMcpServerExplicitlyProjected(server)
@@ -927,7 +934,9 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		});
 		const availableTools = getToolFilterOverride(availableToolsOverride, 'availableTools', modelId, this._logService, plan.sessionId);
 		const excludedTools = getToolFilterOverride(excludedToolsOverride, 'excludedTools', modelId, this._logService, plan.sessionId);
-		const sdkAvailableTools = toSdkToolFilterPatterns(availableTools);
+		const sdkAvailableTools = availableTools && rooms
+			? [...(toSdkToolFilterPatterns(availableTools) ?? []), ...roomTools.map(tool => tool.name)]
+			: toSdkToolFilterPatterns(availableTools);
 		const configuredSdkExcludedTools = plan.isEphemeral
 			? [...(toSdkToolFilterPatterns(excludedTools) ?? []), ...EPHEMERAL_DISABLED_COPILOT_TOOLS]
 			: toSdkToolFilterPatterns(excludedTools);
@@ -958,6 +967,20 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		const toolSearchDeferThreshold = normalizeToolSearchDeferThreshold(this._configurationService.getRootValue(copilotCliConfigSchema, CopilotCliConfigKey.ToolSearchDeferThreshold));
 		const tools = [...shellTools, ...runtime.createClientSdkTools(toolSearchActive), ...runtime.createServerSdkTools()];
 		const promptOverrides = await applyConfiguredPromptOverrides(promptOverrideString, promptOverrideFile, tools, this._fileService, this._logService);
+		const hooks = toSdkHooks(pluginsWithoutDirs.flatMap(p => p.hooks), {
+			onPreToolUse: async input => {
+				if (rooms) {
+					try {
+						rooms.beforeTool(roomSessionId, input.toolName);
+					} catch (error) {
+						return { permissionDecision: 'deny', permissionDecisionReason: String(error) };
+					}
+				}
+				return runtime.handlePreToolUse(input);
+			},
+			onPostToolUse: input => runtime.handlePostToolUse(input),
+			onUserPromptSubmitted: () => runtime.handleUserPromptSubmitted(),
+		});
 		const managedSettingsPermissions = this._managedSettingsService.permissions;
 		const promptContext: IAgentHostPromptContext = {
 			getSetting: key => this._configurationService.getRootValue(copilotCliConfigSchema, key),
@@ -1022,16 +1045,12 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 			onUserInputRequest: (request, invocation) => runtime.handleUserInputRequest(request, invocation),
 			onElicitationRequest: context => runtime.handleElicitationRequest(context),
 			onMcpAuthRequest: (request, context) => runtime.handleMcpAuthRequest(request, context),
-			hooks: toSdkHooks(pluginsWithoutDirs.flatMap(p => p.hooks), {
-				onPreToolUse: input => runtime.handlePreToolUse(input),
-				onPostToolUse: input => runtime.handlePostToolUse(input),
-				onUserPromptSubmitted: () => runtime.handleUserPromptSubmitted(),
-			}),
+			hooks,
 			mcpServers,
 			onExitPlanModeRequest: (request, invocation) => runtime.handleExitPlanModeRequest(request, invocation),
 			workingDirectory: plan.workingDirectory?.fsPath,
-			customAgents,
-			agent: plan.resolvedAgentName,
+			customAgents: rooms ? [] : customAgents,
+			agent: rooms ? undefined : plan.resolvedAgentName,
 			skillDirectories,
 			instructionDirectories,
 			additionalDirectories,
@@ -1044,10 +1063,10 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 				permissions: managedSettingsPermissions,
 			},
 			availableTools: sdkAvailableTools,
-			excludedTools: sdkExcludedTools,
+			excludedTools: rooms ? [...(sdkExcludedTools ?? []), ...roomExcludedTools, ...roomExcludedTools.map(name => `builtin:${name}`)] : sdkExcludedTools,
 			pluginDirectories: coalesce(plugins.map(p => p.pluginDir))
 				.filter(d => d.scheme === Schemas.file).map(d => d.fsPath),
-			tools: promptOverrides.tools,
+			tools: rooms ? [...promptOverrides.tools.filter(tool => !roomTools.some(roomTool => roomTool.name === tool.name)), ...roomTools] : promptOverrides.tools,
 			...plan.githubCredentials.sdkSessionOptions,
 			// Enable infinite sessions so the SDK provisions a workspace
 			// directory (containing `plan.md`, `checkpoints/`, `files/`).

@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { CancellationToken } from '../../base/common/cancellation.js';
 import { Event } from '../../base/common/event.js';
 import { IObservable } from '../../base/common/observable.js';
 import { equals } from '../../base/common/objects.js';
@@ -14,7 +15,7 @@ import { ResolveSessionConfigResult, SessionConfigValueItem } from '../../platfo
 import { AgentCustomization, Customization, McpServerStatus, RootConfigState, type CustomizationEnablement, type McpServerState, type RootState, type TextRange } from '../../platform/agentHost/common/state/protocol/state.js';
 import { type CustomizationDisabledReason } from '../../platform/agentHost/common/customizationEnablement.js';
 import { ISessionsProvider } from '../services/sessions/common/sessionsProvider.js';
-import { ISessionAgentRef } from '../services/sessions/common/session.js';
+import { IChat, ISession, ISessionAgentRef } from '../services/sessions/common/session.js';
 import type { AgentMergeSessionOverrides, AgentMergeSessionState } from '../../platform/agentHost/common/agentMerge.js';
 
 /**
@@ -340,6 +341,9 @@ export interface IAgentHostSessionsProvider extends ISessionsProvider {
 	 * the chat-reference payload.
 	 */
 	getBackendChatResource(chatResource: URI): URI | undefined;
+
+	/** Resolve authoritative backend identities to current client session and chat facades. */
+	resolveSessionChat(sessionResource: URI, chatResource: URI | undefined, token: CancellationToken): Promise<{ readonly session: ISession; readonly chat: IChat } | undefined>;
 
 }
 

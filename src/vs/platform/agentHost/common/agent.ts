@@ -803,6 +803,12 @@ export interface IAgentChats {
 	/** Abort the in-flight turn for `chat`. */
 	abort(chat: URI, context: AgentChatOperationContext): Promise<void>;
 
+	/** Inject guidance without opening a new turn; true means the provider acknowledged acceptance. */
+	sendSteeringInCurrentTurn?(chat: URI, turnId: string, prompt: string, context: AgentChatOperationContext): Promise<boolean>;
+
+	/** Fail closed when provider content exclusions do not permit sharing the named files. */
+	assertContentAccess?(chat: URI, paths: readonly string[], context: AgentChatOperationContext): Promise<void>;
+
 	/** Return the model currently bound to `chat`, when the provider knows it. */
 	getModel?(chat: URI, context: AgentChatOperationContext): ModelSelection | undefined;
 

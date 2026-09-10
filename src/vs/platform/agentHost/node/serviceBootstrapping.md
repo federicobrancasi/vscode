@@ -118,6 +118,8 @@ Cross-cutting turn behavior now belongs in `IAgentHostChatContributions`; do not
 
 **Do not extend it by default:** a new callback usually means another responsibility should move to a narrower owning service.
 
+Room workers use its narrow session lifecycle seam to create and subscribe to preserved sessions. The room descriptor never reads the seam during construction; turn admission belongs to `RoomTurnAdmissionContribution`, and sends use `IAgentHostTurnService`.
+
 **Exit condition:** move the remaining callback operations to injectable owners, then delete the adapter and binder contract.
 
 ### Post-DI service registrations

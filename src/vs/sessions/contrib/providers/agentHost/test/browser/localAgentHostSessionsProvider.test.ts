@@ -6,7 +6,7 @@
 import assert from 'assert';
 import { renderAsPlaintext } from '../../../../../../base/browser/markdownRenderer.js';
 import { DeferredPromise, raceTimeout, timeout } from '../../../../../../base/common/async.js';
-import { CancellationToken } from '../../../../../../base/common/cancellation.js';
+import { CancellationToken, CancellationTokenSource } from '../../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../../base/common/codicons.js';
 import { Emitter, Event } from '../../../../../../base/common/event.js';
 import { DisposableMap, DisposableStore, ImmortalReference, toDisposable, type IReference } from '../../../../../../base/common/lifecycle.js';
@@ -2483,6 +2483,73 @@ suite('LocalAgentHostSessionsProvider', () => {
 			missingPeer: undefined,
 			notHydrated: undefined,
 		});
+	});
+
+	test('resolveSessionChat preserves authoritative backend session and chat identities', async () => {
+		const provider = createProvider(disposables, agentHost);
+		agentHost.addSession(createSession('room-member', { summary: 'Room Member' }));
+		fireSessionAdded(agentHost, 'room-member', { title: 'Room Member' });
+		const session = provider.getSessions().find(session => session.title.get() === 'Room Member')!;
+		const backendSession = AgentSession.uri('copilotcli', 'room-member');
+		const defaultBackend = buildDefaultChatUri(backendSession);
+		const peerBackend = buildChatUri(backendSession, 'review');
+		agentHost.setSessionState('room-member', 'copilotcli', {
+			provider: 'copilotcli', title: 'Room Member', status: ProtocolSessionStatus.Idle,
+			lifecycle: SessionLifecycle.Ready, activeClients: [], defaultChat: defaultBackend,
+			chats: [
+				{ resource: defaultBackend, title: 'Default', status: ProtocolSessionStatus.Idle, modifiedAt: '2025-01-01T00:00:00.000Z' },
+				{ resource: peerBackend, title: 'Review', status: ProtocolSessionStatus.Idle, modifiedAt: '2025-01-01T00:00:00.000Z' },
+			],
+		});
+		const main = await provider.resolveSessionChat(backendSession, URI.parse(defaultBackend), CancellationToken.None);
+		const peer = await provider.resolveSessionChat(backendSession, URI.parse(peerBackend), CancellationToken.None);
+		assert.strictEqual(main?.session, session);
+		assert.strictEqual(main?.chat, session.mainChat.get());
+		assert.strictEqual(peer?.chat.resource.toString(), session.resource.with({ fragment: 'review' }).toString());
+		assert.strictEqual((await provider.resolveSessionChat(backendSession, undefined, CancellationToken.None))?.chat, session.mainChat.get());
+		assert.strictEqual(await provider.resolveSessionChat(backendSession.with({ scheme: 'another-provider' }), undefined, CancellationToken.None), undefined);
+		assert.strictEqual(await provider.resolveSessionChat(backendSession, URI.parse(buildChatUri(backendSession, 'missing')), CancellationToken.None), undefined);
+	});
+
+	test('resolveSessionChat cancels a pending catalog lookup when its surface closes', async () => {
+		const provider = createProvider(disposables, agentHost);
+		agentHost.addSession(createSession('unhydrated-room-member', { summary: 'Pending Room Member' }));
+		fireSessionAdded(agentHost, 'unhydrated-room-member', { title: 'Pending Room Member' });
+		const cancellation = disposables.add(new CancellationTokenSource());
+		const target = provider.resolveSessionChat(AgentSession.uri('copilotcli', 'unhydrated-room-member'), undefined, cancellation.token);
+		cancellation.cancel();
+		await assert.rejects(target, /Canceled/);
+	});
+
+	test('resolveSessionChat never creates an unknown room member', async () => {
+		const provider = createProvider(disposables, agentHost);
+		const backend = AgentSession.uri('copilotcli', 'reserved-member');
+		const resolved = await provider.resolveSessionChat(backend, undefined, CancellationToken.None);
+		assert.deepStrictEqual({ resolved, sessions: agentHost.createdSessionUris, chats: agentHost.createdChats }, { resolved: undefined, sessions: [], chats: [] });
+	});
+
+	test('resolveSessionChat never replaces an unprepared reserved member session or placeholder chat', async () => {
+		const provider = createProvider(disposables, agentHost);
+		const backend = AgentSession.uri('copilotcli', 'reserved-member');
+		agentHost.addSession(createSession('reserved-member', { summary: 'Reserved member' }));
+		fireSessionAdded(agentHost, 'reserved-member', { title: 'Reserved member' });
+		const defaultChat = buildDefaultChatUri(backend);
+		const state: SessionState = {
+			provider: 'copilotcli', title: 'Reserved member', status: ProtocolSessionStatus.Idle,
+			lifecycle: SessionLifecycle.Creating, activeClients: [], defaultChat, chats: [],
+		};
+		agentHost.setSessionState('reserved-member', 'copilotcli', state);
+		assert.strictEqual(await provider.resolveSessionChat(backend, undefined, CancellationToken.None), undefined);
+		agentHost.setSessionState('reserved-member', 'copilotcli', { ...state, lifecycle: SessionLifecycle.Ready });
+		assert.strictEqual(await provider.resolveSessionChat(backend, undefined, CancellationToken.None), undefined);
+		assert.strictEqual(await provider.resolveSessionChat(backend, URI.parse(defaultChat), CancellationToken.None), undefined);
+		agentHost.setSessionState('reserved-member', 'copilotcli', {
+			...state, lifecycle: SessionLifecycle.Ready,
+			chats: [{ resource: defaultChat, title: 'Prepared member', status: ProtocolSessionStatus.Idle, modifiedAt: '2025-01-01T00:00:00.000Z' }],
+		});
+		assert.ok(await provider.resolveSessionChat(backend, undefined, CancellationToken.None));
+		assert.deepStrictEqual(agentHost.createdSessionUris, []);
+		assert.deepStrictEqual(agentHost.createdChats, []);
 	});
 
 	test('getCustomAgents returns no agents when the session has no SessionState', () => {

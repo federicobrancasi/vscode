@@ -24,6 +24,7 @@ import { buildCopilotSystemNotification } from './copilotSystemNotification.js';
 import { buildChatErrorInfoFromCopilotSdkFields } from './copilotSdkChatError.js';
 import { buildMcpChannel, buildMcpTopLevelCustomizationId } from '../shared/mcpCustomizationController.js';
 import { readSimpleAttachmentDisplayKindFromMimeType } from './copilotAttachmentUtils.js';
+import { roomSteeringContent, roomSteeringEventIds, roomSteeringMetadataKey } from './copilotRoomSteering.js';
 
 function tryStringify(value: unknown): string | undefined {
 	try {
@@ -320,6 +321,15 @@ export async function mapSessionEvents(
 		throw new Error(`Malformed AHP chat URI: ${routingChatUri.toString()}`);
 	}
 	const workingDirectory = options?.workingDirectory;
+	const steeringKeys: Record<string, true> = {};
+	for (const event of events) {
+		if (event.type === 'user.message' && !event.agentId) {
+			for (const id of roomSteeringEventIds(event)) {
+				steeringKeys[roomSteeringMetadataKey(id)] = true;
+			}
+		}
+	}
+	const steeringParents = db && Object.keys(steeringKeys).length ? await db.getMetadataObject(steeringKeys) : {};
 	let currentModel = options?.model;
 	let currentAgent = options?.agent;
 	// First pass: collect tool-arg info and identify edit tool calls so we
@@ -565,6 +575,17 @@ export async function mapSessionEvents(
 						...(attachments?.length ? { attachments } : {}),
 					};
 				} else {
+					const steeringParent = roomSteeringEventIds(e).map(id => steeringParents[roomSteeringMetadataKey(id)]).find(parent => parent !== undefined);
+					if (parentBuilder && steeringParent === parentBuilder.id) {
+						parentBuilder.responseParts.push({
+							kind: ResponsePartKind.Markdown,
+							id: e.id,
+							content: roomSteeringContent(content),
+						});
+						rootRequestActive = true;
+						touch(parentBuilder);
+						break;
+					}
 					// A new top-level user message starts a new parent turn.
 					// Use the SDK envelope id (the same value
 					// `setTurnEventId` records as `event_id`) so the restored

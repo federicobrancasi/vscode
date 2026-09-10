@@ -432,6 +432,8 @@ export interface IChatSession extends IDisposable {
 	readonly progressObs?: IObservable<IChatProgress[]>;
 	readonly isCompleteObs?: IObservable<boolean>;
 	readonly isReadOnly?: IObservable<boolean>;
+	/** Whether the client may enqueue messages or use native steering. Defaults to true. */
+	readonly supportsPendingRequests?: boolean;
 	readonly interruptActiveResponseCallback?: () => Promise<boolean>;
 
 	/**

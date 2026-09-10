@@ -150,6 +150,7 @@ export const SessionsAquariumActiveContext = new RawContextKey<boolean>('session
 
 export const CanGoBackContext = new RawContextKey<boolean>('sessionsCanGoBack', false, localize('sessionsCanGoBack', "Whether there is a previous session in the navigation history"));
 export const CanGoForwardContext = new RawContextKey<boolean>('sessionsCanGoForward', false, localize('sessionsCanGoForward', "Whether there is a next session in the navigation history"));
+export const HasSelectedCollaborationRoomContext = new RawContextKey<boolean>('hasSelectedCollaborationRoom', false, localize('hasSelectedCollaborationRoom', "Whether a collaboration room is selected"));
 
 //#endregion
 

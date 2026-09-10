@@ -50,6 +50,8 @@ import { localize } from '../../../nls.js';
 import { IFileService } from '../../files/common/files.js';
 import { IInstantiationService } from '../../instantiation/common/instantiation.js';
 import { createAgentHostRuntime, type IAgentHostRuntime } from './agentHostBootstrap.js';
+import { AgentHostRoomsChannelName } from '../common/agentHostRooms.js';
+import { IAgentHostRoomsController } from './agentHostRoomsController.js';
 import { BANG_COMMAND_PREFIX } from './agentHostBangCommand.js';
 import { AgentHostClientFileSystemProvider } from '../common/agentHostClientFileSystemProvider.js';
 import { AGENT_CLIENT_SCHEME } from '../common/agentClientUri.js';
@@ -141,6 +143,7 @@ async function startAgentHost(): Promise<void> {
 			providerService: accessor.get(IAgentHostProviderService),
 			stateManager: accessor.get(IAgentHostStateManager),
 			completions: accessor.get(IAgentHostCompletions),
+			rooms: accessor.get(IAgentHostRoomsController),
 		}));
 		const agentConfigurationService = runtimeServices.configurationService;
 		fileService = runtimeServices.fileService;
@@ -150,6 +153,7 @@ async function startAgentHost(): Promise<void> {
 		errorTelemetry.value = new ErrorTelemetry(runtimeServices.telemetryService);
 		const agentSdkDownloader = runtimeServices.agentSdkDownloader;
 		const providerService = runtimeServices.providerService;
+		server.registerChannel(AgentHostRoomsChannelName, ProxyChannel.fromService(runtimeServices.rooms, disposables));
 		sdkDownloadProgress = runtime.sdkDownloadProgress;
 		providerService.registerProvider(instantiationService.createInstance(CopilotAgent));
 		// Claude and Codex providers are gated on two things:

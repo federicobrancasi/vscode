@@ -81,6 +81,7 @@ export namespace ChatContextKeys {
 	 * mutating actions such as Start Over or Restore Checkpoint.
 	 */
 	export const readOnly = new RawContextKey<boolean>('chatIsReadonly', false, { type: 'boolean', description: localize('chatIsReadonly', "True when the chat shown in the widget is read-only (non-interactive).") });
+	export const supportsPendingRequests = new RawContextKey<boolean>('chatSupportsPendingRequests', true, { type: 'boolean', description: localize('chatSupportsPendingRequests', "Whether this chat supports native queued and steering messages.") });
 	/**
 	 * Widget-scoped: true when this chat widget is locked to an Agent Host-backed chat session.
 	 */

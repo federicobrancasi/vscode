@@ -11,6 +11,8 @@ import { AgentSession } from '../../common/agent.js';
 import { getErrorResponsePart, getTurnError, MessageAttachmentKind, MessageKind, ResponsePartKind, ToolCallContributorKind, ToolCallStatus, ToolResultContentType, TurnState, buildChatUri, type ResponsePart, type StringOrMarkdown, type ToolCallResponsePart, type ToolResultContent } from '../../common/state/sessionState.js';
 import { appendSdkToolResultContent, mapSessionEvents as mapSessionEventsWithRouting, type IMapSessionEventsOptions } from '../../node/copilot/mapSessionEvents.js';
 import { toSessionEvents, type ISessionEvent } from './copilotTestEvents.js';
+import { TestSessionDatabase } from '../common/sessionTestHelpers.js';
+import { roomSteeringContent, roomSteeringMetadataKey } from '../../node/copilot/copilotRoomSteering.js';
 
 function mapSessionEvents(session: URI, db: undefined, events: Parameters<typeof mapSessionEventsWithRouting>[2], options: IMapSessionEventsOptions | undefined = undefined) {
 	return mapSessionEventsWithRouting(session, db, events, URI.parse(buildChatUri(session, 'default')), options);
@@ -21,6 +23,28 @@ suite('mapSessionEvents — history replay', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
 
 	const session = AgentSession.uri('copilot', 'test-session');
+
+	test('room steering receipts preserve one turn and identical ordinary text still opens another turn', async () => {
+		const database = new TestSessionDatabase();
+		await database.setMetadata(roomSteeringMetadataKey('guidance-receipt'), 'root-turn');
+		const events = toSessionEvents([
+			{ type: 'user.message', id: 'root-turn', data: { content: 'Investigate the issue', interactionId: 'root-request' } },
+			{ type: 'assistant.message', data: { messageId: 'before', content: 'Initial findings' } },
+			{ type: 'user.message', id: 'guidance-event', data: { content: 'Check accessibility', interactionId: 'guidance-receipt' } },
+			{ type: 'assistant.message', data: { messageId: 'after', content: 'Accessibility findings' } },
+			{ type: 'user.message', id: 'ordinary-turn', data: { content: 'Check accessibility', interactionId: 'ordinary-request' } },
+			{ type: 'assistant.message', data: { messageId: 'ordinary', content: 'A separate response' } },
+		]);
+		const result = await mapSessionEventsWithRouting(session, database, events, URI.parse(buildChatUri(session, 'default')));
+		assert.deepStrictEqual(result.turns.map(turn => ({
+			id: turn.id,
+			text: turn.message.text,
+			content: turn.responseParts.filter(part => part.kind === ResponsePartKind.Markdown).map(part => part.content),
+		})), [
+			{ id: 'root-turn', text: 'Investigate the issue', content: ['Initial findings', roomSteeringContent('Check accessibility'), 'Accessibility findings'] },
+			{ id: 'ordinary-turn', text: 'Check accessibility', content: ['A separate response'] },
+		]);
+	});
 
 	function partKinds(parts: readonly ResponsePart[]): Array<{ kind: ResponsePartKind; content?: StringOrMarkdown }> {
 		return parts.map(p => p.kind === ResponsePartKind.Markdown || p.kind === ResponsePartKind.SystemNotification ? { kind: p.kind, content: p.content } : { kind: p.kind });

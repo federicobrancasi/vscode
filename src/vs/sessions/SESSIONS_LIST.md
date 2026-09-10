@@ -26,6 +26,8 @@ The list consumes sessions from `ISessionsManagementService`. Providers decide w
 
 Automation runs are excluded from the primary Sessions list. Surfaces that need session-row presentation without sectioning use `SessionsFlatList`.
 
+Collaboration rooms are separate from the session catalog. The fixed **Agent Collab** navigation section opens their owning custom view; it does not represent a user-managed group and is excluded from bulk session actions. Individual workers remain ordinary provider-owned sessions. See [COLLABORATION.md](COLLABORATION.md).
+
 ## Placement precedence
 
 A session appears in exactly one primary section. Higher-precedence states win:

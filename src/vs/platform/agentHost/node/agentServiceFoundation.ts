@@ -22,9 +22,18 @@ import { AgentHostStateManager, IAgentHostStateManager } from './agentHostStateM
 import type { IArtifactServerToolAccessor } from './shared/artifactServerTools.js';
 import type { IAgentServiceSessionServerToolAccessor } from './shared/sessionServerTools.js';
 import { hostBuildInfoFromProduct } from '../common/state/sessionState.js';
+import type { IRoomSessionLifecycle } from './agentHostRoomsRuntime.js';
 
 export class AgentServiceCallbackAdapter implements IAgentServiceCallbackBinder {
 	private callbacks: IAgentServiceCallbacks | undefined;
+
+	readonly roomSessionLifecycle: IRoomSessionLifecycle = {
+		createSession: config => this.value.roomSessionLifecycle.createSession(config),
+		listSessions: () => this.value.roomSessionLifecycle.listSessions(),
+		subscribe: (resource, clientId, isActive) => this.value.roomSessionLifecycle.subscribe(resource, clientId, isActive),
+		unsubscribe: (resource, clientId) => this.value.roomSessionLifecycle.unsubscribe(resource, clientId),
+		abortTurn: (chat, turnId) => this.value.roomSessionLifecycle.abortTurn(chat, turnId),
+	};
 
 	readonly sessionServerToolAccessor: IAgentServiceSessionServerToolAccessor = {
 		isActiveAgentTitleGenerationEnabled: () => this.value.sessionServerToolAccessor.isActiveAgentTitleGenerationEnabled(),

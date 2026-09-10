@@ -9,6 +9,7 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
+import { upcastPartial } from '../../../../base/test/common/mock.js';
 import { PluginFormat, type IMcpServerDefinition } from '../../../agentPlugins/common/pluginParsers.js';
 import type { IFileService } from '../../../files/common/files.js';
 import { InstantiationService } from '../../../instantiation/common/instantiationService.js';
@@ -38,6 +39,8 @@ import { CopilotGitHubSessionCredentials } from '../../node/copilot/copilotGitHu
 import { CopilotSessionLauncher, filterClientToolNames, getCopilotAutoTier, getCopilotReasoningEffort, isCopilotReasoningEffort, resolveByokSessionConfig, normalizeToolFilterPatterns, resolveConfiguredReasoningEffortOverride, resolveCopilotAutoTier, resolveCopilotReasoningEffort, toSdkToolFilterPatterns, type CopilotSessionLaunchPlan, type ICopilotSessionRuntime } from '../../node/copilot/copilotSessionLauncher.js';
 import { buildDefaultChatUri, SessionStatus } from '../../common/state/sessionState.js';
 import type { IAgentHostSessionOpenTelemetry } from '../../node/agentHostSessionOpenTelemetry.js';
+import { IAgentHostRoomsController } from '../../node/agentHostRoomsController.js';
+import { createNoopRoomsController } from './roomTestUtils.js';
 
 const testRuntime: ICopilotSessionRuntime = {
 	chatUri: URI.parse(buildDefaultChatUri('copilot:/sess-1')),
@@ -101,7 +104,7 @@ const noopSessionOpenTelemetry: IAgentHostSessionOpenTelemetry = {
 	sdkResumeFallbackCreated: () => { },
 };
 
-function createTestLauncher(managedSettingsPermissions?: IAgentHostManagedSettingsPermissions, rootValues: Partial<Record<CopilotCliConfigKey, unknown>> = {}, logService: ILogService = new NullLogService(), sessionOpenTelemetry: IAgentHostSessionOpenTelemetry = noopSessionOpenTelemetry, configuration?: IAgentConfigurationService): CopilotSessionLauncher {
+function createTestLauncher(managedSettingsPermissions?: IAgentHostManagedSettingsPermissions, rootValues: Partial<Record<CopilotCliConfigKey, unknown>> = {}, logService: ILogService = new NullLogService(), sessionOpenTelemetry: IAgentHostSessionOpenTelemetry = noopSessionOpenTelemetry, configuration?: IAgentConfigurationService, rooms: IAgentHostRoomsController = createNoopRoomsController()): CopilotSessionLauncher {
 	const configurationService = configuration ?? {
 		getRootValue: (_schema: unknown, key: CopilotCliConfigKey) => rootValues[key],
 		getSessionConfigValues: () => undefined,
@@ -123,8 +126,86 @@ function createTestLauncher(managedSettingsPermissions?: IAgentHostManagedSettin
 			withTraceContext: <T>(_context: undefined, fn: () => T): T => fn(),
 		} as unknown as IAgentHostOTelService,
 		sessionOpenTelemetry,
+		rooms,
 	);
 }
+
+suite('CopilotSessionLauncher room tools', () => {
+	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('create and resume bind the owning member, preserve approvals, and exclude nested delegation', async () => {
+		const checked: { sessionId: string; tool: string }[] = [];
+		const rooms: IAgentHostRoomsController = {
+			...createNoopRoomsController(),
+			isRoomSessionUri: session => session === testRuntime.configurationResource.toString(),
+			beforeTool: (sessionId, tool) => {
+				checked.push({ sessionId, tool });
+				throw new Error('Nested delegation is disabled');
+			},
+		};
+		const configurations: ResumeSessionConfig[] = [];
+		const sdkSession = upcastPartial<CopilotSession>({
+			sessionId: 'sdk-backing',
+			on: () => () => { },
+			disconnect: async () => { },
+			rpc: upcastPartial<CopilotSession['rpc']>({
+				options: { update: async () => ({ success: true }) },
+			}),
+		});
+		const client = upcastPartial<CopilotClient>({
+			createSession: async config => {
+				if (!config) {
+					throw new Error('Expected create config');
+				}
+				configurations.push(config);
+				reportManagedSettings(config);
+				return sdkSession;
+			},
+			resumeSession: async (_sessionId, config) => {
+				if (!config) {
+					throw new Error('Expected resume config');
+				}
+				configurations.push(config);
+				reportManagedSettings(config);
+				return sdkSession;
+			},
+		});
+		const launcher = createTestLauncher(undefined, {}, new NullLogService(), noopSessionOpenTelemetry, undefined, rooms);
+		for (const kind of ['create', 'resume'] as const) {
+			const base = {
+				client, sessionId: 'sdk-backing', workingDirectory: testWorkingDirectory,
+				resolvedAgentName: undefined, snapshot: { tools: [], plugins: [], mcpServers: {} },
+				activeClientToolSet: new ActiveClientToolSet(), shellManager: undefined,
+				githubCredentials: CopilotGitHubSessionCredentials.fromToken(undefined),
+			};
+			const plan: CopilotSessionLaunchPlan = kind === 'create' ? { ...base, kind, model: undefined } : { ...base, kind, fallback: { model: undefined } };
+			store.add(await launcher.launch(plan, testRuntime));
+		}
+		for (const config of configurations) {
+			const result = await config.hooks?.onPreToolUse?.({
+				sessionId: 'forged-sdk-session', timestamp: new Date(0), workingDirectory: testWorkingDirectory.fsPath,
+				toolName: 'task', toolArgs: {},
+			}, { sessionId: 'forged-sdk-session' });
+			assert.strictEqual(result?.permissionDecision, 'deny');
+			await assert.rejects(async () => config.onPermissionRequest?.({ kind: 'read', path: '/repository/file.ts', intention: 'Inspect the file' }, { sessionId: 'sdk-backing' }), /Unexpected permission request/);
+		}
+		assert.deepStrictEqual({
+			checked,
+			configurations: configurations.map(config => ({
+				tools: config.tools?.map(tool => tool.name), customAgents: config.customAgents,
+				excludesTask: Array.isArray(config.excludedTools) && config.excludedTools.includes('task'),
+				excludesFactory: Array.isArray(config.excludedTools) && config.excludedTools.includes('run_factory'),
+				skipPermission: config.tools?.some(tool => tool.skipPermission === true),
+			})),
+		}, {
+			checked: [{ sessionId: 'sess-1', tool: 'task' }, { sessionId: 'sess-1', tool: 'task' }],
+			configurations: ['create', 'resume'].map(() => ({
+				tools: ['room_read', 'room_read_artifact', 'room_post', 'room_share_patch'], customAgents: [],
+				excludesTask: true, excludesFactory: true, skipPermission: false,
+			})),
+		});
+	});
+});
 
 suite('CopilotSessionLauncher sandbox policy', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -449,6 +530,7 @@ suite('CopilotSessionLauncher BYOK proxy lifecycle', () => {
 	function createLauncher(store: DisposableStore, proxy: IByokLmProxyService, registry: IByokLmBridgeRegistry, byokModelsEnabled = true): CopilotSessionLauncher {
 		const services = new ServiceCollection();
 		services.set(ILogService, new NullLogService());
+		services.set(IAgentHostRoomsController, createNoopRoomsController());
 		services.set(IByokLmProxyService, proxy);
 		services.set(IByokLmBridgeRegistry, registry);
 		services.set(IAgentConfigurationService, {
@@ -1434,6 +1516,7 @@ suite('CopilotSessionLauncher resume config', () => {
 	function createLauncher(store: DisposableStore, values: SchemaValues<typeof copilotCliConfigSchema.definition>): CopilotSessionLauncher {
 		const services = new ServiceCollection();
 		services.set(ILogService, new NullLogService());
+		services.set(IAgentHostRoomsController, createNoopRoomsController());
 		services.set(IByokLmBridgeRegistry, new ByokLmBridgeRegistry());
 		services.set(IAgentHostManagedSettingsService, store.add(new AgentHostManagedSettingsService()));
 		services.set(IAgentConfigurationService, {
@@ -1465,7 +1548,7 @@ suite('CopilotSessionLauncher resume config', () => {
 			githubCredentials: CopilotGitHubSessionCredentials.fromToken('token'),
 			fallback: { model },
 		};
-		const runtime = { createClientSdkTools, createServerSdkTools: () => [] };
+		const runtime = { ...testRuntime, createClientSdkTools };
 		return (launcher as unknown as { _buildSessionConfig(plan: unknown, runtime: unknown): Promise<{ model?: string; reasoningEffort?: string; contextTier?: string; availableTools?: string[]; excludedTools?: string[]; modelCapabilities?: Record<string, unknown>; toolSearch?: { enabled: boolean } }> })._buildSessionConfig(plan, runtime);
 	}
 

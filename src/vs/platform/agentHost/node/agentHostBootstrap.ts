@@ -41,6 +41,7 @@ import { AgentHostLocalTurns, IAgentHostLocalTurns } from './agentHostLocalTurns
 import { AgentHostLocalCommands, IAgentHostLocalCommands } from './localCommands/localChatCommand.js';
 import { IAgentHostOctoKitService } from './shared/agentHostOctoKitService.js';
 import { ICopilotApiService } from './shared/copilotApiService.js';
+import { IAgentHostRoomsController } from './agentHostRoomsController.js';
 
 export interface ICreateAgentHostRuntimeOptions {
 	readonly environmentService: INativeEnvironmentService;
@@ -155,6 +156,8 @@ export async function createAgentHostRuntime(options: ICreateAgentHostRuntimeOpt
 			storageResource: agentServiceOptions.storageResource,
 			fetchFn,
 			gitHubServiceOptions: foundation.gitHubServiceOptions,
+			roomSessionLifecycle: foundation.callbackAdapter.roomSessionLifecycle,
+			roomsStorage: options.byok.kind === 'renderer' ? joinPath(URI.file(environmentService.userDataPath), 'agent-host-rooms') : undefined,
 		});
 		registerAgentHostHostServices(services, {
 			userDataPath: URI.file(environmentService.userDataPath),
@@ -194,6 +197,8 @@ export async function createAgentHostRuntime(options: ICreateAgentHostRuntimeOpt
 		));
 		agentService = agentServiceComposition.agentService;
 		services.set(IAgentService, agentService);
+		// Recover room membership before transports or providers can accept worker requests.
+		await instantiationService.invokeFunction(accessor => accessor.get(IAgentHostRoomsController).getCapabilities());
 		// Freeze the migrate-legacy gate at host startup, before a setting toggled
 		// without a full restart can be live-propagated into the shared host.
 		agentService.primeMigrateLegacyGate();

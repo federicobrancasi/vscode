@@ -2917,6 +2917,7 @@ suite('ChatService', () => {
 			readonly progressObs?: ISettableObservable<IChatProgress[]>;
 			readonly isCompleteObs?: ISettableObservable<boolean>;
 			readonly isReadOnly?: ISettableObservable<boolean>;
+			readonly supportsPendingRequests?: boolean;
 			readonly interruptActiveResponseCallback?: () => Promise<boolean>;
 			readonly onDidStartServerRequest?: Event<IChatSessionServerRequest>;
 			readonly history?: readonly IChatSessionHistoryItem[];
@@ -2937,6 +2938,7 @@ suite('ChatService', () => {
 				progressObs: opts.progressObs,
 				isCompleteObs: opts.isCompleteObs,
 				isReadOnly: opts.isReadOnly,
+				supportsPendingRequests: opts.supportsPendingRequests,
 				interruptActiveResponseCallback: opts.interruptActiveResponseCallback,
 				onDidStartServerRequest: opts.onDidStartServerRequest,
 				dispose: () => { },
@@ -3026,6 +3028,39 @@ suite('ChatService', () => {
 			assert.deepStrictEqual({ states, sendResult }, {
 				states: [true, false],
 				sendResult: { kind: 'rejected', reason: 'Session is read-only' },
+			});
+		});
+
+		test('a contributed session can reject native queues before adding pending requests without becoming read-only', async () => {
+			const { resource } = setupRemoteProvider({ supportsPendingRequests: false });
+			const testService = createChatService();
+			const ref = await testService.acquireOrLoadSession(resource, ChatAgentLocation.Chat, CancellationToken.None);
+			assert.ok(ref);
+			testDisposables.add(ref);
+
+			const results: ChatSendResult[] = [];
+			for (const queue of [ChatRequestQueueKind.Queued, ChatRequestQueueKind.Steering]) {
+				results.push(await testService.sendRequest(resource, 'Use the room instead', { queue, pauseQueue: true }));
+			}
+			const normalSend = await testService.sendRequest(resource, 'An idle follow-up');
+			if (normalSend.kind === 'sent') {
+				await normalSend.data.responseCompletePromise;
+			}
+			assert.deepStrictEqual({
+				supported: ref.object.supportsPendingRequests,
+				readOnly: ref.object.isReadOnly.get(),
+				results,
+				pending: ref.object.getPendingRequests().length,
+				normalSend: normalSend.kind,
+			}, {
+				supported: false,
+				readOnly: false,
+				results: [
+					{ kind: 'rejected', reason: 'This chat does not support queued or steering messages.', newSessionResource: undefined },
+					{ kind: 'rejected', reason: 'This chat does not support queued or steering messages.', newSessionResource: undefined },
+				],
+				pending: 0,
+				normalSend: 'sent',
 			});
 		});
 

@@ -50,7 +50,7 @@ suite('Queue/Steer keybinding resolution', () => {
 		return new KeybindingResolver(items, [], () => { });
 	}
 
-	function lookupForConfig(defaultAction: 'steer' | 'queue') {
+	function lookupForConfig(defaultAction: 'steer' | 'queue', supportsPendingRequests = true) {
 		const config = new TestConfigurationService({ [ChatConfiguration.RequestQueueingDefaultAction]: defaultAction });
 		const ctxService = new ContextKeyService(config);
 		// Simulate the chat input being focused with a request in progress, like the picker does.
@@ -58,6 +58,7 @@ suite('Queue/Steer keybinding resolution', () => {
 			[ChatContextKeys.inputHasText.key, true],
 			[ChatContextKeys.inChatInput.key, true],
 			[ChatContextKeys.requestInProgress.key, true],
+			[ChatContextKeys.supportsPendingRequests.key, supportsPendingRequests],
 		]);
 		const resolver = buildResolverForCommands([ChatQueueMessageAction.ID, ChatSteerWithMessageAction.ID]);
 		return {
@@ -84,6 +85,17 @@ suite('Queue/Steer keybinding resolution', () => {
 			assert.deepStrictEqual(result, { queue: 'Enter', steer: 'alt+Enter' });
 		} finally {
 			dispose();
+		}
+	});
+
+	test('a session without native pending requests disables both queue and steering shortcuts', () => {
+		for (const defaultAction of ['queue', 'steer'] as const) {
+			const { result, dispose } = lookupForConfig(defaultAction, false);
+			try {
+				assert.deepStrictEqual(result, { queue: null, steer: null });
+			} finally {
+				dispose();
+			}
 		}
 	});
 });

@@ -18,7 +18,7 @@ import { MenuWorkbenchToolBar } from '../../../../../platform/actions/browser/to
 import { IMenu, IMenuService, MenuId, MenuItemAction } from '../../../../../platform/actions/common/actions.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
-import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
+import { IContextKey, IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
@@ -29,6 +29,8 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../../pla
 import { IAutomationRun } from '../../../../../workbench/contrib/chat/common/automations/automation.js';
 import { IAutomationService } from '../../../../../workbench/contrib/chat/common/automations/automationService.js';
 import { ChatAutomationsEnabledContext } from '../../../../../workbench/contrib/chat/common/automations/automationsEnabled.js';
+import { ChatContextKeys } from '../../../../../workbench/contrib/chat/common/actions/chatContextKeys.js';
+import { OpenCollaborationRoomCommandId } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { IPreferencesService, IOpenSettingsOptions } from '../../../../../workbench/services/preferences/common/preferences.js';
 import { AgentMergeSessionState } from '../../../../../platform/agentHost/common/agentMerge.js';
 import { getSessionChatDragData, isSessionChatDrag, SessionsDataTransfers } from '../../../../browser/dnd.js';
@@ -43,7 +45,8 @@ import { ChatInteractivity, ChatOriginKind, IChat, ISession, SessionStatus } fro
 import { IActiveSession, ISessionsManagementService } from '../../../../services/sessions/common/sessionsManagement.js';
 import { ISessionsProvider } from '../../../../services/sessions/common/sessionsProvider.js';
 import { ISessionsProvidersService } from '../../../../services/sessions/browser/sessionsProvidersService.js';
-import { computeReorderSortChanges, groupByDate, groupByWorkspace, groupSessionsForList, ISessionSection, limitSessionsForList, SessionItemToolbarMenuId, SessionSectionRenderer, SessionsFlatList, SessionsList, SessionsListFocusedChatItemContext, sortSessions, SessionsGrouping, SessionsSorting } from '../../browser/views/sessionsList.js';
+import { COLLABORATION_CUSTOM_VIEW_ID, CollaborationEnabledSettingId, CollaborationSupportedContext } from '../../../../services/collaboration/common/collaboration.js';
+import { computeReorderSortChanges, groupByDate, groupByWorkspace, groupSessionsForList, ISessionSection, limitSessionsForList, SessionItemToolbarMenuId, SessionSectionRenderer, SessionsFlatList, SessionsList, SessionsListFocusedChatItemContext, sortSessions, SessionsGrouping, SessionsSorting, SESSIONS_LIST_SHOW_EMPTY_DEFAULT_GROUPS_SETTING } from '../../browser/views/sessionsList.js';
 import { AgentSessionApprovalKind, AgentSessionApprovalModel, IAgentSessionApprovalInfo } from '../../../../../workbench/contrib/chat/browser/agentSessions/agentSessionApprovalModel.js';
 import { getSessionSummaryHoverData } from '../../browser/sessionHoverContent.js';
 import { createListHarness, createTestSession, ISortChangeRecord } from './sessionsListTestUtils.js';
@@ -104,6 +107,88 @@ function createSession(id: string, opts: {
 suite('Sessions - SessionsList', () => {
 
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
+
+	suite('Agent Collab sidebar', () => {
+		function createSidebar(options: { enabled?: boolean; chatEnabled?: boolean; supported?: boolean; automations?: boolean } = {}) {
+			const activeCustomView = observableValue<ICustomViewDescriptor | undefined>(disposables, undefined);
+			let supported!: IContextKey<boolean>;
+			let chatEnabled!: IContextKey<boolean>;
+			const pinned = createTestSession('Pinned session', { resourceId: 'sidebar-pinned' }).session;
+			const quick = createTestSession('Quick chat', { resourceId: 'sidebar-quick', isQuickChat: true }).session;
+			const harness = createListHarness(disposables, [pinned, quick], instantiationService => {
+				instantiationService.get(ISessionsListModelService).isSessionPinned = session => session === pinned;
+				const configuration = instantiationService.get(IConfigurationService) as TestConfigurationService;
+				void configuration.setUserConfiguration(CollaborationEnabledSettingId, options.enabled ?? true);
+				void configuration.setUserConfiguration(SESSIONS_LIST_SHOW_EMPTY_DEFAULT_GROUPS_SETTING, true);
+				const context = disposables.add(new ContextKeyService(configuration));
+				instantiationService.stub(IContextKeyService, context);
+				supported = CollaborationSupportedContext.bindTo(context);
+				supported.set(options.supported ?? true);
+				chatEnabled = ChatContextKeys.enabled.bindTo(context);
+				chatEnabled.set(options.chatEnabled ?? true);
+				ChatAutomationsEnabledContext.bindTo(context).set(options.automations ?? false);
+				instantiationService.stub(IAutomationService, new class extends mock<IAutomationService>() {
+					override readonly automations = constObservable([]);
+					override readonly runs = constObservable([]);
+					override readonly catalogueState = constObservable('ready' as const);
+				});
+				instantiationService.stub(ICustomViewService, new class extends mock<ICustomViewService>() {
+					override readonly activeCustomView = activeCustomView;
+				});
+			});
+			const container = harness.createContainer();
+			const list = harness.store.add(harness.instantiationService.createInstance(SessionsList, container, {
+				grouping: () => SessionsGrouping.Date,
+				sorting: () => SessionsSorting.Created,
+				onSessionOpen: () => { },
+			}));
+			list.layout(400, 400);
+			return { harness, container, list, supported, chatEnabled, activeCustomView };
+		}
+
+		test('renders a fixed leaf alongside Automations and Pinned without room or worker rows', () => {
+			const { container, activeCustomView, harness } = createSidebar({ automations: true });
+			const labels = [...container.querySelectorAll('.session-section-label')].map(label => label.textContent);
+			assert.deepStrictEqual(labels.slice(0, 4), ['Automations', 'Agent Collab', 'Pinned', 'Chats']);
+			const row = container.querySelector<HTMLElement>('.monaco-list-row[aria-label^="Agent Collab"]')!;
+			assert.ok(row);
+			assert.strictEqual(row.getAttribute('aria-level'), '1');
+			assert.strictEqual(row.getAttribute('aria-expanded'), null);
+			assert.strictEqual(row.querySelector('.session-section-count')?.textContent, '');
+			assert.deepStrictEqual(harness.managementService.sessions.map(session => session.sessionId), ['sidebar-pinned', 'sidebar-quick']);
+			activeCustomView.set(upcastPartial<ICustomViewDescriptor>({ id: COLLABORATION_CUSTOM_VIEW_ID }), undefined);
+			assert.ok(row.querySelector('.session-section.active'));
+			assert.strictEqual(row.getAttribute('aria-label'), 'Agent Collab, current view, create or open a collaboration room');
+			activeCustomView.set(undefined, undefined);
+			assert.strictEqual(row.querySelector('.session-section.active'), null);
+		});
+
+		test('opens the collaboration destination with Enter and mouse activation', () => {
+			const { container, list, harness } = createSidebar();
+			list.focus();
+			container.querySelector('.monaco-list')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+			const row = container.querySelector<HTMLElement>('.monaco-list-row[aria-label^="Agent Collab"]')!;
+			row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+			row.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0, detail: 1 }));
+			assert.deepStrictEqual(harness.commandService.calls.map(call => call.commandId), [OpenCollaborationRoomCommandId, OpenCollaborationRoomCommandId]);
+			assert.deepStrictEqual(harness.managementService.readSessions, []);
+		});
+
+		test('reacts to capability and chat enablement and respects the opt-in', () => {
+			const { container, supported, chatEnabled } = createSidebar({ supported: false });
+			const row = () => container.querySelector('.monaco-list-row[aria-label^="Agent Collab"]');
+			assert.strictEqual(row(), null);
+			supported.set(true);
+			assert.ok(row());
+			chatEnabled.set(false);
+			assert.strictEqual(row(), null);
+			chatEnabled.set(true);
+			assert.ok(row());
+			supported.set(false);
+			assert.strictEqual(row(), null);
+			assert.strictEqual(createSidebar({ enabled: false }).container.querySelector('.monaco-list-row[aria-label^="Agent Collab"]'), null);
+		});
+	});
 
 	suite('SessionSectionRenderer', () => {
 

@@ -30,6 +30,7 @@ import { IAgentHostStateManager } from '../../node/agentHostStateManager.js';
 import { NullByokLmBridgeRegistry, IByokLmBridgeRegistry } from '../../node/byokLmBridgeRegistry.js';
 import { registerAgentHostCoreServices, registerAgentHostHostServices } from '../../node/agentHostServices.js';
 import { IAgentHostWorktreeIsolation, NullAgentHostWorktreeIsolation } from '../../node/shared/worktreeIsolation.js';
+import { AgentServiceCallbackAdapter } from '../../node/agentServiceFoundation.js';
 
 const ITestService = createDecorator<ITestService>('agentHostTestService');
 
@@ -86,6 +87,7 @@ class RecordingServiceCollection extends StrictServiceCollection {
 function registerCoreServices(services: ServiceCollection): void {
 	registerAgentHostCoreServices(services, {
 		storageResource: URI.file('/storage.json'),
+		roomSessionLifecycle: new AgentServiceCallbackAdapter().roomSessionLifecycle,
 		fetchFn: globalThis.fetch,
 		gitHubServiceOptions: {
 			endpoint: {

@@ -71,7 +71,7 @@ export class ChatQueueMessageAction extends Action2 {
 			f1: false,
 			category: CHAT_CATEGORY,
 
-			precondition: ChatContextKeys.inputHasText,
+			precondition: ContextKeyExpr.and(ChatContextKeys.inputHasText, ChatContextKeys.supportsPendingRequests.notEqualsTo(false)),
 			keybinding: [{
 				when: ContextKeyExpr.and(
 					ChatContextKeys.inChatInput,
@@ -124,7 +124,7 @@ export class ChatSteerWithMessageAction extends Action2 {
 			icon: Codicon.newLine,
 			f1: false,
 			category: CHAT_CATEGORY,
-			precondition: ChatContextKeys.inputHasText,
+			precondition: ContextKeyExpr.and(ChatContextKeys.inputHasText, ChatContextKeys.supportsPendingRequests.notEqualsTo(false)),
 			keybinding: [{
 				when: ContextKeyExpr.and(
 					ChatContextKeys.inChatInput,

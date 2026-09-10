@@ -599,8 +599,8 @@ export class ChatService extends Disposable implements IChatService {
 	}
 
 	private _startSession(props: IStartSessionProps): ChatModel {
-		const { initialData, location, sessionResource, canUseTools, transferEditingSession, disableBackgroundKeepAlive, inputState, isReadOnly, sessionTypeSelectionReason } = props;
-		const model = this.instantiationService.createInstance(ChatModel, initialData, { initialLocation: location, canUseTools, resource: sessionResource, disableBackgroundKeepAlive, inputState, isReadOnly, sessionTypeSelectionReason });
+		const { initialData, location, sessionResource, canUseTools, transferEditingSession, disableBackgroundKeepAlive, inputState, isReadOnly, supportsPendingRequests, sessionTypeSelectionReason } = props;
+		const model = this.instantiationService.createInstance(ChatModel, initialData, { initialLocation: location, canUseTools, resource: sessionResource, disableBackgroundKeepAlive, inputState, isReadOnly, supportsPendingRequests, sessionTypeSelectionReason });
 		if (location === ChatAgentLocation.Chat) {
 			model.startEditingSession(true, transferEditingSession);
 		}
@@ -839,6 +839,7 @@ export class ChatService extends Disposable implements IChatService {
 			transferEditingSession: providedSession.transferredState?.editingSession,
 			inputState,
 			isReadOnly: providedSession.isReadOnly,
+			supportsPendingRequests: providedSession.supportsPendingRequests,
 			sessionTypeSelectionReason,
 		}, debugOwner ?? 'ChatService#loadRemoteSession');
 
@@ -1282,6 +1283,9 @@ export class ChatService extends Disposable implements IChatService {
 		const hasPendingRequest = this._pendingRequests.has(sessionResource);
 
 		if (options?.queue) {
+			if (!model.supportsPendingRequests) {
+				return { kind: 'rejected', reason: localize('chat.pendingRequestsUnsupported', "This chat does not support queued or steering messages."), newSessionResource };
+			}
 			const queued = this.queuePendingRequest(model, sessionResource, request, options);
 			if (!options.pauseQueue) {
 				this.processPendingRequests(sessionResource);
@@ -2048,7 +2052,7 @@ export class ChatService extends Disposable implements IChatService {
 		// Agent host sessions delegate queue management to the server.
 		// The server dispatches ChatTurnStarted with queuedMessageId when
 		// it consumes a queued message, so the client should not dequeue eagerly.
-		if (this._isServerManagedQueue(model.sessionResource)) {
+		if (!model.supportsPendingRequests || this._isServerManagedQueue(model.sessionResource)) {
 			return;
 		}
 

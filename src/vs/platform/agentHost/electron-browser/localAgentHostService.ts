@@ -68,6 +68,7 @@ import type { FetchAutomationRunsParams, FetchAutomationRunsResult, ListAutomati
 import type { CreateResourceWatchParams, CreateResourceWatchResult, ResourceCopyParams, ResourceCopyResult, ResourceDeleteParams, ResourceDeleteResult, ResourceListResult, ResourceMkdirParams, ResourceMkdirResult, ResourceMoveParams, ResourceMoveResult, ResourceReadResult, ResourceResolveParams, ResourceResolveResult, ResourceWriteParams, ResourceWriteResult } from '../common/state/sessionProtocol.js';
 import type { ActionEnvelope, ChatAction, ClientAnnotationsAction, ClientAutomationAction, ClientAutomationRunAction, ClientChangesetAction, INotification, IRootConfigChangedAction, SessionAction, TerminalAction } from '../common/state/sessionActions.js';
 import type { ComponentToState, RootState, StateComponents } from '../common/state/sessionState.js';
+import { AgentHostRoomsChannelName, IAgentHostRoom, IAgentHostRoomsService } from '../common/agentHostRooms.js';
 
 const LOG_PREFIX = '[AgentHost:renderer]';
 
@@ -149,6 +150,24 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 
 	private readonly _clientStore = this._register(new MutableDisposable<DisposableStore>());
 	private readonly _managementConnection = this._register(new LocalAgentHostManagementConnection());
+	private readonly _onDidChangeRoom = this._register(new Emitter<IAgentHostRoom>());
+	readonly rooms: IAgentHostRoomsService = {
+		_serviceBrand: undefined,
+		onDidChangeRoom: this._onDidChangeRoom.event,
+		getCapabilities: () => this._roomsProxy().getCapabilities(),
+		listRooms: () => this._roomsProxy().listRooms(),
+		getRoom: roomId => this._roomsProxy().getRoom(roomId),
+		createRoom: options => this._roomsProxy().createRoom(options),
+		getMessages: (roomId, query) => this._roomsProxy().getMessages(roomId, query),
+		postMessage: (roomId, message) => this._roomsProxy().postMessage(roomId, message),
+		retryMessage: (roomId, messageId) => this._roomsProxy().retryMessage(roomId, messageId),
+		startRoom: (roomId, limits) => this._roomsProxy().startRoom(roomId, limits),
+		pauseRoom: roomId => this._roomsProxy().pauseRoom(roomId),
+		stopRoom: roomId => this._roomsProxy().stopRoom(roomId),
+		stopMember: (roomId, memberId) => this._roomsProxy().stopMember(roomId, memberId),
+		retryMember: (roomId, memberId) => this._roomsProxy().retryMember(roomId, memberId),
+		getArtifact: (roomId, artifactId) => this._roomsProxy().getArtifact(roomId, artifactId),
+	};
 	private readonly _ahpLogger: AhpJsonlLogger | undefined;
 	private _protocolClient: AgentHostProtocolClient | undefined;
 	private _connectStarted = false;
@@ -279,6 +298,8 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 		const store = new DisposableStore();
 		try {
 			const client = store.add(new MessagePortClient(port, this.clientId));
+			const rooms = ProxyChannel.toService<IAgentHostRoomsService>(client.getChannel(AgentHostRoomsChannelName));
+			store.add(rooms.onDidChangeRoom(room => this._onDidChangeRoom.fire(room)));
 			registerAgentHostClientChannels(
 				client,
 				this._instantiationService,
@@ -302,6 +323,14 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 		}
 		if (state === AgentHostClientState.Connected) {
 			this._managementConnection.connected();
+			const generation = this._clientStore.value;
+			void this.rooms.listRooms().then(rooms => {
+				if (generation === this._clientStore.value && !this._store.isDisposed) {
+					for (const room of rooms) {
+						this._onDidChangeRoom.fire(room);
+					}
+				}
+			}, error => this._logService.warn(`${LOG_PREFIX} Could not refresh collaboration rooms`, error));
 			this._startupTelemetry?.protocolConnected();
 			if (!this._didConnectInitially) {
 				this._didConnectInitially = true;
@@ -328,6 +357,12 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 			throw new Error('Local agent host is not connected.');
 		}
 		return this._protocolClient;
+	}
+
+	private _roomsProxy(): IAgentHostRoomsService {
+		return ProxyChannel.toService<IAgentHostRoomsService>(
+			getDelayedChannel(this._managementConnection.client().then(client => client.getChannel(AgentHostRoomsChannelName))),
+		);
 	}
 
 	setAuthenticationPending(pending: boolean): void {

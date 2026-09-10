@@ -55,6 +55,7 @@ import { ICopilotConfigSlashCommandState } from '../../common/copilotConfigSlash
 import { getCopilotHomePath } from '../../common/copilotHome.js';
 import { ISessionDataService, SESSION_DB_FILENAME } from '../../common/sessionDataService.js';
 import { IAgentHostProxyResolver } from '../agentHostProxyResolver.js';
+import { IAgentHostRoomsController } from '../agentHostRoomsController.js';
 import { MODEL_REFRESH_BASE_DELAY_MS, MODEL_REFRESH_MAX_ATTEMPTS, MODEL_REFRESH_MAX_DELAY_MS, modelRefreshBackoff } from '../shared/modelRefreshRetry.js';
 import type { ResolveSessionConfigResult, SessionConfigCompletionsResult } from '../../common/state/protocol/commands.js';
 import type { ErrorInfo } from '../../common/state/protocol/common/state.js';
@@ -962,6 +963,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 		@IAgentHostProxyResolver private readonly _proxyResolver: IAgentHostProxyResolver,
 		@IFileService private readonly _fileService: IFileService,
 		@IAgentHostWorktreeIsolation worktree: IAgentHostWorktreeIsolation,
+		@IAgentHostRoomsController private readonly _rooms: IAgentHostRoomsController,
 	) {
 		super();
 		this._register(this._githubCredentials.onDidRequestRefresh(() => this._handleCopilotSessionAuthRequired()));
@@ -3231,6 +3233,21 @@ export class CopilotAgent extends Disposable implements IAgent {
 		abort: (chatUri: URI, context: URI | IAgentChatContext): Promise<void> => {
 			return this._abortSession(chatUri, context);
 		},
+		sendSteeringInCurrentTurn: async (chat, turnId, prompt, context) => {
+			const current = this._resolveChatContext(chat, context);
+			if (this._isShuttingDown || !this._rooms.isRoomSessionUri(current.configurationResource.toString())
+				|| !this._rooms.isAdmittedTurn(current.configurationResource.toString(), chat.toString(), turnId)) {
+				return false;
+			}
+			return await current.target?.sendSteeringInCurrentTurn(turnId, prompt) ?? false;
+		},
+		assertContentAccess: async (chat, paths, context) => {
+			const target = this._resolveChatContext(chat, context).target;
+			if (!target) {
+				throw new Error(localize('rooms.noActiveContentChecker', "The room member has no active content exclusion checker."));
+			}
+			await target.assertContentAccess(paths);
+		},
 		getModel: (chatUri: URI): ModelSelection | undefined => this._chatBackings.get(chatUri.toString())?.model,
 		changeModel: (chatUri: URI, model: ModelSelection, context: URI | IAgentChatContext): Promise<void> => {
 			return this._changeModel(chatUri, model, context);
@@ -4197,6 +4214,16 @@ export class CopilotAgent extends Disposable implements IAgent {
 			if (!entry) {
 				throw new Error(`[Copilot] sendMessage for unknown chat: ${chat.toString()}`);
 			}
+			if (this._rooms.isRoomSessionUri(current.configurationResource.toString())) {
+				if (this._pendingChatAborts.delete(current.sequencerKey)) {
+					entry.discardActiveTurn();
+					return;
+				}
+				if (!turnId) {
+					throw new Error(localize('rooms.missingAdmittedTurn', "A collaboration room turn requires a durable admission."));
+				}
+				this._rooms.beforeTool(AgentSession.id(current.configurationResource), 'room_read', turnId);
+			}
 
 			// Reset per-turn streaming state on the session so that the
 			// next text/reasoning chunk (and any host-emitted announcement)
@@ -4245,6 +4272,9 @@ export class CopilotAgent extends Disposable implements IAgent {
 	 * the SDK's current mode is left untouched.
 	 */
 	private _resolveSdkMode(session: URI): CopilotSdkMode | undefined {
+		if (this._rooms.isRoomSessionUri(session.toString())) {
+			return 'interactive';
+		}
 		const sessionKey = session.toString();
 		const mode = this._configurationService.getEffectiveValue(sessionKey, platformSessionSchema, SessionConfigKey.Mode);
 		switch (mode) {
@@ -4272,7 +4302,14 @@ export class CopilotAgent extends Disposable implements IAgent {
 		};
 	}
 
-	setPendingMessages(chat: URI, steeringMessage: PendingMessage | undefined, _queuedMessages: readonly PendingMessage[]): void {
+	setPendingMessages(chat: URI, steeringMessage: PendingMessage | undefined, queuedMessages: readonly PendingMessage[]): void {
+		const scope = this._chatScopes.get(chat.toString());
+		if (scope && this._rooms.isRoomSessionUri(scope.toString())) {
+			if (steeringMessage || queuedMessages.length) {
+				this._logService.warn(`[Copilot] Native pending messages cannot bypass the room journal: ${chat.toString()}`);
+			}
+			return;
+		}
 		const backing = this._chatBackings.get(chat.toString());
 		const target = backing ? this._findSessionBySdkId(backing.sdkSessionId) : undefined;
 		if (!target) {
@@ -4394,7 +4431,15 @@ export class CopilotAgent extends Disposable implements IAgent {
 			}
 			return;
 		}
-		await context.target.abort();
+		if (this._rooms.isRoomSessionUri(context.configurationResource.toString())) {
+			try {
+				await context.target.abort();
+			} finally {
+				await this._destroyLiveSession(context.target, true, true);
+			}
+		} else {
+			await context.target.abort();
+		}
 	}
 
 	/** Creates a concrete chat backing immediately, optionally by importing history from another chat. */
@@ -5305,6 +5350,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 				chatChannelUri,
 				...(identity?.resource ? { resource: identity.resource } : {}),
 				rawSessionId: launchPlan.sessionId,
+				isRoomSession: this._rooms.isRoomSessionUri(sessionUri.toString()),
 				onDidSessionProgress: this._onDidChatProgress,
 				sessionLauncher: this._sessionLauncher,
 				launchPlan,
@@ -5383,17 +5429,21 @@ export class CopilotAgent extends Disposable implements IAgent {
 		this._registerUnboundSession(agentSession, activeClient);
 	}
 
-	private async _destroyLiveSession(chatSession: CopilotAgentSession, preserveRouting = false): Promise<void> {
+	private async _destroyLiveSession(chatSession: CopilotAgentSession, preserveRouting = false, failOnError = false): Promise<void> {
 		try {
 			await chatSession.destroySession();
 		} catch (error) {
 			this._logService.warn(`[Copilot:${chatSession.sessionId}] Failed to destroy session before cleanup: ${error instanceof Error ? error.message : String(error)}`);
+			if (failOnError) {
+				throw error;
+			}
+		} finally {
+			const chatChannelUri = chatSession.chatChannelUri;
+			if (!preserveRouting && chatChannelUri && this._chatBackings.get(chatChannelUri.toString())?.sdkSessionId === chatSession.sessionId) {
+				this._chatBackings.delete(chatChannelUri.toString());
+			}
+			this._chatEntriesBySdkId.deleteAndDispose(chatSession.sessionId);
 		}
-		const chatChannelUri = chatSession.chatChannelUri;
-		if (!preserveRouting && chatChannelUri && this._chatBackings.get(chatChannelUri.toString())?.sdkSessionId === chatSession.sessionId) {
-			this._chatBackings.delete(chatChannelUri.toString());
-		}
-		this._chatEntriesBySdkId.deleteAndDispose(chatSession.sessionId);
 	}
 
 	private _allLiveSessions(): CopilotAgentSession[] {

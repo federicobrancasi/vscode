@@ -41,6 +41,8 @@ import { AgentHostToolCallTracker, IAgentHostToolCallTracker } from '../../node/
 import { AgentHostTurnTracker, IAgentHostTurnTracker } from '../../node/agentHostTurnTracker.js';
 import { AgentHostLocalCommands, IAgentHostLocalCommands } from '../../node/localCommands/localChatCommand.js';
 import { registerBuiltInChatContributions } from '../../node/chatContributions/builtInChatContributions.js';
+import { IAgentHostRoomsController } from '../../node/agentHostRoomsController.js';
+import { createNoopRoomsController } from './roomTestUtils.js';
 import { LocalCommandContribution } from '../../node/chatContributions/localCommand/localCommandContribution.js';
 import { QueueDrainContribution } from '../../node/chatContributions/queueDrain/queueDrainContribution.js';
 import { ISessionWorkspaceConversionService } from '../../node/chatContributions/sessionWorkspaceConversion/sessionWorkspaceConversionService.js';
@@ -860,6 +862,7 @@ function createBuiltInContributions(disposables: ReturnType<typeof ensureNoDispo
 		sendTurnMessage: () => observed?.push('queueDrain'),
 	};
 	disposables.add(service.registerHost(host));
+	services.set(IAgentHostRoomsController, createNoopRoomsController());
 	disposables.add(registerBuiltInChatContributions(service));
 	return { service, stateManager, database: usageDatabase, session: 'agent-host-session://test' };
 }

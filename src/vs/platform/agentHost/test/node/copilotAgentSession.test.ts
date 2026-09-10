@@ -54,6 +54,7 @@ import { ActiveClientToolSet } from '../../node/activeClientState.js';
 import { type CopilotSessionLaunchPlan, type IActiveClientSnapshot, type ICopilotSessionLauncher, type ICopilotSessionRuntime } from '../../node/copilot/copilotSessionLauncher.js';
 import { type IShellInitScript } from '../../common/shellInitScript.js';
 import { CopilotSessionWrapper } from '../../node/copilot/copilotSessionWrapper.js';
+import { roomSteeringMetadataKey } from '../../node/copilot/copilotRoomSteering.js';
 import { AgentHostStateManager, IAgentHostStateManager } from '../../node/agentHostStateManager.js';
 import { IAgentHostCustomizationEnablementService, type CustomizationEnablementResolution, type ICustomizationEnablementTarget } from '../../node/agentHostCustomizationEnablementService.js';
 import { AgentHostPromptCache, IAgentHostPromptCache } from '../../node/agentHostPromptCache.js';
@@ -100,6 +101,9 @@ class MockCopilotSession {
 	sendMessagesError: Error | undefined;
 	sendMessagesGate: Promise<void> | undefined;
 	sendGate: Promise<void> | undefined;
+	sendError: Error | undefined;
+	contentExclusionAvailable = false;
+	readonly excludedPaths = new Set<string>();
 	readonly modeSetCalls: Array<{ mode: 'interactive' | 'plan' | 'autopilot' }> = [];
 	readonly permissionModeSetCalls: PermissionMode[] = [];
 	permissionModeSetSuccess = true;
@@ -280,6 +284,9 @@ class MockCopilotSession {
 	async send(request: unknown) {
 		this.operationLog.push('send');
 		this.sendRequests.push(request);
+		if (this.sendError) {
+			throw this.sendError;
+		}
 		await this.sendGate;
 		return `message-${this.sendRequests.length}`;
 	}
@@ -302,6 +309,12 @@ class MockCopilotSession {
 	}
 
 	readonly rpc = {
+		contentExclusion: {
+			checkPaths: async ({ paths }: Parameters<CopilotSession['rpc']['contentExclusion']['checkPaths']>[0]) => ({
+				available: this.contentExclusionAvailable,
+				checks: paths.map(path => ({ path, excluded: this.excludedPaths.has(path) })),
+			}),
+		},
 		agent: {
 			select: async () => { await this.agentSelectGate; },
 			deselect: async () => { await this.agentDeselectGate; },
@@ -808,6 +821,7 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 	serverToolHost?: IAgentServerToolHost;
 	/** Whether the launch plan represents an ephemeral session. */
 	isEphemeral?: boolean;
+	isRoomSession?: boolean;
 	/** Whether the owning chat surface is scoped to editing a single file. */
 	hasScopedEditSurface?: boolean;
 	/** Platform used to compute the SDK sandbox policy. Defaults to `'linux'` so sandbox tests are deterministic. */
@@ -1098,6 +1112,7 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 			resource: options?.resource,
 			chatChannelUri,
 			rawSessionId: 'test-session-1',
+			isRoomSession: options?.isRoomSession,
 			onDidSessionProgress: progressEmitter,
 			sessionLauncher,
 			launchPlan,
@@ -6211,6 +6226,89 @@ suite('CopilotAgentSession', () => {
 	});
 
 	// ---- sendSteering ----
+
+	suite('room steering', () => {
+		test('uses SDK immediate delivery in the admitted turn and persists the receipt without bypass approvals', async () => {
+			const database = new TestSessionDatabase();
+			const { session, mockSession, signals } = await createAgentSession(disposables, {
+				isRoomSession: true,
+				sessionDatabase: database,
+				configValues: { [SessionConfigKey.AutoApprove]: 'autoApprove' },
+				rootValues: { [AgentHostGlobalAutoApproveEnabledConfigKey]: true },
+			});
+			await session.send('Investigate', undefined, 'room-turn');
+			mockSession.fire('user.message', { content: 'Investigate', interactionId: 'root', source: 'user' }, { id: 'root-event' });
+			const accepted = await session.sendSteeringInCurrentTurn('room-turn', 'Prioritize correctness');
+			const wrongTurn = await session.sendSteeringInCurrentTurn('other-turn', 'Must not send');
+			assert.deepStrictEqual({
+				accepted, wrongTurn, sends: mockSession.sendRequests,
+				parent: await database.getMetadata(roomSteeringMetadataKey('message-2')),
+				newTurns: signals.filter(signal => signal.kind === 'action' && signal.action.type === ActionType.ChatTurnStarted).length,
+				permissionModes: mockSession.permissionModeSetCalls,
+			}, {
+				accepted: true, wrongTurn: false,
+				sends: [{ prompt: 'Investigate', attachments: undefined }, { prompt: 'Prioritize correctness', mode: 'immediate' }],
+				parent: 'root-event', newTurns: 0, permissionModes: ['manual'],
+			});
+		});
+
+		test('propagates failed SDK steering instead of acknowledging delivery', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, { isRoomSession: true });
+			await session.send('Investigate', undefined, 'room-turn');
+			mockSession.sendError = new Error('SDK rejected steering');
+			await assert.rejects(session.sendSteeringInCurrentTurn('room-turn', 'New guidance'), /SDK rejected steering/);
+		});
+
+		test('a late acceptance remains an acceptance but abort prevents any further steering', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, { isRoomSession: true });
+			await session.send('Investigate', undefined, 'room-turn');
+			const gate = new DeferredPromise<void>();
+			mockSession.sendGate = gate.p;
+			const delivery = session.sendSteeringInCurrentTurn('room-turn', 'In flight guidance');
+			await session.abort();
+			await gate.complete();
+			assert.deepStrictEqual({
+				accepted: await delivery,
+				afterAbort: await session.sendSteeringInCurrentTurn('room-turn', 'Too late'),
+				sends: mockSession.sendRequests.length,
+			}, { accepted: true, afterAbort: false, sends: 2 });
+		});
+
+		test('a late SDK receipt remains journalled when the room disconnects its old event stream', async () => {
+			const database = new TestSessionDatabase();
+			const { session, mockSession } = await createAgentSession(disposables, { isRoomSession: true, sessionDatabase: database });
+			await session.send('Investigate', undefined, 'room-turn');
+			await database.setTurnEventId('room-turn', 'root-event');
+			const gate = new DeferredPromise<void>();
+			mockSession.sendGate = gate.p;
+			const delivery = session.sendSteeringInCurrentTurn('room-turn', 'Preserve this guidance');
+			session.dispose();
+			await gate.complete();
+			assert.deepStrictEqual({
+				accepted: await delivery,
+				parent: await database.getMetadata(roomSteeringMetadataKey('message-2')),
+				afterDispose: await session.sendSteeringInCurrentTurn('room-turn', 'Too late'),
+			}, { accepted: true, parent: 'root-event', afterDispose: false });
+		});
+
+		test('an abort during room send preflight prevents a new SDK run', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, { isRoomSession: true });
+			let aborted: Promise<void> | undefined;
+			mockSession.onModeSet = () => { aborted = session.abort(); };
+			await assert.rejects(session.send('Investigate', undefined, 'room-turn', 'interactive'), /Canceled/);
+			await aborted;
+			assert.deepStrictEqual({ sends: mockSession.sendRequests.length, aborts: mockSession.abortCalls }, { sends: 0, aborts: 1 });
+		});
+
+		test('artifact access fails closed for unavailable or excluded content', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, { isRoomSession: true });
+			await assert.rejects(session.assertContentAccess(['/repository/file.ts']), /Content exclusion policy/);
+			mockSession.contentExclusionAvailable = true;
+			await session.assertContentAccess(['/repository/file.ts']);
+			mockSession.excludedPaths.add('/repository/file.ts');
+			await assert.rejects(session.assertContentAccess(['/repository/file.ts']), /Content exclusion policy/);
+		});
+	});
 
 	suite('sendSteering', () => {
 

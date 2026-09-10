@@ -31,6 +31,7 @@ Do not turn those files into general Sessions guidance.
 |------|------------------------|
 | Internal layer hierarchy and import rules | [LAYERS.md](LAYERS.md) |
 | Session/chat model, services, provider contract, and core data flow | [SESSIONS.md](SESSIONS.md) |
+| Local collaboration rooms, peer execution, shared messages, and published artifacts | [COLLABORATION.md](COLLABORATION.md) |
 | Automations ownership, routing, migration, persistence, and run lifecycle | [AUTOMATIONS.md](AUTOMATIONS.md) |
 | Workbench parts, grid, title bar, and editor presentation | [LAYOUT.md](LAYOUT.md) |
 | Session-aware layout capture and restoration | [LAYOUT_CONTROLLER.md](LAYOUT_CONTROLLER.md) |

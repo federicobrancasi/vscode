@@ -131,6 +131,9 @@ registerSharedProcessRemoteService(ILocalGitService, 'localGit');
 
 //#region --- workbench contributions
 
+// Local peer collaboration is deliberately desktop-only.
+import './contrib/collaboration/browser/collaboration.contribution.js';
+
 // Logs
 import '../workbench/contrib/logs/electron-browser/logs.contribution.js';
 

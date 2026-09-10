@@ -36,7 +36,7 @@ import { migrateLegacyAutopilotConfig } from '../../../../../platform/agentHost/
 import { readAgentDevContainerWorktreeMetadata, withAgentDevContainerWorktreeMetadata, type IAgentDevContainerWorktreeMetadata } from '../../../../../platform/agentHost/common/meta/agentDevContainerWorktreeMeta.js';
 import type { IAgentSubscription } from '../../../../../platform/agentHost/common/state/agentSubscription.js';
 import { ResolveSessionConfigResult, type SessionConfigPropertySchema } from '../../../../../platform/agentHost/common/state/protocol/commands.js';
-import { AgentCustomization, ChangesSummary, ChatInteractivity as ProtocolChatInteractivity, ChatOriginKind as ProtocolChatOriginKind, type ClientPluginCustomization, Customization, CustomizationEnablementKind, CustomizationType, type CustomizationEnablement, ModelSelection, SessionStatus as ProtocolSessionStatus, RootConfigState, RootState, type SessionActiveClient, SessionState, SessionSummary, type Changeset } from '../../../../../platform/agentHost/common/state/protocol/state.js';
+import { AgentCustomization, ChangesSummary, ChatInteractivity as ProtocolChatInteractivity, ChatOriginKind as ProtocolChatOriginKind, type ClientPluginCustomization, Customization, CustomizationEnablementKind, CustomizationType, type CustomizationEnablement, ModelSelection, SessionStatus as ProtocolSessionStatus, RootConfigState, RootState, type SessionActiveClient, SessionLifecycle, SessionState, SessionSummary, type Changeset } from '../../../../../platform/agentHost/common/state/protocol/state.js';
 import { ActionType, isChatAction, isSessionAction, NotificationType, type SessionSummaryChanges } from '../../../../../platform/agentHost/common/state/sessionActions.js';
 import { AgentCapabilities, AgentInfo, buildChatUri, buildDefaultChatUri, buildSubagentChatUri, DEFAULT_CHAT_ID, getSessionChatResource, getSessionRelatedPullRequestUrls, isDefaultChatUri, isSessionStatusArchived, isSessionStatusRead, parseChatUri, readSessionCreationReference, readSessionEhcliAdoptable, readSessionExternal, readSessionGitHubState, readSessionGitState, readSessionMultiRootMetadata, readSessionSourceControlState, readSessionWorkspaceless, ROOT_STATE_URI, SESSION_META_MULTI_ROOT_KEY, SessionMeta, SessionSourceControlOutcome, StateComponents, withSessionCreationReference, withSessionExternal, withSessionGitHubState, withSessionMultiRootMetadata, withSessionStatusFlag, withSessionWorkspaceless, type ChatState, type ChatSummary, type ISessionCreationReference as IProtocolSessionCreationReference, type ISessionGitHubState, type ISessionGitState, type ISessionMultiRootMetadata } from '../../../../../platform/agentHost/common/state/sessionState.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
@@ -4583,6 +4583,33 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		} catch {
 			return undefined;
 		}
+	}
+
+	async resolveSessionChat(sessionResource: URI, chatResource: URI | undefined, token: CancellationToken): Promise<{ readonly session: ISession; readonly chat: IChat } | undefined> {
+		const connection = this.connection;
+		if (!connection) {
+			return undefined;
+		}
+		this._ensureSessionCache();
+		const entry = [...this._sessionCache].find(([, session]) => isEqual(session.backendUri, sessionResource));
+		if (!entry) {
+			return undefined;
+		}
+		const [rawId, session] = entry;
+		this._keepSessionStateAlive(session.sessionId);
+		await waitForState(this._getChatCatalogLoading(rawId), loading => !loading, undefined, token);
+		const state = this._lastSessionStates.get(session.sessionId);
+		if (this.connection !== connection || this._sessionCache.get(rawId) !== session || state?.lifecycle !== SessionLifecycle.Ready) {
+			return undefined;
+		}
+		const chat = chatResource
+			? session.chats.get().find(candidate => isEqual(this.getBackendChatResource(candidate.resource), chatResource))
+			: session.mainChat.get();
+		if (!chat || token.isCancellationRequested) {
+			return undefined;
+		}
+		const backendChat = this.getBackendChatResource(chat.resource);
+		return backendChat && state.chats.some(summary => isEqual(URI.parse(summary.resource), backendChat)) ? { session, chat } : undefined;
 	}
 
 	getWorkingDirectories(sessionId: string): readonly string[] {

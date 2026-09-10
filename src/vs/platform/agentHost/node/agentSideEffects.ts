@@ -1345,7 +1345,7 @@ export class AgentSideEffects extends Disposable {
 		this._turnTracker.markActivity(sessionKey, turnId, readyAction.type);
 	}
 
-	handleAction(channel: ProtocolURI, action: StateAction, clientId?: string, clientContextOrType: IAgentHostClientTelemetryContext | AgentHostClientType = AgentHostClientType.Unknown, resumedTurn?: Turn): void {
+	handleAction(channel: ProtocolURI, action: StateAction, clientId?: string, clientContextOrType: IAgentHostClientTelemetryContext | AgentHostClientType = AgentHostClientType.Unknown, resumedTurn?: Turn): void | Promise<void> {
 		let clientContext = typeof clientContextOrType === 'string'
 			? createUnknownAgentHostClientTelemetryContext(clientContextOrType)
 			: clientContextOrType;
@@ -1486,9 +1486,11 @@ export class AgentSideEffects extends Disposable {
 				if (agent) {
 					const chat = URI.parse(channel);
 					const session = parseRequiredSessionUriFromChatUri(channel);
-					agent.chats.abort(chat, { ...this._chatContext(session, channel), clientTelemetryContext: clientContext }).catch(err => {
+					const abort = agent.chats.abort(chat, { ...this._chatContext(session, channel), clientTelemetryContext: clientContext });
+					void abort.catch(err => {
 						this._logService.error('[AgentSideEffects] abort failed', err);
 					});
+					return abort;
 				}
 				// Intentionally do NOT drain queued messages here: cancelling means
 				// "stop", so messages queued behind the turn stay queued for the

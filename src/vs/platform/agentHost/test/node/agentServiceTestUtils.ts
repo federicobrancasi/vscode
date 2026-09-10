@@ -37,9 +37,12 @@ import { AgentHostLocalTurns, IAgentHostLocalTurns } from '../../node/agentHostL
 import { AgentHostLocalCommands, IAgentHostLocalCommands } from '../../node/localCommands/localChatCommand.js';
 import { IAgentHostOctoKitService } from '../../node/shared/agentHostOctoKitService.js';
 import { IAgentHostWorktreeIsolation, NullAgentHostWorktreeIsolation } from '../../node/shared/worktreeIsolation.js';
+import { IAgentHostRoomsController } from '../../node/agentHostRoomsController.js';
+import { IRoomStorage } from '../../node/agentHostRoomsTypes.js';
 
 const compositions = new WeakMap<AgentService, IAgentServiceComposition>();
 const worktreeIsolations = new WeakMap<AgentService, MutableTestAgentHostWorktreeIsolation>();
+const roomControllers = new WeakMap<AgentService, IAgentHostRoomsController>();
 
 class MutableTestAgentHostWorktreeIsolation extends Disposable {
 	private _delegate: IAgentHostWorktreeIsolation = new NullAgentHostWorktreeIsolation();
@@ -85,6 +88,14 @@ export function getTestAgentStateManager(agentService: AgentService): AgentHostS
 
 export function getTestAgentHostProviderService(agentService: AgentService): IAgentHostProviderService {
 	return getTestAgentServiceComposition(agentService).providerService;
+}
+
+export function getTestAgentHostRoomsController(agentService: AgentService): IAgentHostRoomsController {
+	const rooms = roomControllers.get(agentService);
+	if (!rooms) {
+		throw new Error('AgentService was not created by createTestAgentService');
+	}
+	return rooms;
 }
 
 export function registerTestAgentProvider(agentService: AgentService, provider: import('../../common/agent.js').IAgent): void {
@@ -146,6 +157,7 @@ export function createTestAgentService(
 	orchestratorDatabase?: IAgentHostDatabase,
 	sessionResidencyLimit?: number,
 	sessionReleaseRetryMs?: number,
+	overrides: { readonly roomsStorage?: IRoomStorage } = {},
 ): AgentService {
 	const effectiveFileMonitorService = fileMonitorService ?? new AgentHostFileMonitorService(fileService, logService);
 	const clientConnectionService = new AgentHostClientConnectionService();
@@ -187,6 +199,8 @@ export function createTestAgentService(
 		fetchFn,
 		gitHubServiceOptions: foundation.gitHubServiceOptions,
 		copilotApiService,
+		roomSessionLifecycle: foundation.callbackAdapter.roomSessionLifecycle,
+		roomsStorage: overrides.roomsStorage,
 	});
 	services.set(IAgentHostFileMonitorService, effectiveFileMonitorService);
 	services.set(IAgentEditAttributionService, new NullAgentEditAttributionService());
@@ -230,6 +244,7 @@ export function createTestAgentService(
 		composition.setContributions(instantiationService.invokeFunction(accessor => activateAgentHostContributions(accessor, instantiationService)));
 		compositions.set(composition.agentService, composition);
 		worktreeIsolations.set(composition.agentService, worktreeIsolation);
+		roomControllers.set(composition.agentService, instantiationService.invokeFunction(accessor => accessor.get(IAgentHostRoomsController)));
 		return composition.agentService;
 	} catch (error) {
 		composition.agentService.dispose();
