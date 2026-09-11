@@ -6,20 +6,26 @@
 import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { CancellationError } from '../../../../base/common/errors.js';
 import { Disposable, MutableDisposable, DisposableStore } from '../../../../base/common/lifecycle.js';
-import { derived, observableValue, transaction } from '../../../../base/common/observable.js';
+import { autorun, derived, IObservable, observableValue, transaction } from '../../../../base/common/observable.js';
 import { isWeb } from '../../../../base/common/platform.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
-import { AgentHostRoomMessageMode, IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomsService } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { AgentHostRoomMessageMode, IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessagePage, IAgentHostRoomsService } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { ResolveSessionConfigResult } from '../../../../platform/agentHost/common/state/protocol/commands.js';
 import { IAgentHostService } from '../../../../platform/agentHost/common/agentService.js';
-import { PolicyState, SessionModelInfo } from '../../../../platform/agentHost/common/state/protocol/state.js';
+import { ModelSelection, PolicyState, SessionModelInfo } from '../../../../platform/agentHost/common/state/protocol/state.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { IWorkspaceTrustManagementService, IWorkspaceTrustRequestService } from '../../../../platform/workspace/common/workspaceTrust.js';
 import { resolveSessionForResource } from '../../../../workbench/contrib/chat/browser/agentSessions/agentHost/agentHostAuth.js';
 import { IAuthenticationService } from '../../../../workbench/services/authentication/common/authentication.js';
-import { COLLABORATION_MESSAGE_PAGE_SIZE, CollaborationAvailability, CollaborationEnabledSettingId, ICollaborationService } from '../common/collaboration.js';
+import { CollaborationAvailability, CollaborationEnabledSettingId, CollaborationRequestResponse, ICollaborationRequest, ICollaborationService, ICollaborationWorkspaceTrust } from '../common/collaboration.js';
 import { CollaborationDraft, getCollaborationMentionTargets } from '../common/collaborationMentions.js';
+import { CollaborationRoomRequests } from './collaborationRoomRequests.js';
+import { ICollaborationRoomViewService } from './collaborationRoomView.js';
+import { CollaborationWorkspaceTrust } from './collaborationWorkspaceTrust.js';
+import { CollaborationHistory } from './collaborationHistory.js';
 
 const EMPTY_MESSAGES: IAgentHostRoomMessagePage = { messages: [], hasEarlier: false, hasLater: false };
 
@@ -35,20 +41,28 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 	readonly messages = observableValue<IAgentHostRoomMessagePage>(this, EMPTY_MESSAGES);
 	readonly models = observableValue<readonly SessionModelInfo[]>(this, []);
 	readonly loading = observableValue(this, false);
+	readonly loadingEarlier = observableValue(this, false);
 	readonly creating = observableValue(this, false);
 	readonly canSteer = observableValue(this, false);
+	readonly canConfigure = observableValue(this, false);
+	readonly canSetMemberModel = observableValue(this, false);
 	readonly error = observableValue<string | undefined>(this, undefined);
+	readonly workspaceTrust: IObservable<ICollaborationWorkspaceTrust>;
+	readonly requests: IObservable<readonly ICollaborationRequest[]>;
+	readonly requestError: IObservable<string | undefined>;
 	private readonly sendingRooms = observableValue<ReadonlySet<string>>(this, new Set());
 	readonly sending = derived(reader => this.sendingRooms.read(reader).has(this.activeRoomId.read(reader) ?? ''));
 
 	private readonly connection = this._register(new MutableDisposable<DisposableStore>());
+	private readonly historyStore = this._register(new DisposableStore());
+	private history: CollaborationHistory | undefined;
 	private readonly drafts = new Map<string, CollaborationDraft>();
+	private readonly authorizationGeneration = observableValue(this, 0);
+	private readonly trust: CollaborationWorkspaceTrust;
+	private readonly roomRequests: CollaborationRoomRequests;
 	private hostGeneration = 0;
 	private selectionGeneration = 0;
-	private messageGeneration = 0;
-	private loadingGeneration = 0;
 	private authenticationGeneration = 0;
-	private query: IAgentHostRoomMessageQuery | undefined;
 	private refreshPending = false;
 	private refreshingMessages = false;
 
@@ -57,9 +71,28 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IAuthenticationService private readonly authenticationService: IAuthenticationService,
 		@ILogService private readonly logService: ILogService,
+		@IWorkspaceTrustManagementService workspaceTrustManagementService: IWorkspaceTrustManagementService,
+		@IWorkspaceTrustRequestService workspaceTrustRequestService: IWorkspaceTrustRequestService,
+		@ICollaborationRoomViewService roomViewService: ICollaborationRoomViewService,
 	) {
 		super();
-		this._register(authenticationService.onDidChangeSessions(() => this.authenticationGeneration++));
+		const liveRoom = derived(this, reader => this.availability.read(reader) === 'available'
+			&& roomViewService.visible.read(reader) && roomViewService.activeView.read(reader)
+			? this.activeRoom.read(reader) : undefined);
+		this.trust = this._register(new CollaborationWorkspaceTrust(liveRoom, this.authorizationGeneration, () => this.api, workspaceTrustManagementService, workspaceTrustRequestService));
+		this.roomRequests = this._register(new CollaborationRoomRequests(host, liveRoom, this.authorizationGeneration, () => this.ensureExecutionAuthorized()));
+		this.workspaceTrust = this.trust.state;
+		this.requests = this.roomRequests.requests;
+		this.requestError = this.roomRequests.error;
+		this._register(autorun(reader => {
+			roomViewService.visible.read(reader);
+			roomViewService.activeView.read(reader);
+			this.authorizationGeneration.set(this.authorizationGeneration.read(undefined) + 1, undefined);
+		}));
+		this._register(authenticationService.onDidChangeSessions(() => {
+			this.authenticationGeneration++;
+			this.authorizationGeneration.set(this.authorizationGeneration.get() + 1, undefined);
+		}));
 		this._register(configurationService.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration(CollaborationEnabledSettingId) || e.affectsConfiguration('chat.disableAIFeatures')) {
 				this.updateConnection();
@@ -69,15 +102,20 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		this._register(host.onAgentHostExit(() => {
 			this.hostGeneration++;
 			this.selectionGeneration++;
-			this.messageGeneration++;
+			this.historyStore.clear();
+			this.history = undefined;
 			this.connection.clear();
 			this.loading.set(false, undefined);
 			transaction(tx => {
 				this.availability.set(this.enabled ? 'unavailable' : 'disabled', tx);
+				this.authorizationGeneration.set(this.authorizationGeneration.get() + 1, tx);
 				this.availabilityError.set(localize('room.hostExited', "The local agent host disconnected. Reconnect to see authoritative worker status; no work is resumed automatically."), tx);
 				this.models.set([], tx);
 				this.canSteer.set(false, tx);
+				this.canConfigure.set(false, tx);
+				this.canSetMemberModel.set(false, tx);
 				this.loading.set(false, tx);
+				this.loadingEarlier.set(false, tx);
 			});
 		}));
 		this.updateConnection();
@@ -91,9 +129,17 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 	private updateConnection(): void {
 		this.hostGeneration++;
 		this.selectionGeneration++;
-		this.messageGeneration++;
+		this.historyStore.clear();
+		this.history = undefined;
 		this.connection.clear();
+		transaction(tx => {
+			this.availability.set('connecting', tx);
+			this.authorizationGeneration.set(this.authorizationGeneration.get() + 1, tx);
+		});
 		this.canSteer.set(false, undefined);
+		this.canConfigure.set(false, undefined);
+		this.canSetMemberModel.set(false, undefined);
+		this.loadingEarlier.set(false, undefined);
 		if (!this.enabled || !this.host.rooms) {
 			transaction(tx => {
 				this.supported.set(false, tx);
@@ -158,6 +204,8 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 				this.rooms.set([...current.values()], tx);
 				this.availability.set('available', tx);
 				this.canSteer.set(capabilities.supportsSteering === true, tx);
+				this.canConfigure.set(capabilities.supportsConfiguration === true, tx);
+				this.canSetMemberModel.set(capabilities.supportsMemberModels === true, tx);
 			});
 		} catch (error) {
 			if (generation === this.hostGeneration && !this._store.isDisposed) {
@@ -206,13 +254,15 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 
 	async selectRoom(roomId: string | undefined): Promise<void> {
 		const selection = ++this.selectionGeneration;
-		this.messageGeneration++;
-		this.query = undefined;
+		this.historyStore.clear();
+		this.history = undefined;
 		transaction(tx => {
+			this.authorizationGeneration.set(this.authorizationGeneration.get() + 1, tx);
 			this.activeRoomId.set(roomId, tx);
 			this.messages.set(EMPTY_MESSAGES, tx);
 			this.error.set(undefined, tx);
 			this.loading.set(roomId !== undefined, tx);
+			this.loadingEarlier.set(false, tx);
 		});
 		if (!roomId) {
 			return;
@@ -223,7 +273,21 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 				return;
 			}
 			this.acceptRoom(room);
-			await this.loadMessages();
+			const api = this.api;
+			const history = this.history = this.historyStore.add(new CollaborationHistory(query => api.getMessages(roomId, query)));
+			this.historyStore.add(autorun(reader => {
+				const page = history.page.read(reader);
+				const loading = history.loading.read(reader);
+				const loadingEarlier = history.loadingEarlier.read(reader);
+				const error = history.error.read(reader);
+				transaction(tx => {
+					this.messages.set(page, tx);
+					this.loading.set(loading, tx);
+					this.loadingEarlier.set(loadingEarlier, tx);
+					this.error.set(error, tx);
+				});
+			}));
+			await history.loadLatest();
 		} catch (error) {
 			if (selection === this.selectionGeneration && !this._store.isDisposed) {
 				this.error.set(toErrorMessage(error), undefined);
@@ -239,6 +303,9 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 	async createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom> {
 		if (this.creating.get()) {
 			throw new Error(localize('room.alreadyCreating', "A collaboration room is already being created."));
+		}
+		if (options.memberModels?.some(model => model !== undefined) && !this.canSetMemberModel.get()) {
+			throw new Error(localize('room.memberModelsUnavailable', "The local agent host does not support per-peer model selection. Reconnect or update the host."));
 		}
 		const selection = this.selectionGeneration;
 		const host = this.hostGeneration;
@@ -259,32 +326,19 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		}
 	}
 
-	async loadMessages(query?: IAgentHostRoomMessageQuery): Promise<void> {
-		await this.readMessages(query, true);
+	async loadMessages(): Promise<void> {
+		if (!this.history) {
+			await this.selectRoom(this.roomId);
+			return;
+		}
+		await this.history.refresh();
 	}
 
-	private async readMessages(query: IAgentHostRoomMessageQuery | undefined, showLoading: boolean): Promise<void> {
-		const roomId = this.roomId;
-		const request = ++this.messageGeneration;
-		const selection = this.selectionGeneration;
-		const loading = showLoading ? ++this.loadingGeneration : undefined;
-		this.query = query;
-		if (showLoading) {
-			this.loading.set(true, undefined);
+	async loadEarlierMessages(): Promise<void> {
+		if (!this.history) {
+			throw new Error(localize('room.historyNotReady', "Room history is not ready. Wait for loading to finish or reconnect."));
 		}
-		try {
-			const page = await this.api.getMessages(roomId, { ...query, limit: COLLABORATION_MESSAGE_PAGE_SIZE });
-			if (selection === this.selectionGeneration && request === this.messageGeneration && !this._store.isDisposed) {
-				transaction(tx => {
-					this.messages.set(page, tx);
-					this.error.set(undefined, tx);
-				});
-			}
-		} finally {
-			if (loading !== undefined && loading === this.loadingGeneration && selection === this.selectionGeneration && !this._store.isDisposed) {
-				this.loading.set(false, undefined);
-			}
-		}
+		await this.history.loadEarlier();
 	}
 
 	private queueMessageRefresh(): void {
@@ -296,9 +350,9 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		const refresh = async () => {
 			const selection = this.selectionGeneration;
 			try {
-				while (this.refreshPending && this.activeRoomId.get() && !this._store.isDisposed) {
+				while (this.refreshPending && this.history && this.activeRoomId.get() && !this._store.isDisposed) {
 					this.refreshPending = false;
-					await this.readMessages(this.query, false);
+					await this.history.refresh();
 				}
 			} catch (error) {
 				if (selection === this.selectionGeneration && !this._store.isDisposed) {
@@ -306,7 +360,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 				}
 			} finally {
 				this.refreshingMessages = false;
-				if (this.refreshPending && this.activeRoomId.get() && this.availability.get() === 'available' && !this._store.isDisposed) {
+				if (this.refreshPending && this.history && this.activeRoomId.get() && this.availability.get() === 'available' && !this._store.isDisposed) {
 					this.queueMessageRefresh();
 				}
 			}
@@ -314,11 +368,29 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		void refresh();
 	}
 
-	setFollowingLatest(following: boolean): void {
-		const page = this.messages.get();
-		if (!page.hasLater) {
-			this.query = following ? undefined : { before: (page.messages.at(-1)?.sequence ?? 0) + 1 };
+	async getConfiguration(): Promise<ResolveSessionConfigResult> {
+		const selection = this.selectionGeneration;
+		const host = this.hostGeneration;
+		const result = await this.api.getRoomConfiguration(this.roomId);
+		if (selection !== this.selectionGeneration || host !== this.hostGeneration || this._store.isDisposed) {
+			throw new CancellationError();
 		}
+		return result;
+	}
+
+	async setConfiguration(configuration: Partial<IAgentHostRoomConfiguration>): Promise<void> {
+		if (!this.canConfigure.get()) {
+			throw new Error(localize('room.configurationUnavailable', "The local agent host does not support room configuration."));
+		}
+		await this.mutate((api, roomId) => api.setRoomConfiguration(roomId, configuration),
+			(configuration.autoApprove !== undefined && configuration.autoApprove !== 'default') || configuration.sandboxEnabled === 'off');
+	}
+
+	async setMemberModel(memberId: string, model: ModelSelection | undefined): Promise<void> {
+		if (!this.canSetMemberModel.get()) {
+			throw new Error(localize('room.memberModelsUnavailable', "The local agent host does not support per-peer model selection. Reconnect or update the host."));
+		}
+		await this.mutate((api, roomId) => api.setMemberModel(roomId, memberId, model));
 	}
 
 	getDraft(roomId: string): CollaborationDraft {
@@ -332,6 +404,12 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 
 	async sendMessage(mode: AgentHostRoomMessageMode = 'message'): Promise<void> {
 		const roomId = this.roomId;
+		if (!this.history) {
+			await this.loadMessages();
+			if (roomId !== this.activeRoomId.get() || this._store.isDisposed) {
+				throw new CancellationError();
+			}
+		}
 		if (mode === 'steer' && !this.canSteer.get()) {
 			throw new Error(localize('room.steeringUnavailable', "This host does not support live room steering. Update or reconnect the local agent host."));
 		}
@@ -345,27 +423,27 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		}
 		const members = this.activeRoom.get()?.members ?? [];
 		const mentions = getCollaborationMentionTargets(pending.text, members);
+		// Explicit recipients also wake finished peers when connected to an older room host.
+		const recipients = mode === 'message' && !mentions.length ? members.map(member => member.id) : mentions;
 		const selection = this.selectionGeneration;
 		const host = this.hostGeneration;
 		const authentication = this.authenticationGeneration;
 		const api = this.api;
 		this.sendingRooms.set(new Set([...this.sendingRooms.get(), roomId]), undefined);
 		try {
-			if (mentions.length || mode === 'steer') {
-				await this.ensureAuthenticated();
-				if (selection !== this.selectionGeneration || host !== this.hostGeneration || authentication !== this.authenticationGeneration || this._store.isDisposed) {
-					throw new CancellationError();
-				}
+			await this.ensureExecutionAuthorized();
+			if (selection !== this.selectionGeneration || host !== this.hostGeneration || authentication !== this.authenticationGeneration || this._store.isDisposed) {
+				throw new CancellationError();
 			}
 			const message = await api.postMessage(roomId, {
 				id: pending.messageId, text: pending.text,
-				mentions,
+				mentions: recipients,
 				replyTo: pending.replyTo,
 				...(mode === 'steer' ? { mode } : {}),
 			});
 			draft.acknowledge(pending.revision);
 			if (selection === this.selectionGeneration && host === this.hostGeneration && !this._store.isDisposed) {
-				this.revealSentMessage(message);
+				this.history?.acceptMessage(message);
 				this.queueMessageRefresh();
 			}
 		} finally {
@@ -385,7 +463,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		const selection = this.selectionGeneration;
 		const host = this.hostGeneration;
 		const authentication = this.authenticationGeneration;
-		await this.ensureAuthenticated();
+		await this.ensureExecutionAuthorized();
 		if (selection !== this.selectionGeneration || host !== this.hostGeneration || authentication !== this.authenticationGeneration || this._store.isDisposed) {
 			throw new CancellationError();
 		}
@@ -393,24 +471,6 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		if (selection === this.selectionGeneration && host === this.hostGeneration && !this._store.isDisposed) {
 			this.queueMessageRefresh();
 		}
-	}
-
-	private revealSentMessage(message: IAgentHostRoomMessage): void {
-		const page = this.messages.get();
-		const current = page.messages;
-		// Reveal the acknowledgement without joining disjoint history pages.
-		const messages = (current.some(item => item.id === message.id)
-			? current
-			: current.at(-1)?.sequence === message.sequence - 1
-				? [...current, message]
-				: [message]).slice(-COLLABORATION_MESSAGE_PAGE_SIZE);
-		this.query = undefined;
-		this.messageGeneration++;
-		this.messages.set({
-			messages,
-			hasEarlier: messages[0].sequence > 1,
-			hasLater: (this.activeRoom.get()?.latestMessageSequence ?? message.sequence) > messages[messages.length - 1].sequence,
-		}, undefined);
 	}
 
 	async startRoom(limits: IAgentHostRoomLimits): Promise<void> {
@@ -440,7 +500,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		const api = this.api;
 		const roomId = this.roomId;
 		if (requiresAuthentication) {
-			await this.ensureAuthenticated();
+			await this.ensureExecutionAuthorized();
 			if (generation !== this.hostGeneration || selection !== this.selectionGeneration || authentication !== this.authenticationGeneration || this._store.isDisposed) {
 				throw new CancellationError();
 			}
@@ -448,6 +508,31 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		const room = await operation(api, roomId);
 		if (generation === this.hostGeneration && !this._store.isDisposed) {
 			this.acceptRoom(room);
+		}
+	}
+
+	requestWorkspaceTrust(): Promise<void> {
+		return this.trust.ensureTrusted();
+	}
+
+	respondToRequest(request: ICollaborationRequest, response: CollaborationRequestResponse): Promise<void> {
+		return this.roomRequests.respond(request, response);
+	}
+
+	reloadRequestContent(request: ICollaborationRequest): Promise<void> {
+		return this.roomRequests.reloadContent(request);
+	}
+
+	private async ensureExecutionAuthorized(): Promise<void> {
+		const generation = this.authorizationGeneration.get();
+		const roomId = this.roomId;
+		await this.ensureAuthenticated();
+		if (generation !== this.authorizationGeneration.get() || roomId !== this.activeRoomId.get() || this._store.isDisposed) {
+			throw new CancellationError();
+		}
+		await this.requestWorkspaceTrust();
+		if (generation !== this.authorizationGeneration.get() || roomId !== this.activeRoomId.get() || this._store.isDisposed) {
+			throw new CancellationError();
 		}
 	}
 

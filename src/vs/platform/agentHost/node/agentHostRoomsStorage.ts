@@ -17,6 +17,8 @@ import { localize } from '../../../nls.js';
 import { ILogService } from '../../log/common/log.js';
 import { IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomMember, MAX_ROOM_WORKERS } from '../common/agentHostRooms.js';
 import { buildDefaultChatUri } from '../common/state/sessionState.js';
+import { parseRoomConfiguration } from './agentHostRoomsConfiguration.js';
+import { parseRoomModelSelection } from './agentHostRoomsModels.js';
 import { IRoomRecord, IRoomStorage, RoomContentValidator } from './agentHostRoomsTypes.js';
 
 /**
@@ -37,6 +39,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 	}
 
 	async save(record: IRoomRecord): Promise<void> {
+		this.validateRecord(record);
 		// Capture the snapshot before yielding so a queued save never observes
 		// subsequent mutations by its caller.
 		const contents = JSON.stringify(record);
@@ -47,7 +50,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 			if (previous) {
 				check(snapshot.room.revision >= previous.room.revision, 'room.revision regressed');
 				check(extUriBiasedIgnorePathCase.isEqual(URI.parse(snapshot.room.repositoryUri), URI.parse(previous.room.repositoryUri)) && snapshot.room.baseRevision === previous.room.baseRevision, 'room repository changed');
-				const identities = (room: IAgentHostRoom) => room.members.map(member => [member.id, member.name, member.sessionUri, member.model, member.worktreeUri]);
+				const identities = (room: IAgentHostRoom) => room.members.map(member => [member.id, member.name, member.sessionUri, member.chatUri ?? buildDefaultChatUri(member.sessionUri), member.worktreeUri]);
 				check(equals(identities(previous.room), identities(snapshot.room)), 'preserved member identities changed');
 				for (const artifact of previous.room.artifacts) {
 					check(equals(snapshot.room.artifacts.find(value => value.id === artifact.id), artifact), 'published artifact changed');
@@ -283,7 +286,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		const memberIds = new Set<string>();
 		const sessions = new Set<string>();
 		for (const value of members) {
-			const member = object(value, 'member', ['id', 'name', 'sessionUri', 'chatUri', 'model', 'state', 'worktreeUri', 'activity', 'work', 'error', 'turns']);
+			const member = object(value, 'member', ['id', 'name', 'sessionUri', 'chatUri', 'model', 'modelSelection', 'pendingModel', 'modelError', 'state', 'worktreeUri', 'activity', 'work', 'error', 'turns', 'configuration']);
 			identifier(member.id, 'member.id');
 			unique(memberIds, member.id, 'member.id');
 			text(member.name, 'member.name', false);
@@ -296,6 +299,16 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 				check(member.chatUri === buildDefaultChatUri(member.sessionUri), 'member.chatUri must be the preserved session default chat');
 			}
 			optional(member.model, text, 'member.model');
+			const modelSelection = member.modelSelection === undefined ? undefined : parseRoomModelSelection(member.modelSelection);
+			const pendingModel = member.pendingModel === undefined || member.pendingModel === null ? member.pendingModel : parseRoomModelSelection(member.pendingModel);
+			if (modelSelection !== undefined || pendingModel !== undefined) {
+				const selected = pendingModel === null ? 'auto' : (pendingModel ?? modelSelection)?.id;
+				check(member.model === selected, 'member.model does not match its selected model');
+			}
+			optional(member.modelError, text, 'member.modelError');
+			if (member.configuration !== undefined) {
+				parseRoomConfiguration(member.configuration, true);
+			}
 			enumValue(member.state, ['pending', 'starting', 'working', 'idle', 'blocked', 'needsInput', 'stopping', 'stopped', 'failed', 'interrupted'], 'member.state');
 			if (member.worktreeUri !== undefined) {
 				check(sameFile(localFile(member.worktreeUri, 'member.worktreeUri').fsPath, localFile(this.worktreeUri(room.id, member.id), 'member worktree').fsPath), 'member worktree identity');

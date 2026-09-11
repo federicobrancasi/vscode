@@ -55,6 +55,7 @@ import { type CopilotSessionLaunchPlan, type IActiveClientSnapshot, type ICopilo
 import { type IShellInitScript } from '../../common/shellInitScript.js';
 import { CopilotSessionWrapper } from '../../node/copilot/copilotSessionWrapper.js';
 import { roomSteeringMetadataKey } from '../../node/copilot/copilotRoomSteering.js';
+import { ISessionSandboxPolicy } from '../../node/sessionSandbox.js';
 import { AgentHostStateManager, IAgentHostStateManager } from '../../node/agentHostStateManager.js';
 import { IAgentHostCustomizationEnablementService, type CustomizationEnablementResolution, type ICustomizationEnablementTarget } from '../../node/agentHostCustomizationEnablementService.js';
 import { AgentHostPromptCache, IAgentHostPromptCache } from '../../node/agentHostPromptCache.js';
@@ -798,6 +799,7 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 	configValues?: Record<string, unknown>;
 	/** Per-key root config values returned by the fake configuration service's `getRootValue`. */
 	rootValues?: Record<string, unknown>;
+	sessionSandboxPolicy?: ISessionSandboxPolicy;
 	fileContents?: Record<string, string>;
 	fileReadErrors?: readonly string[];
 	shellInitWriteFailures?: number;
@@ -1014,7 +1016,7 @@ async function createAgentSession(disposables: DisposableStore, options?: {
 		// visible through `getEffectiveValue` alone so tests can prove a
 		// consumer does not fall through to root or parent config.
 		getSessionConfigValues: (session: string) => session === sessionUri.toString() ? configValues : undefined,
-		getSessionSandboxPolicy: () => undefined,
+		getSessionSandboxPolicy: () => options?.sessionSandboxPolicy,
 		setSessionSandboxPolicy: () => { },
 		updateSessionConfig: (session, patch) => { sessionConfigUpdates.push({ session, patch }); },
 		getRootValue: ((_schema: unknown, key: string) => rootValues[key]) as IAgentConfigurationService['getRootValue'],
@@ -6228,7 +6230,98 @@ suite('CopilotAgentSession', () => {
 	// ---- sendSteering ----
 
 	suite('room steering', () => {
-		test('uses SDK immediate delivery in the admitted turn and persists the receipt without bypass approvals', async () => {
+		test('room configuration reaches idle and active SDK sessions immediately without a new turn', async () => {
+			const configValues: Record<string, unknown> = { mode: 'plan', autoApprove: 'assisted', sandboxEnabled: 'on' };
+			const { session, mockSession } = await createAgentSession(disposables, { isRoomSession: true, configValues });
+			await session.applyConfiguration();
+			session.resetTurnState('existing-room-turn');
+			Object.assign(configValues, { mode: 'interactive', autoApprove: 'autoApprove', sandboxEnabled: 'off' });
+			await session.applyConfiguration();
+			assert.deepStrictEqual({
+				modes: mockSession.modeSetCalls,
+				permissions: mockSession.permissionModeSetCalls,
+				sandbox: mockSession.sandboxConfigUpdates.map(configuration => (configuration as SandboxConfig).enabled),
+				sends: mockSession.sendRequests.length,
+			}, {
+				modes: [{ mode: 'plan' }, { mode: 'interactive' }],
+				permissions: ['assisted', 'allow-all'], sandbox: [true, false], sends: 0,
+			});
+		});
+
+		test('room configuration application propagates SDK failures instead of waiting until the next turn', async () => {
+			const { session, mockSession } = await createAgentSession(disposables, {
+				isRoomSession: true, configValues: { mode: 'plan', autoApprove: 'autoApprove' },
+			});
+			mockSession.onModeSet = () => { throw new Error('SDK refused mode'); };
+			await assert.rejects(session.applyConfiguration(), /SDK refused mode/);
+			await session.applyMode('plan');
+			assert.strictEqual(mockSession.sendRequests.length, 0);
+		});
+
+		test('room Allow All never overrides current approval restrictions or the runtime sandbox floor', async () => {
+			const rootValues = { [AgentHostAutoApprovePolicyRestrictedConfigKey]: true };
+			const { session, mockSession } = await createAgentSession(disposables, {
+				isRoomSession: true, rootValues,
+				configValues: { mode: 'autopilot', autoApprove: 'autoApprove', sandboxEnabled: 'off' },
+				sessionSandboxPolicy: { enabled: true, allowBypass: false },
+			});
+			await session.applyConfiguration();
+			rootValues[AgentHostAutoApprovePolicyRestrictedConfigKey] = false;
+			await session.applyConfiguration();
+			assert.deepStrictEqual({
+				permissions: mockSession.permissionModeSetCalls,
+				sandbox: mockSession.sandboxConfigUpdates.map(configuration => (configuration as SandboxConfig).enabled),
+			}, { permissions: ['manual', 'allow-all'], sandbox: [true, true] });
+		});
+
+		test('room managed approvals remain human and one-time in Allow All', async () => {
+			const { session, runtime, mockSession, signals, waitForSignal } = await createAgentSession(disposables, {
+				isRoomSession: true, configValues: { mode: 'autopilot', autoApprove: 'autoApprove' },
+			});
+			await session.applyConfiguration();
+			const results = [];
+			for (const toolCallId of ['managed-once', 'managed-again']) {
+				const permission = runtime.handlePermissionRequest({
+					kind: 'read', path: '/workspace/file.ts', toolCallId, managedApprovalRequired: true,
+				});
+				await waitForSignal(signal => signal.kind === 'pending_confirmation' && signal.state.toolCallId === toolCallId);
+				assert.strictEqual(session.respondToPermissionRequest(toolCallId, true), true);
+				results.push(await permission);
+			}
+			assert.deepStrictEqual({
+				permissions: mockSession.permissionModeSetCalls,
+				managed: signals.filter(signal => signal.kind === 'pending_confirmation' && signal.managedApprovalRequired).length,
+				results,
+			}, { permissions: ['allow-all'], managed: 2, results: [{ kind: 'approve-once' }, { kind: 'approve-once' }] });
+		});
+
+		test('room peers run in Autopilot while managed approvals still require a human', async () => {
+			const { session, runtime, mockSession, signals, waitForSignal } = await createAgentSession(disposables, {
+				isRoomSession: true,
+				configValues: { [SessionConfigKey.Mode]: 'autopilot' },
+			});
+			await session.send('Continue the room work', undefined, 'room-autopilot', 'autopilot');
+			const answer = await runtime.handleUserInputRequest({ question: 'Choose the next useful step' }, { sessionId: session.sessionId });
+			const permission = runtime.handlePermissionRequest({
+				kind: 'read', path: '/workspace/file.ts', toolCallId: 'room-managed-approval', managedApprovalRequired: true,
+			});
+			await waitForSignal(signal => signal.kind === 'pending_confirmation');
+			const responded = session.respondToPermissionRequest('room-managed-approval', true);
+			assert.deepStrictEqual({
+				mode: mockSession.modeSetCalls.at(-1),
+				permissions: mockSession.permissionModeSetCalls,
+				answer: answer.answer,
+				managed: signals.some(signal => signal.kind === 'pending_confirmation' && signal.managedApprovalRequired),
+				responded,
+				result: await permission,
+			}, {
+				mode: { mode: 'autopilot' }, permissions: ['manual'],
+				answer: 'The user is not available to answer your question. Choose a pragmatic option best aligned with the context of the request.',
+				managed: true, responded: true, result: { kind: 'approve-once' },
+			});
+		});
+
+		test('uses SDK immediate delivery in the admitted turn and persists the receipt with the selected approvals', async () => {
 			const database = new TestSessionDatabase();
 			const { session, mockSession, signals } = await createAgentSession(disposables, {
 				isRoomSession: true,
@@ -6248,7 +6341,7 @@ suite('CopilotAgentSession', () => {
 			}, {
 				accepted: true, wrongTurn: false,
 				sends: [{ prompt: 'Investigate', attachments: undefined }, { prompt: 'Prioritize correctness', mode: 'immediate' }],
-				parent: 'root-event', newTurns: 0, permissionModes: ['manual'],
+				parent: 'root-event', newTurns: 0, permissionModes: ['allow-all'],
 			});
 		});
 

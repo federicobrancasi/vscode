@@ -791,7 +791,7 @@ function createTurnDelegationContributions(disposables: ReturnType<typeof ensure
 	return { service, database, session, chat: buildDefaultChatUri(session) };
 }
 
-function createBuiltInContributions(disposables: ReturnType<typeof ensureNoDisposablesAreLeakedInTestSuite>, observed?: string[], enableSendInstructions = false, sessionStatus = SessionStatus.IsRead): { readonly service: AgentHostChatContributions; readonly stateManager: AgentHostStateManager; readonly database: TestSessionDatabase; readonly session: string } {
+function createBuiltInContributions(disposables: ReturnType<typeof ensureNoDisposablesAreLeakedInTestSuite>, observed?: string[], enableSendInstructions = false, sessionStatus = SessionStatus.IsRead): { readonly service: AgentHostChatContributions; readonly stateManager: AgentHostStateManager; readonly database: TestSessionDatabase; readonly session: string; readonly rooms: IAgentHostRoomsController } {
 	const logService = new NullLogService();
 	const stateManager = disposables.add(new AgentHostStateManager(logService));
 	stateManager.createSession({
@@ -862,9 +862,10 @@ function createBuiltInContributions(disposables: ReturnType<typeof ensureNoDispo
 		sendTurnMessage: () => observed?.push('queueDrain'),
 	};
 	disposables.add(service.registerHost(host));
-	services.set(IAgentHostRoomsController, createNoopRoomsController());
+	const rooms = createNoopRoomsController();
+	services.set(IAgentHostRoomsController, rooms);
 	disposables.add(registerBuiltInChatContributions(service));
-	return { service, stateManager, database: usageDatabase, session: 'agent-host-session://test' };
+	return { service, stateManager, database: usageDatabase, session: 'agent-host-session://test', rooms };
 }
 
 function createQueueDrainContributions(disposables: ReturnType<typeof ensureNoDisposablesAreLeakedInTestSuite>) {
@@ -2310,14 +2311,18 @@ suite('AgentHostChatContributions', () => {
 			calls.push('chatDraft');
 			return getChatDraft(resource);
 		};
+		contributions.rooms.getMemberModelForChat = async () => {
+			calls.push('roomModel');
+			return { id: 'pending-model', config: { thinkingLevel: 'high' } };
+		};
 
 		const restored = await contributions.service.hydrateChat({ session: contributions.session, chat }, {});
 
 		assert.deepStrictEqual({ calls, restored }, {
-			calls: ['sessionTitle', 'chatDraft'],
+			calls: ['sessionTitle', 'chatDraft', 'roomModel'],
 			restored: {
 				title: 'Restored title',
-				draft,
+				draft: { ...draft, model: { id: 'pending-model', config: { thinkingLevel: 'high' } } },
 			},
 		});
 	});

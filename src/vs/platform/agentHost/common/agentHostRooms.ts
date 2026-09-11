@@ -5,6 +5,10 @@
 
 import { Event } from '../../../base/common/event.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
+import type { AutoApproveLevel, SessionMode } from './agentHostSchema.js';
+import type { SessionSandboxEnabled } from './sessionConfigKeys.js';
+import type { ResolveSessionConfigResult } from './state/protocol/commands.js';
+import type { ModelSelection } from './state/sessionState.js';
 
 export const AgentHostRoomsChannelName = 'agentHostRooms';
 export const MAX_ROOM_WORKERS = 10;
@@ -15,6 +19,17 @@ export type AgentHostRoomMemberState = 'pending' | 'starting' | 'working' | 'idl
 export type AgentHostRoomMessageKind = 'message' | 'work' | 'finding' | 'artifact' | 'system';
 export type AgentHostRoomMessageMode = 'message' | 'steer';
 export type AgentHostRoomDeliveryState = 'pending' | 'submitted' | 'steering' | 'delivered' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+export type IAgentHostRoomModelSelection = ModelSelection;
+
+export interface IAgentHostRoomConfiguration {
+	readonly mode: SessionMode;
+	readonly autoApprove: AutoApproveLevel;
+	readonly sandboxEnabled: SessionSandboxEnabled;
+}
+
+export const defaultAgentHostRoomConfiguration: IAgentHostRoomConfiguration = {
+	mode: 'autopilot', autoApprove: 'default', sandboxEnabled: 'default',
+};
 
 export interface IAgentHostRoomLimits {
 	readonly maxTurns?: number;
@@ -34,13 +49,20 @@ export interface IAgentHostRoomMember {
 	readonly sessionUri: string;
 	/** Host-resolved AHP default chat; optional for compatibility with older hosts. */
 	readonly chatUri?: string;
+	/** Display-compatible selected ID: pendingModel takes precedence over modelSelection. */
 	readonly model?: string;
+	/** Last provider-acknowledged selection; absent until a model is known to be applied. */
+	readonly modelSelection?: ModelSelection;
+	/** Saved next selection, without interrupting an active turn. Null requests the provider's explicit Auto model. */
+	readonly pendingModel?: ModelSelection | null;
+	readonly modelError?: string;
 	readonly state: AgentHostRoomMemberState;
 	readonly worktreeUri?: string;
 	readonly activity?: string;
 	readonly work?: IAgentHostRoomWork;
 	readonly error?: string;
 	readonly turns: number;
+	readonly configuration?: IAgentHostRoomConfiguration;
 }
 
 export interface IAgentHostRoomRun {
@@ -93,7 +115,7 @@ export interface IAgentHostRoomMessage {
 	readonly authorName: string;
 	readonly authorKind: 'human' | 'agent' | 'system';
 	readonly kind: AgentHostRoomMessageKind;
-	/** Absent on older records and ordinary discussion posts. */
+	/** Absent on older records and ordinary queued messages. */
 	readonly mode?: AgentHostRoomMessageMode;
 	readonly text: string;
 	readonly timestamp: number;
@@ -124,15 +146,18 @@ export interface IAgentHostRoomCreateOptions {
 	readonly baseRevision?: string;
 	readonly workerCount: number;
 	readonly model?: string;
+	/** Ordered by worker index. An undefined entry uses the legacy model option, or the provider default. */
+	readonly memberModels?: readonly (ModelSelection | undefined)[];
 }
 
 export interface IAgentHostRoomPostOptions {
 	/** Caller-generated idempotency key, retained when retrying a failed send. */
 	readonly id: string;
 	readonly text: string;
+	/** Explicit recipients. The room composer supplies every peer when its text has no @mentions. */
 	readonly mentions: readonly string[];
 	readonly replyTo?: string;
-	/** Human-only steering. Without mentions, targets all members of the room. */
+	/** Human-only live steering. Without recipients, targets all members; ordinary messages use the explicit recipients above. */
 	readonly mode?: AgentHostRoomMessageMode;
 }
 
@@ -141,6 +166,8 @@ export interface IAgentHostRoomsCapabilities {
 	readonly available: boolean;
 	readonly maxWorkers: number;
 	readonly supportsSteering?: boolean;
+	readonly supportsConfiguration?: boolean;
+	readonly supportsMemberModels?: boolean;
 }
 
 export const IAgentHostRoomsService = createDecorator<IAgentHostRoomsService>('agentHostRoomsService');
@@ -166,6 +193,10 @@ export interface IAgentHostRoomsService {
 	stopRoom(roomId: string): Promise<IAgentHostRoom>;
 	stopMember(roomId: string, memberId: string): Promise<IAgentHostRoom>;
 	retryMember(roomId: string, memberId: string): Promise<IAgentHostRoom>;
+	getRoomConfiguration(roomId: string): Promise<ResolveSessionConfigResult>;
+	setRoomConfiguration(roomId: string, configuration: Partial<IAgentHostRoomConfiguration>): Promise<IAgentHostRoom>;
+	/** Undefined selects the catalog's explicit Auto model; rejects when Auto is unavailable. */
+	setMemberModel(roomId: string, memberId: string, model: ModelSelection | undefined): Promise<IAgentHostRoom>;
 	/** Return immutable patch text; the separately published artifact.uri identifies its file. */
 	getArtifact(roomId: string, artifactId: string): Promise<string>;
 }

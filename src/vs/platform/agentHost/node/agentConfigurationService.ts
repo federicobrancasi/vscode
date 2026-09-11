@@ -197,6 +197,9 @@ export class AgentConfigurationService extends Disposable implements IAgentConfi
 		this._register(this._stateManager.onDidRemoveSession(session => this._sessionSandboxPolicies.delete(session)));
 
 		this._register(this._stateManager.onDidEmitEnvelope(envelope => {
+			if (envelope.rejectionReason) {
+				return;
+			}
 			if (envelope.action.type === ActionType.RootConfigChanged) {
 				this._onDidRootConfigChange.fire();
 			} else if (envelope.action.type === ActionType.SessionConfigChanged) {

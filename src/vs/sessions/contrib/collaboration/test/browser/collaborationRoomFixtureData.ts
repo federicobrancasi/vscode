@@ -5,9 +5,10 @@
 
 import { observableValue, transaction } from '../../../../../base/common/observable.js';
 import { mock } from '../../../../../base/test/common/mock.js';
-import { AgentHostRoomMemberState, IAgentHostRoom, IAgentHostRoomMessagePage } from '../../../../../platform/agentHost/common/agentHostRooms.js';
-import { SessionModelInfo } from '../../../../../platform/agentHost/common/state/protocol/state.js';
-import { CollaborationAvailability, ICollaborationService } from '../../../../services/collaboration/common/collaboration.js';
+import { AgentHostRoomMemberState, defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomMessagePage } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { platformSessionSchema } from '../../../../../platform/agentHost/common/agentHostSchema.js';
+import { ChatInputQuestionKind, ConfirmationOptionKind, ModelSelection, SessionModelInfo, ToolCallStatus } from '../../../../../platform/agentHost/common/state/protocol/state.js';
+import { CollaborationAvailability, CollaborationRequestResponse, ICollaborationRequest, ICollaborationService, ICollaborationWorkspaceTrust } from '../../../../services/collaboration/common/collaboration.js';
 import { CollaborationDraft } from '../../../../services/collaboration/common/collaborationMentions.js';
 
 const timestamp = Date.UTC(2026, 8, 9, 12, 0);
@@ -49,6 +50,8 @@ export function createCollaborationFixtureRoom(): IAgentHostRoom {
 			id: `member-${index + 1}`,
 			name: `Copilot-${index + 1}`,
 			sessionUri: `copilotcli:/fixture-${index + 1}`,
+			model: index % 2 === 0 ? 'gpt-5.5' : 'claude-sonnet-4.6',
+			modelSelection: { id: index % 2 === 0 ? 'gpt-5.5' : 'claude-sonnet-4.6' },
 			worktreeUri: `file:///workspace/worktrees/member-${index + 1}`,
 			state,
 			activity: avenues[index],
@@ -94,6 +97,37 @@ export function createCollaborationFixtureMessages(): IAgentHostRoomMessagePage 
 	};
 }
 
+export function createCollaborationFixtureRequests(): readonly ICollaborationRequest[] {
+	return [{
+		id: 'approve-tests', version: 1, roomId: 'room-fixture', memberId: 'member-5', memberName: 'Copilot-5',
+		chatUri: 'copilotcli:/fixture-5/chat/default', turnId: 'turn-tests', state: 'ready',
+		content: './scripts/test.sh --grep "Configuration cache"',
+		payload: {
+			kind: 'tool', toolCall: {
+				toolCallId: 'run-tests', toolName: 'shell', displayName: 'Run in Terminal', status: ToolCallStatus.PendingConfirmation,
+				invocationMessage: 'Run the focused configuration tests in this peer\'s worktree.',
+				toolInput: './scripts/test.sh --grep "Configuration cache"',
+				options: [
+					{ id: 'once', label: 'Allow Once', kind: ConfirmationOptionKind.Approve },
+					{ id: 'deny', label: 'Reject', kind: ConfirmationOptionKind.Deny },
+				],
+			}
+		},
+	}, {
+		id: 'question-tests', version: 2, roomId: 'room-fixture', memberId: 'member-3', memberName: 'Copilot-3',
+		chatUri: 'copilotcli:/fixture-3/chat/default', turnId: 'turn-question', state: 'ready',
+		payload: {
+			kind: 'input', request: {
+				id: 'baseline', message: 'Which baseline should I compare?',
+				questions: [{
+					id: 'revision', kind: ChatInputQuestionKind.SingleSelect, message: 'Baseline revision', required: true,
+					options: [{ id: 'pinned', label: 'Pinned room baseline' }, { id: 'release', label: 'Latest release' }],
+				}],
+			}
+		},
+	}];
+}
+
 export class CollaborationFixtureService extends mock<ICollaborationService>() {
 	override readonly availability = observableValue<CollaborationAvailability>(this, 'available');
 	override readonly supported = observableValue(this, true);
@@ -102,12 +136,22 @@ export class CollaborationFixtureService extends mock<ICollaborationService>() {
 	override readonly activeRoomId = observableValue<string | undefined>(this, undefined);
 	override readonly activeRoom = observableValue<IAgentHostRoom | undefined>(this, undefined);
 	override readonly messages = observableValue<IAgentHostRoomMessagePage>(this, { messages: [], hasEarlier: false, hasLater: false });
-	override readonly models = observableValue<readonly SessionModelInfo[]>(this, []);
+	override readonly models = observableValue<readonly SessionModelInfo[]>(this, [
+		{ id: 'auto', name: 'Auto', provider: 'copilotcli' },
+		{ id: 'gpt-5.5', name: 'GPT-5.5', provider: 'copilotcli' },
+		{ id: 'claude-sonnet-4.6', name: 'Claude Sonnet 4.6', provider: 'copilotcli' },
+	]);
 	override readonly loading = observableValue(this, false);
+	override readonly loadingEarlier = observableValue(this, false);
 	override readonly creating = observableValue(this, false);
 	override readonly sending = observableValue(this, false);
 	override readonly canSteer = observableValue(this, true);
+	override readonly canConfigure = observableValue(this, true);
+	override readonly canSetMemberModel = observableValue(this, true);
 	override readonly error = observableValue<string | undefined>(this, undefined);
+	override readonly workspaceTrust = observableValue<ICollaborationWorkspaceTrust>(this, { state: 'trusted' });
+	override readonly requests = observableValue<readonly ICollaborationRequest[]>(this, []);
+	override readonly requestError = observableValue<string | undefined>(this, undefined);
 	private readonly drafts = new Map<string, CollaborationDraft>();
 
 	showRoom(room: IAgentHostRoom, messages: IAgentHostRoomMessagePage): void {
@@ -129,5 +173,42 @@ export class CollaborationFixtureService extends mock<ICollaborationService>() {
 	}
 
 	override async refresh(): Promise<void> { }
-	override setFollowingLatest(): void { }
+	override async loadMessages(): Promise<void> { }
+	override async loadEarlierMessages(): Promise<void> { }
+
+	override async setMemberModel(memberId: string, model: ModelSelection | undefined): Promise<void> {
+		const room = this.activeRoom.get();
+		if (!room) {
+			throw new Error('No fixture room selected');
+		}
+		const selection = model ?? { id: 'auto' };
+		this.activeRoom.set({
+			...room, members: room.members.map(member => member.id !== memberId ? member : member.state === 'working' || member.state === 'pending'
+				? { ...member, model: selection.id, pendingModel: selection, modelError: undefined }
+				: { ...member, model: selection.id, modelSelection: selection, pendingModel: undefined, modelError: undefined }),
+		}, undefined);
+	}
+
+	override async getConfiguration() {
+		return { schema: platformSessionSchema.toProtocol(), values: { ...(this.activeRoom.get()?.members[0]?.configuration ?? defaultAgentHostRoomConfiguration) } };
+	}
+
+	override async setConfiguration(configuration: Partial<IAgentHostRoomConfiguration>): Promise<void> {
+		const room = this.activeRoom.get();
+		if (!room) {
+			throw new Error('No fixture room selected');
+		}
+		this.activeRoom.set({
+			...room,
+			members: room.members.map(member => ({ ...member, configuration: { ...defaultAgentHostRoomConfiguration, ...member.configuration, ...configuration } })),
+		}, undefined);
+	}
+
+	override async requestWorkspaceTrust(): Promise<void> {
+		this.workspaceTrust.set({ ...this.workspaceTrust.get(), state: 'trusted' }, undefined);
+	}
+
+	override async respondToRequest(request: ICollaborationRequest, _response: CollaborationRequestResponse): Promise<void> {
+		this.requests.set(this.requests.get().filter(candidate => candidate.id !== request.id || candidate.version !== request.version), undefined);
+	}
 }

@@ -14,8 +14,10 @@ import { URI } from '../../../../base/common/uri.js';
 import { isUUID } from '../../../../base/common/uuid.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { NullLogService } from '../../../log/common/log.js';
-import { IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomMember } from '../../common/agentHostRooms.js';
+import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomMember } from '../../common/agentHostRooms.js';
+import { platformSessionSchema } from '../../common/agentHostSchema.js';
 import { buildDefaultChatUri } from '../../common/state/sessionState.js';
+import { AgentSession } from '../../common/agentService.js';
 import { AgentHostRooms } from '../../node/agentHostRooms.js';
 import { AgentHostRoomsStorage } from '../../node/agentHostRoomsStorage.js';
 import { IRoomRecord, IRoomRuntime, IRoomRuntimeEvent } from '../../node/agentHostRoomsTypes.js';
@@ -160,6 +162,19 @@ suite('AgentHostRoomsStorage', function () {
 		}), /preserved member identities/);
 	});
 
+	test('member configuration roundtrips and upgrades legacy journals without changing identities', async () => {
+		const original = record();
+		await storage.save(original);
+		const configuration: IAgentHostRoomConfiguration = { mode: 'interactive', autoApprove: 'autoApprove', sandboxEnabled: 'off' };
+		const updated: IRoomRecord = {
+			...original,
+			room: { ...original.room, revision: original.room.revision + 1, members: original.room.members.map(member => ({ ...member, configuration })) },
+		};
+		await storage.save(updated);
+		const restored = new AgentHostRoomsStorage(URI.file(root), new NullLogService());
+		assert.deepStrictEqual(await restored.load(), [updated]);
+	});
+
 	test('content exclusion denial preserves the worktree and real index without publishing a patch', async () => {
 		const { room } = await initializeRepository();
 		const member = room.members[0];
@@ -213,11 +228,24 @@ suite('AgentHostRoomsStorage', function () {
 	test('controller prepares real worktrees using the admitted member snapshots', async () => {
 		await initializeRepository();
 		const submitted = new DeferredPromise<void>();
+		const resumed = new DeferredPromise<void>();
 		const prepared: IAgentHostRoomMember[] = [];
+		let sends = 0;
 		const runtime = new class extends Disposable implements IRoomRuntime {
 			private readonly changed = this._register(new Emitter<IRoomRuntimeEvent>());
 			readonly onDidChange = this.changed.event;
 			private readonly turns = new Map<string, string>();
+
+			validateModel(): void { }
+			getModel(): undefined { return undefined; }
+			publishModel(): void { }
+			async applyModel(): Promise<void> { }
+
+			async resolveConfiguration(member: IAgentHostRoomMember, configuration?: IAgentHostRoomConfiguration) {
+				return { schema: platformSessionSchema.toProtocol(), values: { ...(configuration ?? member.configuration ?? defaultAgentHostRoomConfiguration) } };
+			}
+
+			async applyConfiguration(): Promise<void> { }
 
 			async prepare(room: IAgentHostRoom, member: IAgentHostRoomMember): Promise<void> {
 				assert.deepStrictEqual(member, room.members.find(candidate => candidate.id === member.id));
@@ -230,8 +258,12 @@ suite('AgentHostRoomsStorage', function () {
 			submit(sessionUri: string, turnId: string): void {
 				this.turns.set(sessionUri, turnId);
 				this.changed.fire({ sessionUri, turnId, state: 'working' });
-				if (this.turns.size === 2) {
+				sends++;
+				if (sends === 2) {
 					void submitted.complete();
+				}
+				if (sends === 4) {
+					void resumed.complete();
 				}
 			}
 
@@ -261,6 +293,25 @@ suite('AgentHostRoomsStorage', function () {
 			const cwd = URI.parse(member.worktreeUri!).fsPath;
 			assert.strictEqual((await git(cwd, ['rev-parse', 'HEAD'])).trim(), room.baseRevision);
 		}
+		await rooms.postMessage(room.id, {
+			id: 'ordinary-followup', text: 'Check the existing work', mentions: room.members.map(member => member.id),
+		});
+		for (const member of room.members) {
+			await rooms.read(AgentSession.id(member.sessionUri));
+		}
+		assert.deepStrictEqual({
+			deliveries: (await rooms.getMessages(room.id)).messages[0].deliveries.map(delivery => delivery.state),
+			available: (await rooms.getCapabilities()).available,
+		}, { deliveries: ['submitted', 'submitted'], available: true });
+		await rooms.postMessage(room.id, { id: 'still-open', text: 'The room remains usable', mentions: [] });
+		await rooms.stopRoom(room.id);
+		await rooms.startRoom(room.id, {});
+		await resumed.p;
+		assert.deepStrictEqual({
+			turns: sends,
+			sessions: (await rooms.getRoom(room.id)).members.map(member => member.sessionUri),
+			available: (await rooms.getCapabilities()).available,
+		}, { turns: 4, sessions: room.members.map(member => member.sessionUri), available: true });
 		await rooms.stopRoom(room.id);
 	});
 
@@ -302,6 +353,71 @@ suite('AgentHostRoomsStorage', function () {
 		};
 		await storage.save(steering);
 		assert.deepStrictEqual(await storage.load(), [steering]);
+	});
+
+	test('persists model preferences independently of preserved member identities and configuration', async () => {
+		const original = record();
+		await storage.save(original);
+		const configuration: IAgentHostRoomConfiguration = { mode: 'plan', autoApprove: 'assisted', sandboxEnabled: 'on' };
+		const selected = { id: 'another-model', config: { thinkingLevel: 'high', contextSize: 1_000_000, adaptive: false } };
+		const pending: IRoomRecord = {
+			...original,
+			room: {
+				...original.room, revision: 2,
+				members: [{ ...original.room.members[0], model: selected.id, modelSelection: { id: 'test-model' }, pendingModel: selected, configuration, modelError: 'SDK rejected the requested model' }],
+			},
+		};
+		await storage.save(pending);
+		const loadedPending = await storage.load();
+		const applied: IRoomRecord = {
+			...original,
+			room: { ...original.room, revision: 3, members: [{ ...original.room.members[0], model: selected.id, modelSelection: selected, configuration }] },
+		};
+		await storage.save(applied);
+		const loadedApplied = await storage.load();
+		const reset: IRoomRecord = {
+			...applied,
+			room: { ...applied.room, revision: 4, members: [{ ...applied.room.members[0], model: 'auto', pendingModel: null }] },
+		};
+		await storage.save(reset);
+		assert.deepStrictEqual({ pending: loadedPending, applied: loadedApplied, reset: await storage.load() }, { pending: [pending], applied: [applied], reset: [reset] });
+	});
+
+	test('model updates cannot change member names or session identities', async () => {
+		const original = record();
+		await storage.save(original);
+		for (const identity of [{ name: 'Other worker' }, { sessionUri: 'copilotcli:/different-session' }]) {
+			const member = { ...original.room.members[0], ...identity, model: 'other-model', pendingModel: { id: 'other-model' } };
+			await assert.rejects(storage.save({
+				...original, room: { ...original.room, revision: 2, members: [member] },
+				messages: original.messages.map(message => message.authorKind === 'agent' && message.authorId === member.id ? { ...message, authorName: member.name } : message),
+			}), /preserved member identities changed/);
+		}
+		assert.deepStrictEqual(await storage.load(), [original]);
+	});
+
+	test('loads legacy selections and unavailable catalog entries without treating them as journal corruption', async () => {
+		const original = record();
+		await storage.save(original);
+		const legacy = await storage.load();
+		const retired: IRoomRecord = {
+			...original,
+			room: { ...original.room, revision: 2, members: [{ ...original.room.members[0], model: 'retired-model', pendingModel: { id: 'retired-model', config: { formerOption: 'old-value' } } }] },
+		};
+		await storage.save(retired);
+		assert.deepStrictEqual({ legacy, retired: await storage.load() }, { legacy: [original], retired: [retired] });
+	});
+
+	test('rejects non-finite model configuration before JSON can silently convert it to null', async () => {
+		const original = record();
+		await storage.save(original);
+		for (const contextSize of [NaN, Infinity, -Infinity]) {
+			await assert.rejects(storage.save({
+				...original,
+				room: { ...original.room, revision: 2, members: [{ ...original.room.members[0], pendingModel: { id: 'test-model', config: { contextSize } } }] },
+			}), /Invalid room model configuration/);
+		}
+		assert.deepStrictEqual(await storage.load(), [original]);
 	});
 
 	test('accepts a created room with ten workers and no optional runtime fields', async () => {
@@ -455,6 +571,25 @@ suite('AgentHostRoomsStorage', function () {
 		['invalid member ID', changeMember({ id: '/absolute' })],
 		['invalid member name', changeMember({ name: 42 })],
 		['invalid member model', changeMember({ model: {} })],
+		['null applied model', changeMember({ modelSelection: null })],
+		['empty applied model ID', changeMember({ modelSelection: { id: '' } })],
+		['non-string applied model ID', changeMember({ modelSelection: { id: 42 } })],
+		['unknown model selection fields', changeMember({ modelSelection: { id: 'test-model', extra: true } })],
+		['null model configuration', changeMember({ modelSelection: { id: 'test-model', config: null } })],
+		['array model configuration', changeMember({ modelSelection: { id: 'test-model', config: [] } })],
+		['nested model configuration', changeMember({ modelSelection: { id: 'test-model', config: { thinkingLevel: { id: 'high' } } } })],
+		['invalid pending model', changeMember({ pendingModel: false })],
+		['invalid pending model configuration', changeMember({ pendingModel: { id: 'test-model', config: { tiers: ['high'] } } })],
+		['mismatched selected model alias', changeMember({ pendingModel: { id: 'other-model' } })],
+		['mismatched applied model alias', changeMember({ modelSelection: { id: 'other-model' } })],
+		['mismatched explicit default alias', changeMember({ pendingModel: null })],
+		['invalid model error', changeMember({ modelError: { message: 'error' } })],
+		['null member configuration', changeMember({ configuration: null })],
+		['incomplete member configuration', changeMember({ configuration: { mode: 'plan' } })],
+		['invalid member mode', changeMember({ configuration: { ...defaultAgentHostRoomConfiguration, mode: 'other' } })],
+		['invalid member approvals', changeMember({ configuration: { ...defaultAgentHostRoomConfiguration, autoApprove: 'autopilot' } })],
+		['invalid member sandbox', changeMember({ configuration: { ...defaultAgentHostRoomConfiguration, sandboxEnabled: true } })],
+		['configuration cannot change topology', changeMember({ configuration: { ...defaultAgentHostRoomConfiguration, isolation: 'folder' } })],
 		['invalid session URI', changeMember({ sessionUri: 'no-scheme' })],
 		['legacy Copilot session scheme', changeMember({ sessionUri: 'copilot:/member-one' })],
 		['different provider session scheme', changeMember({ sessionUri: 'claude:/member-one' })],

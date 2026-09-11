@@ -225,6 +225,21 @@ suite('AgentConfigurationService', () => {
 				{ session: uri, config: { level: 'low' }, origin: { clientId: 'picker', clientSeq: 7 } },
 			]);
 		});
+
+		test('rejected configuration cannot reset a selected sandbox or trigger runtime updates', () => {
+			const uri = URI.from({ scheme: 'copilot', path: '/a' }).toString();
+			manager.createSession(makeSummary(uri));
+			seedSessionConfig(uri, { sandboxEnabled: 'on', autoApprove: 'default' });
+			service.setSessionSandboxPolicy(uri, { enabled: true, allowBypass: false });
+			const changes: Record<string, unknown>[] = [];
+			disposables.add(service.onDidSessionConfigChange(event => changes.push(event.config)));
+			manager.rejectClientAction(uri, {
+				type: ActionType.SessionConfigChanged, config: { sandboxEnabled: 'off', autoApprove: 'autoApprove' },
+			}, { clientId: 'picker', clientSeq: 1 }, 'Restricted by policy');
+			assert.deepStrictEqual({
+				changes, values: service.getSessionConfigValues(uri),
+			}, { changes: [], values: { sandboxEnabled: 'on', autoApprove: 'default' } });
+		});
 	});
 
 	test('does not persist provider-backed root settings in agent-host config', async () => {

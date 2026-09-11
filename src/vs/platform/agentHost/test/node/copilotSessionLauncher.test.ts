@@ -860,7 +860,7 @@ suite('CopilotSessionLauncher resume fallback', () => {
 		}
 	}
 
-	function createResumeFailingLaunch(message: string, code = -32603, sessionOpenTelemetry: IAgentHostSessionOpenTelemetry = noopSessionOpenTelemetry): { readonly launcher: CopilotSessionLauncher; readonly plan: CopilotSessionLaunchPlan; readonly getCreateSessionCalls: () => number } {
+	function createResumeFailingLaunch(message: string, code = -32603, sessionOpenTelemetry: IAgentHostSessionOpenTelemetry = noopSessionOpenTelemetry, rooms = createNoopRoomsController()): { readonly launcher: CopilotSessionLauncher; readonly plan: CopilotSessionLaunchPlan; readonly getCreateSessionCalls: () => number } {
 		let createSessionCalls = 0;
 		const session = {
 			sessionId: 'session-1',
@@ -879,7 +879,7 @@ suite('CopilotSessionLauncher resume fallback', () => {
 			},
 		};
 		return {
-			launcher: createTestLauncher(undefined, {}, new NullLogService(), sessionOpenTelemetry),
+			launcher: createTestLauncher(undefined, {}, new NullLogService(), sessionOpenTelemetry, undefined, rooms),
 			plan: {
 				client,
 				sessionId: 'session-1',
@@ -905,6 +905,21 @@ suite('CopilotSessionLauncher resume fallback', () => {
 			assert.strictEqual(getCreateSessionCalls(), 1);
 		} finally {
 			sessions.dispose();
+			await launcher.disposeByokProxyHandle();
+		}
+	});
+
+	test('never recreates a preserved room member when its SDK session cannot resume', async () => {
+		const rooms = createNoopRoomsController();
+		rooms.isRoomSessionUri = () => true;
+		const { launcher, plan, getCreateSessionCalls } = createResumeFailingLaunch(
+			`Request session.resume failed with message: LocalRpcSession: 'session.getMessages' returned no events for session session-1`,
+			-32603, noopSessionOpenTelemetry, rooms,
+		);
+		try {
+			await assert.rejects(launcher.launch(plan, testRuntime), /returned no events/);
+			assert.strictEqual(getCreateSessionCalls(), 0);
+		} finally {
 			await launcher.disposeByokProxyHandle();
 		}
 	});

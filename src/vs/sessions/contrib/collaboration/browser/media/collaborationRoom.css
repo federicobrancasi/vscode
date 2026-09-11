@@ -3,22 +3,34 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+.custom-view-content.collaboration-view-content {
+	padding: 0;
+}
+
 .collaboration-room {
 	height: 100%;
+	min-height: 0;
+	min-width: 0;
 	display: flex;
 	flex-direction: column;
+	overflow: hidden;
 	color: var(--session-view-foreground, var(--vscode-foreground));
 	background: var(--session-view-background, var(--vscode-agentsPanel-background));
+	font-size: var(--vscode-fontSize-body1);
 }
 
 .collaboration-room [hidden] {
 	display: none !important;
 }
 
-.collaboration-room .room-header,
-.collaboration-room .room-roster,
+.collaboration-room .room-header {
+	box-sizing: border-box;
+	width: 100%;
+	padding: var(--vscode-spacing-size120) var(--vscode-spacing-size200);
+	flex-shrink: 0;
+}
+
 .collaboration-room .room-composer,
-.collaboration-room .room-start-form,
 .collaboration-room .room-saved-rooms,
 .collaboration-room .room-message,
 .collaboration-room .room-notice,
@@ -27,34 +39,116 @@
 	width: 100%;
 	max-width: 950px;
 	margin: 0 auto;
-	padding: 12px 20px;
+	padding: var(--vscode-spacing-size120) var(--vscode-spacing-size200);
+}
+
+.collaboration-room .room-layout {
+	position: relative;
+	overflow: hidden;
+	flex: 1;
+	min-height: 0;
+}
+
+.collaboration-room .room-main {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
+}
+
+.collaboration-room .room-side-panel {
+	box-sizing: border-box;
+	overflow: hidden;
+	border-left: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+	background: var(--vscode-sideBar-background);
+}
+
+.collaboration-room .room-panel-content {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size200);
+	padding: var(--vscode-spacing-size160);
+}
+
+.collaboration-room .room-panel-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-panel-header h3 {
+	margin: 0;
+}
+
+.collaboration-room .room-layout-narrow > .room-panel-host {
+	position: absolute;
+	top: 0;
+	right: 0;
+	z-index: 10;
+	box-shadow: var(--vscode-shadow-lg);
+}
+
+.hc-black .collaboration-room .room-layout-narrow > .room-panel-host,
+.hc-light .collaboration-room .room-layout-narrow > .room-panel-host {
+	box-shadow: none;
 }
 
 .collaboration-room .room-header,
+.collaboration-room .room-configuration,
+.collaboration-room .room-navigation,
 .collaboration-room .room-actions,
+.collaboration-room .room-member-actions,
+.collaboration-room .room-message-actions,
 .collaboration-room .room-composer-actions,
 .collaboration-room .room-history-controls {
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: var(--vscode-spacing-size80);
 	flex-wrap: wrap;
 }
 
 .collaboration-room h2 {
-	font-size: 16px;
-	font-weight: 600;
+	font-size: var(--vscode-fontSize-heading2);
+	font-weight: var(--vscode-fontWeight-semiBold);
 	margin: 0;
 }
 
 .collaboration-room .room-heading {
 	flex: 1;
-	min-width: 140px;
+	min-width: 0;
+}
+
+.collaboration-room .room-heading h2 {
+	overflow-wrap: anywhere;
+}
+
+.collaboration-room .room-navigation select {
+	width: 100%;
+}
+
+.collaboration-room .room-configuration {
+	flex-shrink: 0;
+}
+
+.collaboration-room .room-configuration [role="button"] {
+	padding: 4px 8px;
+}
+
+.collaboration-room .room-configuration > .room-hint {
+	flex: 0 0 auto;
+}
+
+.collaboration-room .room-configuration .agent-host-mode-permissions-trigger {
+	display: flex;
+	align-items: center;
 }
 
 .collaboration-room h3 {
-	font-size: 13px;
-	font-weight: 600;
-	margin: 0 0 8px;
+	font-size: var(--vscode-fontSize-heading3);
+	font-weight: var(--vscode-fontWeight-semiBold);
+	margin: 0 0 var(--vscode-spacing-size80);
 }
 
 .collaboration-room .room-saved-room-list {
@@ -81,62 +175,65 @@
 
 .collaboration-room .room-subtitle,
 .collaboration-room .room-message-meta,
-.collaboration-room .room-member-work,
+.collaboration-room .room-model-detail,
+.collaboration-room .room-member-state,
 .collaboration-room .room-hint {
 	color: var(--vscode-descriptionForeground);
-	font-size: 12px;
+	font-size: var(--vscode-fontSize-label1);
 }
 
 .collaboration-room .room-roster {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-	align-items: start;
-	gap: 6px;
-	max-height: 200px;
-	overflow: auto;
-	flex-shrink: 0;
-	padding-top: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size120);
 }
 
 .collaboration-room .room-member {
 	min-width: 0;
-	padding: 8px;
-	border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
-	border-radius: 4px;
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size60);
+	padding-bottom: var(--vscode-spacing-size120);
+	border-bottom: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
 }
 
-.collaboration-room .room-member summary {
-	cursor: pointer;
-	font-size: 12px;
-	margin-top: 4px;
+.collaboration-room .room-member-heading {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--vscode-spacing-size80);
 }
 
-.collaboration-room .room-member-state,
+.collaboration-room .room-member-heading > button {
+	background: transparent;
+	padding-left: 0;
+	border-color: var(--vscode-contrastBorder, transparent);
+	color: var(--vscode-foreground);
+	font-weight: var(--vscode-fontWeight-semiBold);
+}
+
+.collaboration-room .room-member-actions {
+	margin-left: auto;
+}
+
+.collaboration-room .room-member-model,
+.collaboration-room .room-model-picker {
+	min-width: 0;
+}
+
 .collaboration-room .room-member-activity {
-	white-space: nowrap;
-}
-
-.collaboration-room .room-member-state {
-	display: inline-block;
-	max-width: calc(100% - 16px);
-	overflow: hidden;
-	text-overflow: ellipsis;
-	vertical-align: bottom;
-}
-
-.collaboration-room .room-member-activity {
-	display: block;
-	overflow: hidden;
-	text-overflow: ellipsis;
+	overflow-wrap: anywhere;
+	font-size: var(--vscode-fontSize-label1);
 	color: var(--vscode-descriptionForeground);
 }
 
-.collaboration-room .room-member-work {
+.collaboration-room .room-goal p {
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
 }
 
-.collaboration-room .room-member[data-state="failed"],
+.collaboration-room .room-member-error,
+.collaboration-room .room-model-detail.error,
 .collaboration-room .room-notice.error {
 	border-color: var(--vscode-inputValidation-errorBorder);
 	color: var(--vscode-errorForeground);
@@ -146,21 +243,110 @@
 	border-color: var(--vscode-inputValidation-warningBorder);
 }
 
+.collaboration-room .room-attention {
+	box-sizing: border-box;
+	width: 100%;
+}
+
+.collaboration-room .room-trust,
+.collaboration-room .room-request {
+	margin-bottom: var(--vscode-spacing-size80);
+	padding: var(--vscode-spacing-size120);
+	border: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+	border-radius: var(--vscode-cornerRadius-medium);
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.collaboration-room .room-trust {
+	border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-contrastBorder));
+}
+
+.collaboration-room .room-request h4 {
+	margin: var(--vscode-spacing-sizeNone) var(--vscode-spacing-sizeNone) var(--vscode-spacing-size80);
+	font-size: var(--vscode-fontSize-body1);
+	font-weight: var(--vscode-fontWeight-semiBold);
+}
+
+.collaboration-room .room-request pre,
+.collaboration-room .room-trust pre {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	max-height: 220px;
+	overflow: auto;
+}
+
+.collaboration-room .room-request fieldset {
+	border: none;
+	margin: var(--vscode-spacing-sizeNone);
+	padding: var(--vscode-spacing-size80) var(--vscode-spacing-sizeNone);
+	min-width: 0;
+}
+
+.collaboration-room .room-request legend {
+	font-weight: var(--vscode-fontWeight-semiBold);
+}
+
+.collaboration-room .room-request label {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size40);
+}
+
+.collaboration-room .room-request input,
+.collaboration-room .room-request textarea,
+.collaboration-room .room-request select {
+	width: 100%;
+}
+
+.collaboration-room .room-request-status,
+.collaboration-room .room-trust p {
+	margin: var(--vscode-spacing-size80) var(--vscode-spacing-sizeNone);
+}
+
+.collaboration-room .room-request-status.error,
+.collaboration-room .room-trust .error {
+	color: var(--vscode-errorForeground);
+}
+
 .collaboration-room .room-feed,
 .collaboration-room .room-start-container {
 	flex: 1;
 	min-height: 0;
-	overflow-y: auto;
+	min-width: 0;
+	overflow: hidden;
 	overscroll-behavior: contain;
 }
 
+.collaboration-room .room-start-container {
+	padding: var(--vscode-spacing-size320);
+	box-sizing: border-box;
+	overflow-y: auto;
+}
+
+.collaboration-room .room-feed .monaco-list-row {
+	cursor: text;
+}
+
+.collaboration-room .room-feed .monaco-list-row.focused {
+	background: transparent;
+}
+
 .collaboration-room .room-message {
-	border-top: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+	border-left: var(--vscode-strokeThickness) solid var(--vscode-foreground);
+	border-bottom: var(--vscode-strokeThickness) solid var(--vscode-contrastBorder, transparent);
+	white-space: normal;
 	overflow-wrap: anywhere;
+	color: var(--vscode-foreground);
+}
+
+.collaboration-room .room-message-body {
+	user-select: text;
 }
 
 .collaboration-room .room-message-author {
-	font-weight: 600;
+	font-weight: var(--vscode-fontWeight-semiBold);
+	color: var(--vscode-foreground);
 }
 
 .collaboration-room .room-message-meta {
@@ -172,6 +358,7 @@
 
 .collaboration-room .room-message pre {
 	overflow: auto;
+	white-space: pre;
 }
 
 .collaboration-room .room-message img {
@@ -182,10 +369,31 @@
 	margin-bottom: 0;
 }
 
+.collaboration-room .room-message-actions {
+	padding-top: var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-message-actions .monaco-button {
+	width: auto;
+	padding: var(--vscode-spacing-size40) var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-history-controls {
+	justify-content: flex-end;
+	padding-top: var(--vscode-spacing-size40);
+	padding-bottom: var(--vscode-spacing-size40);
+}
+
+.collaboration-room .room-history-status {
+	padding: var(--vscode-spacing-size40) var(--vscode-spacing-size200);
+	font-size: var(--vscode-fontSize-label1);
+	color: var(--vscode-descriptionForeground);
+}
+
 .collaboration-room .room-composer {
 	flex-shrink: 0;
 	position: relative;
-	border-top: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+	border-top: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
 }
 
 .collaboration-room .room-composer textarea {
@@ -202,8 +410,8 @@
 	font: inherit;
 	color: var(--vscode-input-foreground);
 	background: var(--vscode-input-background);
-	border: 1px solid var(--vscode-input-border, transparent);
-	border-radius: 3px;
+	border: var(--vscode-strokeThickness) solid var(--vscode-input-border, transparent);
+	border-radius: var(--vscode-cornerRadius-small);
 	padding: 6px 8px;
 }
 
@@ -212,8 +420,8 @@
 	padding: 4px 8px;
 	color: var(--vscode-button-secondaryForeground);
 	background: var(--vscode-button-secondaryBackground);
-	border: 1px solid var(--vscode-button-border, transparent);
-	border-radius: 3px;
+	border: var(--vscode-strokeThickness) solid var(--vscode-button-border, transparent);
+	border-radius: var(--vscode-cornerRadius-small);
 	cursor: pointer;
 }
 
@@ -236,8 +444,8 @@
 }
 
 .collaboration-room :focus-visible {
-	outline: 1px solid var(--vscode-focusBorder);
-	outline-offset: 2px;
+	outline: var(--vscode-strokeThickness) solid var(--vscode-focusBorder);
+	outline-offset: -1px;
 }
 
 .collaboration-room .room-composer-actions {
@@ -246,18 +454,6 @@
 
 .collaboration-room .room-hint {
 	flex: 1;
-}
-
-.collaboration-room .room-history-controls > label {
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-	flex: 1;
-	min-width: 120px;
-}
-
-.collaboration-room .room-history-controls > label input {
-	width: 100%;
 }
 
 .collaboration-room .room-run-limits {
@@ -292,6 +488,7 @@
 	color: var(--vscode-quickInput-foreground);
 	background: var(--vscode-quickInput-background);
 	border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+	border-radius: var(--vscode-cornerRadius-large);
 	box-shadow: var(--vscode-shadow-lg);
 	z-index: 1;
 }
@@ -309,7 +506,7 @@
 .collaboration-room .room-start-form {
 	display: flex;
 	flex-direction: column;
-	gap: 14px;
+	gap: var(--vscode-spacing-size120);
 }
 
 .collaboration-room .room-start-form label {
@@ -323,15 +520,14 @@
 	resize: vertical;
 }
 
-.collaboration-room .room-start-limits {
+.collaboration-room .room-creation-models {
 	display: flex;
-	gap: 12px;
-	flex-wrap: wrap;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size120);
 }
 
-.collaboration-room .room-start-limits label {
-	flex: 1;
-	min-width: 130px;
+.collaboration-room .room-initial-peer-name {
+	font-weight: var(--vscode-fontWeight-semiBold);
 }
 
 .collaboration-room .room-start-form fieldset {

@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { constObservable } from '../../../../base/common/observable.js';
+import { toDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
@@ -14,6 +15,7 @@ import { CollaborationRoomWidget } from './collaborationRoomWidget.js';
 
 export class CollaborationRoomView extends AbstractCustomView {
 	readonly title = constObservable(localize('room.surfaceTitle', "Agent Collab"));
+	override readonly maxWidth = Number.POSITIVE_INFINITY;
 	private widget: CollaborationRoomWidget | undefined;
 
 	constructor(
@@ -24,15 +26,14 @@ export class CollaborationRoomView extends AbstractCustomView {
 	}
 
 	render(container: HTMLElement): void {
+		container.classList.add('collaboration-view-content');
+		this._register(toDisposable(() => container.classList.remove('collaboration-view-content')));
 		this.widget = this._register(this.instantiationService.createInstance(CollaborationRoomWidget, container));
 		this._register(this.roomViewService.registerView(this.widget));
 	}
 
-	layout(_width: number, height: number): void {
-		if (this.widget) {
-			this.widget.element.style.height = `${height}px`;
-			this.widget.restoreScrollPosition();
-		}
+	layout(width: number, height: number): void {
+		this.widget?.layout(width, height);
 	}
 
 	override focus(): void {

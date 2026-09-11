@@ -660,8 +660,8 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 			// Only a session with no events on disk may fall back to creating a
 			// fresh one under the same ID (seeding model & working directory
 			// from stored metadata); every other failure propagates.
-			if (!shouldCreateEmptySessionAfterResumeError(resumeError)) {
-				this._logService.warn(`[Copilot:${plan.sessionId}] Resume failure does not indicate an empty session; surfacing it instead of replacing the session with an empty one`);
+			if (this._rooms.isRoomSessionUri(runtime.configurationResource.toString()) || !shouldCreateEmptySessionAfterResumeError(resumeError)) {
+				this._logService.warn(`[Copilot:${plan.sessionId}] Resume failure cannot replace the preserved session with an empty one`);
 				throw resumeError;
 			}
 

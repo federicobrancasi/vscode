@@ -5,8 +5,9 @@
 
 import { ContextKeyExpr, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 import { IObservable } from '../../../../base/common/observable.js';
-import { AgentHostRoomMessageMode, IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery } from '../../../../platform/agentHost/common/agentHostRooms.js';
-import { SessionModelInfo } from '../../../../platform/agentHost/common/state/protocol/state.js';
+import { AgentHostRoomMessageMode, IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessagePage } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { ResolveSessionConfigResult } from '../../../../platform/agentHost/common/state/protocol/commands.js';
+import { ChatInputAnswer, ChatInputRequest, ChatInputResponseKind, ModelSelection, SessionModelInfo, ToolCallConfirmationState } from '../../../../platform/agentHost/common/state/protocol/state.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { ChatContextKeys } from '../../../../workbench/contrib/chat/common/actions/chatContextKeys.js';
 import { CollaborationDraft } from './collaborationMentions.js';
@@ -27,6 +28,38 @@ export const COLLABORATION_MESSAGE_PAGE_SIZE = 100;
 
 export type CollaborationAvailability = 'disabled' | 'connecting' | 'available' | 'unavailable' | 'error';
 
+export interface ICollaborationWorkspaceTrust {
+	readonly state: 'checking' | 'untrusted' | 'requesting' | 'trusted' | 'unavailable';
+	readonly repositoryUri?: string;
+	readonly worktreeUris?: readonly string[];
+	readonly error?: string;
+}
+
+export type CollaborationRequestPayload =
+	| { readonly kind: 'tool'; readonly toolCall: ToolCallConfirmationState }
+	| { readonly kind: 'input'; readonly request: ChatInputRequest };
+
+/** A pending request from a selected room member's server-confirmed active turn. */
+export interface ICollaborationRequest {
+	readonly id: string;
+	readonly version: number;
+	readonly roomId: string;
+	readonly memberId: string;
+	readonly memberName: string;
+	readonly chatUri: string;
+	readonly turnId: string;
+	readonly payload: CollaborationRequestPayload;
+	readonly state: 'ready' | 'submitting' | 'failed';
+	readonly error?: string;
+	readonly content?: string;
+	readonly contentLoading?: boolean;
+	readonly contentError?: string;
+}
+
+export type CollaborationRequestResponse =
+	| { readonly kind: 'tool'; readonly approved: boolean; readonly selectedOptionId?: string }
+	| { readonly kind: 'input'; readonly response: ChatInputResponseKind; readonly answers?: Record<string, ChatInputAnswer> };
+
 export const ICollaborationService = createDecorator<ICollaborationService>('collaborationService');
 
 /** Observable, renderer-local facade over the authoritative local room host. */
@@ -42,15 +75,27 @@ export interface ICollaborationService {
 	readonly messages: IObservable<IAgentHostRoomMessagePage>;
 	readonly models: IObservable<readonly SessionModelInfo[]>;
 	readonly loading: IObservable<boolean>;
+	readonly loadingEarlier: IObservable<boolean>;
 	readonly creating: IObservable<boolean>;
 	readonly sending: IObservable<boolean>;
 	readonly canSteer: IObservable<boolean>;
+	readonly canConfigure: IObservable<boolean>;
+	readonly canSetMemberModel: IObservable<boolean>;
 	readonly error: IObservable<string | undefined>;
+	readonly workspaceTrust: IObservable<ICollaborationWorkspaceTrust>;
+	readonly requests: IObservable<readonly ICollaborationRequest[]>;
+	readonly requestError: IObservable<string | undefined>;
+	requestWorkspaceTrust(): Promise<void>;
+	respondToRequest(request: ICollaborationRequest, response: CollaborationRequestResponse): Promise<void>;
+	reloadRequestContent(request: ICollaborationRequest): Promise<void>;
+	getConfiguration(): Promise<ResolveSessionConfigResult>;
+	setConfiguration(configuration: Partial<IAgentHostRoomConfiguration>): Promise<void>;
+	setMemberModel(memberId: string, model: ModelSelection | undefined): Promise<void>;
 	refresh(): Promise<void>;
 	selectRoom(roomId: string | undefined): Promise<void>;
 	createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom>;
-	loadMessages(query?: IAgentHostRoomMessageQuery): Promise<void>;
-	setFollowingLatest(following: boolean): void;
+	loadMessages(): Promise<void>;
+	loadEarlierMessages(): Promise<void>;
 	getDraft(roomId: string): CollaborationDraft;
 	sendMessage(mode?: AgentHostRoomMessageMode): Promise<void>;
 	retryMessage(messageId: string): Promise<void>;

@@ -1061,6 +1061,7 @@ export class CopilotAgentSession extends Disposable {
 	private readonly _slashCommandProvider: CopilotSlashCommandProvider;
 	/** Last agent mode pushed to the SDK via {@link applyMode}, to elide redundant `rpc.mode.set` calls. */
 	private _lastAppliedMode: CopilotSdkMode | undefined;
+	private readonly _modeSequencer = new Sequencer();
 	private _lastAppliedPermissionMode: PermissionMode | undefined;
 	private _autoApprovalExperimentalModeEnabled = false;
 	private readonly _permissionModeSequencer = new Sequencer();
@@ -3060,6 +3061,9 @@ export class CopilotAgentSession extends Disposable {
 	 * Permission and sandbox failures prevent the turn from starting.
 	 */
 	private async _prepareSdkTurn(mode: CopilotSdkMode | undefined): Promise<void> {
+		if (this._isRoomSession) {
+			mode = this._configurationService.getEffectiveValue(this._ownerSessionUri.toString(), platformSessionSchema, SessionConfigKey.Mode) ?? mode;
+		}
 		await this.applyMode(mode);
 		await this.syncPermissionMode('turn-start');
 		await this._applyEffectiveSandboxConfig();
@@ -3270,17 +3274,28 @@ export class CopilotAgentSession extends Disposable {
 	 * last applied value. Failures are logged and swallowed so that mode
 	 * propagation does not block the turn.
 	 */
-	async applyMode(mode: CopilotSdkMode | undefined): Promise<void> {
-		if (!mode || mode === this._lastAppliedMode) {
-			return;
-		}
-		try {
-			await this._wrapper.session.rpc.mode.set({ mode });
-			this._lastAppliedMode = mode;
-			this._logService.info(`[Copilot:${this.sessionId}] rpc.mode.set succeeded: mode=${mode}`);
-		} catch (err) {
-			this._logService.error(err, `[Copilot:${this.sessionId}] rpc.mode.set failed: mode=${mode}`);
-		}
+	applyMode(mode: CopilotSdkMode | undefined, failOnError = false): Promise<void> {
+		return this._modeSequencer.queue(async () => {
+			if (!mode || mode === this._lastAppliedMode) {
+				return;
+			}
+			try {
+				await this._wrapper.session.rpc.mode.set({ mode });
+				this._lastAppliedMode = mode;
+				this._logService.info(`[Copilot:${this.sessionId}] rpc.mode.set succeeded: mode=${mode}`);
+			} catch (err) {
+				this._logService.error(err, `[Copilot:${this.sessionId}] rpc.mode.set failed: mode=${mode}`);
+				if (failOnError) {
+					throw err;
+				}
+			}
+		});
+	}
+
+	async applyConfiguration(): Promise<void> {
+		await this.syncPermissionMode('config-change');
+		await this._applyEffectiveSandboxConfig(true);
+		await this.applyMode(this._configurationService.getEffectiveValue(this._ownerSessionUri.toString(), platformSessionSchema, SessionConfigKey.Mode), true);
 	}
 
 	/**
@@ -3289,9 +3304,6 @@ export class CopilotAgentSession extends Disposable {
 	 * answer questions or fill in elicitation forms.
 	 */
 	private _isAutopilotMode(): boolean {
-		if (this._isRoomSession) {
-			return false;
-		}
 		return this._configurationService.getEffectiveValue(this._ownerSessionUri.toString(), platformSessionSchema, SessionConfigKey.Mode) === 'autopilot';
 	}
 
@@ -4174,9 +4186,6 @@ export class CopilotAgentSession extends Disposable {
 	 * level. Agent mode is an orthogonal axis and does not affect approvals.
 	 */
 	private _isBypassApprovals(): boolean {
-		if (this._isRoomSession) {
-			return false;
-		}
 		if (this._configurationService.getRootValue(platformRootSchema, AgentHostAutoApprovePolicyRestrictedConfigKey) === true) {
 			return false;
 		}
@@ -4196,9 +4205,6 @@ export class CopilotAgentSession extends Disposable {
 	}
 
 	private _getConfiguredApprovalLevel(): string {
-		if (this._isRoomSession) {
-			return 'default';
-		}
 		if (this._configurationService.getRootValue(platformRootSchema, AgentHostAutoApprovePolicyRestrictedConfigKey) === true) {
 			return 'default';
 		}
@@ -4206,9 +4212,6 @@ export class CopilotAgentSession extends Disposable {
 	}
 
 	private _getConfiguredAgentMode(): string {
-		if (this._isRoomSession) {
-			return 'interactive';
-		}
 		return this._configurationService.getEffectiveValue(this._ownerSessionUri.toString(), platformSessionSchema, SessionConfigKey.Mode) ?? 'interactive';
 	}
 

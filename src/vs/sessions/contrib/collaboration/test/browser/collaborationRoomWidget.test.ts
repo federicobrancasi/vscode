@@ -12,27 +12,33 @@ import { constObservable, observableValue, transaction } from '../../../../../ba
 import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { IActionWidgetService } from '../../../../../platform/actionWidget/browser/actionWidget.js';
 import { IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { ChatInputRequestWithPlanReview } from '../../../../../platform/agentHost/common/agentHostPlanReview.js';
+import { ChatInputQuestionKind, ChatInputResponseKind, ConfirmationOptionKind, SessionModelInfo, ToolCallStatus } from '../../../../../platform/agentHost/common/state/protocol/state.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
 import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
-import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { IKeybindingService } from '../../../../../platform/keybinding/common/keybinding.js';
 import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
+import { WorkbenchList } from '../../../../../platform/list/browser/listService.js';
 import { IMarkdownRendererService } from '../../../../../platform/markdown/browser/markdownRenderer.js';
+import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IEditorService } from '../../../../../workbench/services/editor/common/editorService.js';
 import { ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
+import { workbenchInstantiationService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
 import { IAgentHostSessionsProvider, LOCAL_AGENT_HOST_PROVIDER_ID } from '../../../../common/agentHostSessionsProvider.js';
 import { ISessionsPartService } from '../../../../services/sessions/browser/sessionsPartService.js';
 import { ISessionsService } from '../../../../services/sessions/browser/sessionsService.js';
-import { ICollaborationRoomCreationDraft, ICollaborationRoomScrollState, ICollaborationRoomViewService } from '../../../../services/collaboration/browser/collaborationRoomView.js';
-import { COLLABORATION_MESSAGE_PAGE_SIZE, ICollaborationService } from '../../../../services/collaboration/common/collaboration.js';
+import { ICollaborationRoomCreationDraft, ICollaborationRoomPanelState, ICollaborationRoomScrollState, ICollaborationRoomViewService } from '../../../../services/collaboration/browser/collaborationRoomView.js';
+import { CollaborationRequestResponse, ICollaborationRequest, ICollaborationService, ICollaborationWorkspaceTrust } from '../../../../services/collaboration/common/collaboration.js';
 import { CollaborationDraft } from '../../../../services/collaboration/common/collaborationMentions.js';
 import { ISessionsProvidersService } from '../../../../services/sessions/browser/sessionsProvidersService.js';
 import { IChat, ISession } from '../../../../services/sessions/common/session.js';
 import { ISessionsProvider } from '../../../../services/sessions/common/sessionsProvider.js';
 import { CollaborationRoomWidget } from '../../browser/collaborationRoomWidget.js';
+import { stubCollaborationTestServices } from './collaborationTestServices.js';
 
 suite('CollaborationRoomWidget', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
@@ -55,7 +61,6 @@ suite('CollaborationRoomWidget', () => {
 		}));
 		const starts: IAgentHostRoomLimits[] = [];
 		const sendModes: string[] = [];
-		const followChanges: boolean[] = [];
 		const created = new DeferredPromise<IAgentHostRoomCreateOptions>();
 		const opened = new DeferredPromise<{ session: ISession; chat: URI }>();
 		const artifactFocused = new DeferredPromise<void>();
@@ -84,12 +89,21 @@ suite('CollaborationRoomWidget', () => {
 			override readonly activeRoomId = observableValue<string | undefined>(this, newRoom ? undefined : room.id);
 			override readonly activeRoom = observableValue<IAgentHostRoom | undefined>(this, newRoom ? undefined : room);
 			override readonly messages = observableValue<IAgentHostRoomMessagePage>(this, { messages, hasEarlier: false, hasLater: false });
-			override readonly models = constObservable([]);
+			override readonly models = observableValue<readonly SessionModelInfo[]>(this, [
+				{ id: 'model-a', name: 'Model A', provider: 'copilotcli' },
+				{ id: 'model-b', name: 'Model B', provider: 'copilotcli' },
+			]);
 			override readonly loading = constObservable(false);
+			override readonly loadingEarlier = observableValue(this, false);
 			override readonly creating = observableValue(this, false);
 			override readonly sending = constObservable(false);
 			override readonly canSteer = observableValue(this, true);
+			override readonly canConfigure = observableValue(this, false);
+			override readonly canSetMemberModel = observableValue(this, true);
 			override readonly error = constObservable(undefined);
+			override readonly workspaceTrust = observableValue<ICollaborationWorkspaceTrust>(this, { state: 'trusted' });
+			override readonly requests = observableValue<readonly ICollaborationRequest[]>(this, []);
+			override readonly requestError = constObservable(undefined);
 			override getDraft() { return draft; }
 			override async selectRoom(roomId: string | undefined): Promise<void> {
 				selectedRooms.push(roomId);
@@ -98,7 +112,8 @@ suite('CollaborationRoomWidget', () => {
 					this.activeRoom.set(this.rooms.get().find(candidate => candidate.id === roomId), tx);
 				});
 			}
-			override setFollowingLatest(following: boolean): void { followChanges.push(following); }
+			override async loadMessages(): Promise<void> { }
+			override async loadEarlierMessages(): Promise<void> { }
 			override async sendMessage(mode = 'message'): Promise<void> { sends++; sendModes.push(mode); }
 			override async startRoom(limits: IAgentHostRoomLimits): Promise<void> { starts.push(limits); }
 			override async createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom> {
@@ -111,11 +126,18 @@ suite('CollaborationRoomWidget', () => {
 			override readonly activeView = constObservable(undefined);
 			override readonly scrollState = observableValue<ICollaborationRoomScrollState | undefined>(this, undefined);
 			override readonly creationDraft = observableValue<ICollaborationRoomCreationDraft | undefined>(this, undefined);
+			override readonly panelState = observableValue<ICollaborationRoomPanelState>(this, { visible: true, width: 360 });
 			override saveScrollState(state: ICollaborationRoomScrollState): void { this.scrollState.set(state, undefined); }
 			override saveCreationDraft(draft: ICollaborationRoomCreationDraft | undefined): void { this.creationDraft.set(draft, undefined); }
+			override savePanelState(state: ICollaborationRoomPanelState): void { this.panelState.set(state, undefined); }
 			override close(): void { this.visible.set(false, undefined); }
 		}();
-		const instantiation = disposables.add(new TestInstantiationService());
+		const instantiation = workbenchInstantiationService(undefined, disposables);
+		const lists = stubCollaborationTestServices(instantiation, disposables);
+		instantiation.stub(IActionWidgetService, new class extends mock<IActionWidgetService>() {
+			override show(): void { }
+			override hide(): void { }
+		}());
 		instantiation.stub(ICollaborationService, facade);
 		instantiation.stub(ICollaborationRoomViewService, viewService);
 		instantiation.stub(IContextKeyService, disposables.add(new MockContextKeyService()));
@@ -135,6 +157,9 @@ suite('CollaborationRoomWidget', () => {
 		}());
 		instantiation.stub(IFileDialogService, new class extends mock<IFileDialogService>() {
 			override async showOpenDialog(): Promise<URI[]> { return [URI.file('/repo')]; }
+		}());
+		instantiation.stub(IOpenerService, new class extends mock<IOpenerService>() {
+			override async open() { return true; }
 		}());
 		const providers = new Map<string, ISessionsProvider>([[provider.id, provider]]);
 		instantiation.stub(ISessionsProvidersService, new class extends mock<ISessionsProvidersService>() {
@@ -157,8 +182,11 @@ suite('CollaborationRoomWidget', () => {
 			}
 		}());
 		const container = document.body.appendChild(document.createElement('div'));
+		container.style.width = '1100px';
+		container.style.height = '760px';
 		disposables.add(toDisposable(() => container.remove()));
 		const widget = disposables.add(instantiation.createInstance(CollaborationRoomWidget, container));
+		widget.layout(1100, 760);
 		const input = container.querySelector<HTMLTextAreaElement>('textarea[role="combobox"]')!;
 		const type = (text: string) => {
 			input.value = text;
@@ -170,7 +198,22 @@ suite('CollaborationRoomWidget', () => {
 			input.dispatchEvent(event);
 			return event;
 		};
-		return { widget, container, input, type, key, draft, starts, created, opened, artifactFocused, provider, resolutions, selectedRooms, peerSession, peerChat, viewService, facade, followChanges, sendModes, getSends: () => sends, getSessionFocuses: () => sessionFocuses };
+		const getMessageList = () => {
+			const list = lists.widget;
+			assert.ok(list instanceof WorkbenchList);
+			return list;
+		};
+		const historyKey = (key: 'Home' | 'End') => {
+			container.querySelector<HTMLElement>('.room-feed .monaco-list')!.focus();
+			const list = getMessageList();
+			if (key === 'Home') {
+				list.focusFirst();
+			} else {
+				list.focusLast();
+			}
+			list.reveal(list.getFocus()[0], key === 'Home' ? 0 : 1);
+		};
+		return { widget, container, input, type, key, historyKey, getMessageList, draft, starts, created, opened, artifactFocused, provider, resolutions, selectedRooms, peerSession, peerChat, viewService, facade, sendModes, getSends: () => sends, getSessionFocuses: () => sessionFocuses };
 	}
 
 	test('Agent Collab home exposes saved rooms and creation without transcript rows', () => {
@@ -197,7 +240,7 @@ suite('CollaborationRoomWidget', () => {
 
 	test('peer navigation resolves opaque identities through the owning provider', async () => {
 		const { container, opened, resolutions, peerSession, peerChat } = setup();
-		container.querySelector<HTMLButtonElement>('.room-member > button')!.click();
+		container.querySelector<HTMLButtonElement>('.room-member-heading button')!.click();
 		assert.deepStrictEqual(await opened.p, { session: peerSession, chat: peerChat.resource });
 		assert.deepStrictEqual(resolutions, [{ session: 'copilotcli:/member-1', chat: URI.parse('opaque-chat:/member-1/primary?version=2').toString() }]);
 	});
@@ -206,7 +249,7 @@ suite('CollaborationRoomWidget', () => {
 		const { container, opened, provider, widget, peerSession, peerChat } = setup();
 		const pending = new DeferredPromise<{ session: ISession; chat: IChat }>();
 		provider.resolveSessionChat = () => pending.p;
-		container.querySelector<HTMLButtonElement>('.room-member > button')!.click();
+		container.querySelector<HTMLButtonElement>('.room-member-heading button')!.click();
 		widget.dispose();
 		await pending.complete({ session: peerSession, chat: peerChat });
 		await timeout(0);
@@ -224,7 +267,7 @@ suite('CollaborationRoomWidget', () => {
 			...page,
 			messages: page.messages.map(message => ({ ...message, id: 'artifact-post', kind: 'artifact' as const, artifactId: 'patch' })),
 		}, undefined);
-		const review = [...container.querySelectorAll<HTMLButtonElement>('.room-message button')].find(button => button.textContent === 'Review Published Artifact')!;
+		const review = [...container.querySelectorAll<HTMLElement>('.room-message [role="button"]')].find(button => button.textContent === 'Review Published Artifact')!;
 		review.click();
 		await artifactFocused.p;
 		assert.strictEqual(viewService.visible.get(), false);
@@ -288,7 +331,7 @@ suite('CollaborationRoomWidget', () => {
 		assert.deepStrictEqual({ options: await created.p, starts }, {
 			options: {
 				title: 'Startup investigation', goal: 'Measure startup before changing code', instructions: 'Preserve public APIs',
-				repositoryUri: 'file:///repo', baseRevision: 'HEAD', workerCount: 2, model: undefined,
+				repositoryUri: 'file:///repo', baseRevision: 'HEAD', workerCount: 2, memberModels: [undefined, undefined],
 			},
 			starts: [],
 		});
@@ -327,7 +370,7 @@ suite('CollaborationRoomWidget', () => {
 
 	test('Reply targets the original post and names its peer without changing surfaces', () => {
 		const { container, input, draft, viewService } = setup('running', 1);
-		container.querySelector<HTMLButtonElement>('.room-message button')!.click();
+		container.querySelector<HTMLElement>('.room-message [role="button"]')!.click();
 		assert.strictEqual(draft.replyTo, 'post-0');
 		assert.strictEqual(input.value, '@Copilot-1 ');
 		assert.strictEqual(viewService.visible.get(), true);
@@ -357,14 +400,9 @@ suite('CollaborationRoomWidget', () => {
 	});
 
 	test('sending while reading older posts resumes following the latest conversation', async () => {
-		const { container, facade, followChanges, type, input } = setup('running', 20);
-		const feed = container.querySelector<HTMLElement>('.room-feed')!;
-		feed.style.flex = 'none';
-		feed.style.height = '100px';
-		feed.style.overflowY = 'auto';
-		feed.scrollTop = 0;
-		feed.dispatchEvent(new Event('scroll'));
-		assert.strictEqual(followChanges.at(-1), false);
+		const { container, facade, viewService, type, input, historyKey } = setup('running', 20);
+		historyKey('Home');
+		assert.strictEqual(viewService.scrollState.get()?.followingLatest, false);
 		const acknowledged = new DeferredPromise<void>();
 		facade.sendMessage = () => acknowledged.p;
 		type('Advice from older history');
@@ -372,13 +410,34 @@ suite('CollaborationRoomWidget', () => {
 		await acknowledged.complete();
 		await acknowledged.p;
 		assert.deepStrictEqual({
-			followingLatest: followChanges.at(-1),
-			atBottom: Math.abs(feed.scrollHeight - feed.clientHeight - feed.scrollTop) <= 1,
+			followingLatest: viewService.scrollState.get()?.followingLatest,
+			lastPostVisible: container.querySelector('.room-feed')?.textContent?.includes('Shared post 19'),
 			text: input.value,
-		}, { followingLatest: true, atBottom: true, text: 'Advice from older history' });
+		}, { followingLatest: true, lastPostVisible: true, text: 'Advice from older history' });
 	});
 
-	test('plain human posts explain that no agents were notified in the feed and accessible view', () => {
+	test('new peer work reports remain in the chat while the reader stays above the latest post', () => {
+		const { container, facade, widget, historyKey, viewService } = setup('running', 20);
+		const feed = container.querySelector<HTMLElement>('.room-feed')!;
+		historyKey('Home');
+		const anchor = viewService.scrollState.get();
+		const page = facade.messages.get();
+		facade.messages.set({
+			...page, messages: [...page.messages, {
+				id: 'new-work-report', sequence: 21, authorId: 'member-1', authorName: 'Copilot-1', authorKind: 'agent',
+				kind: 'finding', text: 'Finished accessibility improvements and verified the tests.', timestamp: 0, mentions: [], deliveries: [],
+			}],
+		}, undefined);
+		const latest = [...container.querySelectorAll<HTMLButtonElement>('.room-history-controls button')].find(button => button.textContent === 'Jump to Latest')!;
+		assert.deepStrictEqual({
+			reportLoaded: widget.getAccessibleContent().includes('Finished accessibility improvements'),
+			firstPostVisible: feed.textContent?.includes('Shared post 0'),
+			anchorUnchanged: viewService.scrollState.get() === anchor,
+			jumpAvailable: !latest.hidden && !latest.disabled,
+		}, { reportLoaded: true, firstPostVisible: true, anchorUnchanged: true, jumpAvailable: true });
+	});
+
+	test('legacy context-only human posts retain their original undelivered status', () => {
 		const { container, facade, widget } = setup();
 		facade.messages.set({
 			hasEarlier: false, hasLater: false,
@@ -394,57 +453,419 @@ suite('CollaborationRoomWidget', () => {
 		}, { visible: true, accessible: true });
 	});
 
+	test('Send remains available after Stop and explains that finished peers receive a new turn', () => {
+		const { container } = setup('stopped');
+		const send = container.querySelector<HTMLButtonElement>('.room-composer button.primary')!;
+		assert.deepStrictEqual({
+			enabled: !send.disabled,
+			wakeUpExplained: send.getAttribute('aria-description')?.includes('Finished or stopped peers receive a new turn'),
+			defaultAudienceExplained: container.querySelector('.room-composer-actions .room-hint')?.textContent?.includes('notify everyone'),
+		}, { enabled: true, wakeUpExplained: true, defaultAudienceExplained: true });
+	});
+
 	test('Start does not require a turn cap or deadline', () => {
 		const { container, starts } = setup('created');
-		container.querySelector<HTMLButtonElement>('form.room-history-controls button')!.click();
+		container.querySelector<HTMLButtonElement>('.room-header button.primary')!.click();
 		assert.deepStrictEqual(starts, [{}]);
 	});
 
 	test('Start passes the explicitly entered run limits', () => {
 		const { container, starts } = setup('created');
-		const limits = container.querySelectorAll<HTMLInputElement>('form.room-history-controls input');
+		const limits = container.querySelectorAll<HTMLInputElement>('form.room-run-controls input');
 		limits[0].value = '12';
 		limits[1].value = '5';
-		container.querySelector<HTMLButtonElement>('form.room-history-controls button')!.click();
+		container.querySelector<HTMLButtonElement>('.room-header button.primary')!.click();
 		assert.deepStrictEqual(starts, [{ maxTurns: 12, timeoutMinutes: 5 }]);
 	});
 
 	test('turn caps and deadlines can be chosen independently', () => {
 		const first = setup('created');
-		first.container.querySelectorAll<HTMLInputElement>('form.room-history-controls input')[0].value = '12';
-		first.container.querySelector<HTMLButtonElement>('form.room-history-controls button')!.click();
+		first.container.querySelectorAll<HTMLInputElement>('form.room-run-controls input')[0].value = '12';
+		first.container.querySelector<HTMLButtonElement>('.room-header button.primary')!.click();
 		const second = setup('created');
-		second.container.querySelectorAll<HTMLInputElement>('form.room-history-controls input')[1].value = '5';
-		second.container.querySelector<HTMLButtonElement>('form.room-history-controls button')!.click();
+		second.container.querySelectorAll<HTMLInputElement>('form.room-run-controls input')[1].value = '5';
+		second.container.querySelector<HTMLButtonElement>('.room-header button.primary')!.click();
 		assert.deepStrictEqual([first.starts, second.starts], [[{ maxTurns: 12 }], [{ timeoutMinutes: 5 }]]);
 	});
 
 	test('an idle room supports both an explicit bounded Resume and Pause', () => {
 		const { container, starts } = setup('idle');
-		const resume = container.querySelector<HTMLButtonElement>('form.room-history-controls button')!;
+		const resume = container.querySelector<HTMLButtonElement>('.room-header button.primary')!;
 		const pause = [...container.querySelectorAll<HTMLButtonElement>('.room-header button')].find(button => button.textContent === 'Pause')!;
 		assert.strictEqual(resume.textContent, 'Resume');
 		assert.strictEqual(resume.disabled, false);
 		assert.strictEqual(pause.disabled, false);
-		const limits = container.querySelectorAll<HTMLInputElement>('form.room-history-controls input');
+		const limits = container.querySelectorAll<HTMLInputElement>('form.room-run-controls input');
 		limits[0].value = '6';
 		limits[1].value = '3';
 		resume.click();
 		assert.deepStrictEqual(starts, [{ maxTurns: 6, timeoutMinutes: 3 }]);
 	});
 
-	test('rendered and accessible history remain bounded', () => {
-		const { container, widget } = setup('running', COLLABORATION_MESSAGE_PAGE_SIZE + 10);
-		assert.strictEqual(container.querySelectorAll('.room-message').length, COLLABORATION_MESSAGE_PAGE_SIZE);
-		assert.ok(!widget.getAccessibleContent().includes('Shared post 0\n'));
-		assert.ok(widget.getAccessibleContent().includes('Shared post 109'));
+	test('history has bounded DOM without discarding loaded accessible messages', () => {
+		const { container, widget } = setup('running', 500);
+		assert.ok(container.querySelectorAll('.room-message').length < 40);
+		assert.ok(widget.getAccessibleContent().includes('Shared post 0\n'));
+		assert.ok(widget.getAccessibleContent().includes('Shared post 499'));
+	});
+
+	test('long message text wraps and reflows instead of inheriting the list row no-wrap style', () => {
+		const { container, facade, viewService } = setup('running', 1);
+		const message = facade.messages.get().messages[0];
+		facade.messages.set({
+			messages: [{ ...message, text: 'This is a long paragraph that must remain readable in the conversation. '.repeat(30) }],
+			hasEarlier: false, hasLater: false,
+		}, undefined);
+		const row = container.querySelector<HTMLElement>('.room-message')!;
+		const content = row.querySelector<HTMLElement>('.room-message-body > div')!;
+		const range = document.createRange();
+		range.selectNodeContents(content);
+		const wrappedLines = range.getClientRects().length;
+		const height = row.offsetHeight;
+		viewService.savePanelState({ visible: false, width: 360 });
+		assert.ok(wrappedLines > 3, `Expected wrapped text, got ${wrappedLines} line boxes`);
+		assert.ok(row.offsetHeight < height, 'A wider conversation should reduce the wrapped message height');
+	});
+
+	test('prepending scrollback preserves the visible message and its pixel offset', () => {
+		const { facade, historyKey, getMessageList, viewService } = setup('running', 20);
+		const initial = facade.messages.get().messages.map(message => ({ ...message, id: `message-${message.sequence + 100}`, sequence: message.sequence + 100 }));
+		facade.messages.set({ messages: initial, hasEarlier: true, hasLater: false }, undefined);
+		historyKey('Home');
+		const list = getMessageList();
+		list.scrollTop = 20;
+		const anchor = list.element(list.firstVisibleIndex);
+		const offset = list.scrollTop - list.getElementTop(list.firstVisibleIndex);
+		const earlier = Array.from({ length: 100 }, (_, index) => ({ ...initial[0], id: `message-${index + 1}`, sequence: index + 1 }));
+		facade.messages.set({ messages: [...earlier, ...initial], hasEarlier: false, hasLater: false }, undefined);
+		viewService.savePanelState({ visible: true, width: 420 });
+		assert.deepStrictEqual({
+			anchor: list.element(list.firstVisibleIndex),
+			offset: list.scrollTop - list.getElementTop(list.firstVisibleIndex),
+			followingLatest: viewService.scrollState.get()?.followingLatest,
+		}, { anchor, offset, followingLatest: false });
+	});
+
+	test('scrolling near the beginning loads earlier history once while a page is pending', () => {
+		const { facade, historyKey, getMessageList } = setup('running', 20);
+		let loads = 0;
+		facade.loadEarlierMessages = async () => {
+			loads++;
+			facade.loadingEarlier.set(true, undefined);
+		};
+		facade.messages.set({ ...facade.messages.get(), hasEarlier: true }, undefined);
+		historyKey('Home');
+		getMessageList().scrollTop = 20;
+		assert.strictEqual(loads, 1);
 	});
 
 	test('returning to sessions hides the room without changing the session model', () => {
 		const { container, viewService, getSessionFocuses } = setup();
-		const back = [...container.querySelectorAll<HTMLButtonElement>('.room-header button')].find(button => button.textContent === 'Back to Sessions')!;
+		const back = [...container.querySelectorAll<HTMLButtonElement>('.room-navigation button')].find(button => button.textContent === 'Back to Sessions')!;
 		back.click();
 		assert.strictEqual(viewService.visible.get(), false);
 		assert.strictEqual(getSessionFocuses(), 1);
+	});
+
+	test('the conversation leads while settings and model menus live in a separate collapsible pane', () => {
+		const { container, viewService } = setup('running', 1);
+		const main = container.querySelector<HTMLElement>('.room-main')!;
+		const panel = container.querySelector<HTMLElement>('.room-side-panel')!;
+		viewService.savePanelState({ visible: false, width: 380 });
+		assert.deepStrictEqual({
+			mainHasChat: !!main.querySelector('.room-feed'),
+			mainHasComposer: !!main.querySelector('.room-composer'),
+			mainHasRoster: !!main.querySelector('.room-roster'),
+			panelHasRoster: !!panel.querySelector('.room-roster'),
+			modelPickers: panel.querySelectorAll('.room-roster .room-model-picker').length,
+			oldPaging: [...container.querySelectorAll('button')].some(button => ['Older Posts', 'Newer Posts'].includes(button.textContent ?? '')),
+			expanded: container.querySelector('button[aria-controls]')?.getAttribute('aria-expanded'),
+		}, { mainHasChat: true, mainHasComposer: true, mainHasRoster: false, panelHasRoster: true, modelPickers: 2, oldPaging: false, expanded: 'false' });
+	});
+
+	test('a collapsed panel still exposes failed peers through the attention action', () => {
+		const { container, viewService, facade } = setup();
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({
+			...room, members: room.members.map((member, index) => index === 0 ? { ...member, state: 'failed', error: 'Could not prepare the worktree' } : member),
+		}, undefined);
+		viewService.savePanelState({ visible: false, width: 360 });
+		const attention = [...container.querySelectorAll<HTMLButtonElement>('.room-header button')].find(button => button.textContent === 'Needs Attention (1)')!;
+		attention.click();
+		assert.deepStrictEqual({
+			expanded: viewService.panelState.get().visible,
+			focusedAction: document.activeElement?.getAttribute('aria-label'),
+		}, { expanded: true, focusedAction: 'Retry Copilot-1 within the current run limits' });
+	});
+
+	test('the room settings button provides keyboard resizing without stealing navigation shortcuts', () => {
+		const { container, viewService } = setup();
+		const toggle = container.querySelector<HTMLButtonElement>('button[aria-controls]')!;
+		const resize = new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true });
+		toggle.dispatchEvent(resize);
+		const navigation = new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true });
+		toggle.dispatchEvent(navigation);
+		assert.deepStrictEqual({
+			width: viewService.panelState.get().width,
+			resizeHandled: resize.defaultPrevented,
+			navigationHandled: navigation.defaultPrevented,
+		}, { width: 400, resizeHandled: true, navigationHandled: false });
+	});
+
+	test('pending model failures remain visible and the attention action focuses the model without opening a peer', async () => {
+		const { container, facade, viewService, opened } = setup();
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({
+			...room, members: room.members.map((member, index) => index === 0 ? {
+				...member, model: 'model-b', modelSelection: { id: 'model-a' }, pendingModel: { id: 'model-b' }, modelError: 'Model B is unavailable',
+			} : member),
+		}, undefined);
+		await timeout(0);
+		viewService.savePanelState({ visible: false, width: 360 });
+		[...container.querySelectorAll<HTMLButtonElement>('.room-header button')].find(button => button.textContent === 'Needs Attention (1)')!.click();
+		assert.deepStrictEqual({
+			detail: container.querySelector('.room-roster .room-model-detail.error')?.textContent,
+			focus: document.activeElement?.getAttribute('aria-label'),
+			peerOpened: opened.isSettled,
+		}, {
+			detail: 'Model B is unavailable Applies on the next turn. Currently using Model A.',
+			focus: 'Model for Copilot-1', peerOpened: false,
+		});
+	});
+
+	test('model drafts stay with their numbered slots when the peer count changes', async () => {
+		const { container, viewService, starts, created } = setup('created', 0, true);
+		const draft: ICollaborationRoomCreationDraft = {
+			title: 'Mixed models', goal: 'Review the design', instructions: '', repositoryUri: 'file:///repo',
+			baseRevision: 'HEAD', workerCount: '3', model: '', memberModels: [{ id: 'model-a' }, undefined, { id: 'model-b' }],
+		};
+		viewService.saveCreationDraft(draft);
+		await timeout(0);
+		const count = container.querySelector<HTMLInputElement>('.room-start-form input[type="number"]')!;
+		for (const value of ['1', '3']) {
+			count.value = value;
+			count.dispatchEvent(new Event('input', { bubbles: true }));
+		}
+		container.querySelector<HTMLFormElement>('.room-start-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		assert.deepStrictEqual({
+			draftModels: viewService.creationDraft.get()?.memberModels,
+			createdModels: (await created.p).memberModels,
+			starts,
+		}, { draftModels: draft.memberModels, createdModels: draft.memberModels, starts: [] });
+	});
+
+	test('reported work is not repeated in agent cards and authors have distinct stable accents', () => {
+		const { container, facade } = setup('running', 2);
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({
+			...room, members: room.members.map(member => ({ ...member, work: { description: 'Duplicate report', updatedAt: 0, blocked: false } })),
+		}, undefined);
+		const page = facade.messages.get();
+		facade.messages.set({ ...page, messages: page.messages.map((message, index) => ({ ...message, authorId: `member-${index + 1}`, authorName: `Copilot-${index + 1}` })) }, undefined);
+		const accents = [...container.querySelectorAll<HTMLElement>('.room-message')].map(message => message.style.borderLeftColor);
+		assert.deepStrictEqual({
+			repeatedReport: container.querySelector('.room-roster')?.textContent?.includes('Duplicate report'),
+			distinctAuthors: new Set(accents).size,
+		}, { repeatedReport: false, distinctAuthors: 2 });
+	});
+
+	function approval(): ICollaborationRequest {
+		return {
+			id: 'approval', version: 1, roomId: 'room', memberId: 'member-1', memberName: 'Copilot-1',
+			chatUri: 'chat:/member-1', turnId: 'turn', state: 'ready', content: 'npm test -- --grep Collaboration',
+			payload: {
+				kind: 'tool', toolCall: {
+					toolCallId: 'shell-1', toolName: 'shell', displayName: 'Run in Terminal', invocationMessage: 'Run the collaboration tests',
+					status: ToolCallStatus.PendingConfirmation, toolInput: 'npm test -- --grep Collaboration',
+					options: [
+						{ id: 'once', label: 'Allow Once', kind: ConfirmationOptionKind.Approve },
+						{ id: 'deny', label: 'Reject', kind: ConfirmationOptionKind.Deny },
+					],
+				}
+			},
+		};
+	}
+
+	test('inline Allow is invoked once, stays pending, and exposes failures without leaving the room', async () => {
+		const { container, facade, widget, opened } = setup();
+		const request = approval();
+		const pending = new DeferredPromise<void>();
+		const responses: CollaborationRequestResponse[] = [];
+		facade.respondToRequest = (_request, response) => { responses.push(response); return pending.p; };
+		facade.requests.set([request], undefined);
+		const card = container.querySelector<HTMLElement>('.room-request')!;
+		const allow = card.querySelector<HTMLButtonElement>('button.primary')!;
+		allow.click();
+		allow.click();
+		await timeout(0);
+		assert.deepStrictEqual({
+			responses, pending: allow.disabled, retained: card.isConnected, opened: opened.isSettled,
+			content: widget.getAccessibleContent().includes('npm test -- --grep Collaboration'),
+			label: allow.getAttribute('aria-label'),
+		}, {
+			responses: [{ kind: 'tool', approved: true, selectedOptionId: 'once' }],
+			pending: true, retained: true, opened: false, content: true, label: 'Allow Once for Copilot-1',
+		});
+		await pending.error(new Error('The host rejected this approval'));
+		await timeout(0);
+		assert.deepStrictEqual({
+			reenabled: !allow.disabled, retained: container.querySelector('.room-request') === card,
+			error: card.querySelector('.room-request-status')?.textContent,
+		}, { reenabled: true, retained: true, error: 'The host rejected this approval' });
+	});
+
+	test('inline question drafts and focus survive streaming and roster updates', async () => {
+		const { container, facade } = setup();
+		const request: ICollaborationRequest = {
+			...approval(), id: 'question',
+			payload: {
+				kind: 'input', request: {
+					id: 'name', message: 'Name the output file',
+					questions: [{ id: 'filename', kind: ChatInputQuestionKind.Text, message: 'File name', required: true }],
+				}
+			},
+		};
+		facade.requests.set([request], undefined);
+		const field = container.querySelector<HTMLInputElement>('.room-request input')!;
+		field.value = 'report.txt';
+		field.focus();
+		facade.activeRoom.set({ ...facade.activeRoom.get()!, revision: 2, members: facade.activeRoom.get()!.members.map(member => ({ ...member, activity: 'Streaming output' })) }, undefined);
+		facade.requests.set([{ ...request }], undefined);
+		assert.deepStrictEqual({
+			sameField: container.querySelector('.room-request input') === field,
+			value: field.value, focused: document.activeElement === field,
+		}, { sameField: true, value: 'report.txt', focused: true });
+		const responses: CollaborationRequestResponse[] = [];
+		facade.respondToRequest = async (_request, response) => { responses.push(response); };
+		container.querySelector<HTMLButtonElement>('.room-request button.primary')!.click();
+		await timeout(0);
+		assert.deepStrictEqual(responses, [{
+			kind: 'input', response: ChatInputResponseKind.Accept,
+			answers: { filename: { state: 'submitted', value: { kind: 'text', value: 'report.txt' } } },
+		}]);
+	});
+
+	test('approval drafts remain mounted when settings collapse and when the narrow drawer closes', () => {
+		const { container, facade, viewService, widget } = setup();
+		facade.requests.set([{
+			...approval(), id: 'question',
+			payload: { kind: 'input', request: { id: 'name', questions: [{ id: 'name', kind: ChatInputQuestionKind.Text, message: 'Name', required: true }] } },
+		}], undefined);
+		const field = container.querySelector<HTMLInputElement>('.room-request input')!;
+		field.value = 'Keep my answer';
+		viewService.savePanelState({ visible: false, width: 360 });
+		const attention = [...container.querySelectorAll<HTMLButtonElement>('.room-header button')].find(button => button.textContent?.startsWith('Needs Attention'))!;
+		attention.click();
+		container.style.width = '640px';
+		widget.layout(640, 760);
+		attention.click();
+		field.focus();
+		field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+		const toggle = container.querySelector<HTMLButtonElement>('button[aria-controls]')!;
+		assert.deepStrictEqual({
+			sameField: container.querySelector('.room-request input') === field,
+			value: field.value,
+			expanded: toggle.getAttribute('aria-expanded'),
+			focusedToggle: document.activeElement === toggle,
+		}, { sameField: true, value: 'Keep my answer', expanded: 'false', focusedToggle: true });
+	});
+
+	test('inline forms submit typed numeric, boolean, and selected answers', async () => {
+		const { container, facade } = setup();
+		facade.requests.set([{
+			...approval(), id: 'form', content: undefined,
+			payload: {
+				kind: 'input', request: {
+					id: 'settings',
+					questions: [
+						{ id: 'count', kind: ChatInputQuestionKind.Integer, message: 'Count', required: true, min: 1, max: 5 },
+						{ id: 'ratio', kind: ChatInputQuestionKind.Number, message: 'Ratio', required: true, min: 0, max: 1 },
+						{ id: 'enabled', kind: ChatInputQuestionKind.Boolean, message: 'Enabled', required: true },
+						{ id: 'targets', kind: ChatInputQuestionKind.MultiSelect, message: 'Targets', required: true, min: 1, max: 2, options: [{ id: 'first', label: 'First' }, { id: 'second', label: 'Second' }] },
+					],
+				}
+			},
+		}], undefined);
+		container.querySelector<HTMLInputElement>('.room-request input[aria-label="Count"]')!.value = '2';
+		container.querySelector<HTMLInputElement>('.room-request input[aria-label="Ratio"]')!.value = '0.5';
+		container.querySelector<HTMLSelectElement>('.room-request select[aria-label="Enabled"]')!.value = 'false';
+		const targets = container.querySelector<HTMLSelectElement>('.room-request select[aria-label="Targets"]')!;
+		targets.options[1].selected = true;
+		const responses: CollaborationRequestResponse[] = [];
+		facade.respondToRequest = async (_request, response) => { responses.push(response); };
+		container.querySelector<HTMLButtonElement>('.room-request button.primary')!.click();
+		await timeout(0);
+		assert.deepStrictEqual(responses, [{
+			kind: 'input', response: ChatInputResponseKind.Accept,
+			answers: {
+				count: { state: 'submitted', value: { kind: 'number', value: 2 } },
+				ratio: { state: 'submitted', value: { kind: 'number', value: 0.5 } },
+				enabled: { state: 'submitted', value: { kind: 'boolean', value: false } },
+				targets: { state: 'submitted', value: { kind: 'selected-many', value: ['second'] } },
+			},
+		}]);
+	});
+
+	test('stale approval completion does not alter the next room or its request', async () => {
+		const { container, facade } = setup();
+		const pending = new DeferredPromise<void>();
+		facade.respondToRequest = () => pending.p;
+		facade.requests.set([approval()], undefined);
+		const oldCard = container.querySelector<HTMLElement>('.room-request')!;
+		oldCard.querySelector<HTMLButtonElement>('button.primary')!.click();
+		await timeout(0);
+		transaction(tx => {
+			facade.activeRoomId.set('next-room', tx);
+			facade.requests.set([{ ...approval(), id: 'next-approval', roomId: 'next-room', version: 2 }], tx);
+		});
+		await pending.error(new Error('Previous room response failed'));
+		await timeout(0);
+		assert.deepStrictEqual({
+			oldRemoved: !oldCard.isConnected,
+			notice: container.querySelector('.room-request-status')?.textContent,
+			canAnswer: !container.querySelector<HTMLButtonElement>('.room-request button.primary')!.disabled,
+		}, { oldRemoved: true, notice: '', canAnswer: true });
+	});
+
+	test('plan review uses the server actions and answer identifier in the room', async () => {
+		const { container, facade } = setup();
+		const plan: ChatInputRequestWithPlanReview = {
+			id: 'plan',
+			planReview: {
+				title: 'Review the plan', content: '1. Fix the form\n2. Add coverage', canProvideFeedback: true, answerQuestionId: 'plan-choice',
+				actions: [{ id: 'implement', label: 'Implement the Plan' }, { id: 'revise', label: 'Revise the Plan' }],
+			},
+		};
+		facade.requests.set([{ ...approval(), id: 'plan', payload: { kind: 'input', request: plan } }], undefined);
+		const feedback = container.querySelector<HTMLTextAreaElement>('.room-request textarea')!;
+		feedback.value = 'Keep the existing keyboard shortcuts';
+		const responses: CollaborationRequestResponse[] = [];
+		facade.respondToRequest = async (_request, response) => { responses.push(response); };
+		container.querySelector<HTMLButtonElement>('.room-request button.primary')!.click();
+		await timeout(0);
+		assert.deepStrictEqual(responses, [{
+			kind: 'input', response: ChatInputResponseKind.Accept,
+			answers: { 'plan-choice': { state: 'submitted', value: { kind: 'selected', value: 'implement', freeformValues: ['Keep the existing keyboard shortcuts'] } } },
+		}]);
+	});
+
+	test('the room shows one workspace trust action and lists the exact directories', async () => {
+		const { container, facade, opened } = setup();
+		let trustRequests = 0;
+		facade.requestWorkspaceTrust = async () => { trustRequests++; };
+		facade.workspaceTrust.set({
+			state: 'untrusted', repositoryUri: 'file:///source/project',
+			worktreeUris: ['file:///rooms/room/member-1', 'file:///rooms/room/member-2'],
+		}, undefined);
+		const buttons = container.querySelectorAll<HTMLButtonElement>('.room-trust button');
+		buttons[0].click();
+		await timeout(0);
+		assert.deepStrictEqual({
+			buttons: buttons.length, trustRequests, peerOpened: opened.isSettled,
+			directories: container.querySelector('.room-trust pre')?.textContent,
+		}, {
+			buttons: 1, trustRequests: 1, peerOpened: false,
+			directories: 'file:///source/project\nfile:///rooms/room/member-1\nfile:///rooms/room/member-2',
+		});
 	});
 });

@@ -7,7 +7,9 @@ import { URI } from '../../../base/common/uri.js';
 import { localize } from '../../../nls.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { ILogService } from '../../log/common/log.js';
-import { IAgentHostRoomArtifact, IAgentHostRoomsService } from '../common/agentHostRooms.js';
+import { IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomsService } from '../common/agentHostRooms.js';
+import { ModelSelection } from '../common/state/sessionState.js';
+import { IAgentConfigurationService } from './agentConfigurationService.js';
 import { AgentHostRooms, IRoomSessionTools } from './agentHostRooms.js';
 import { AgentHostRoomsRuntime, IRoomSessionLifecycle } from './agentHostRoomsRuntime.js';
 import { AgentHostRoomsStorage } from './agentHostRoomsStorage.js';
@@ -20,6 +22,9 @@ export const IAgentHostRoomsController = createDecorator<IAgentHostRoomsControll
 
 /** Internal authority; SDK tools never receive the human room-control surface. */
 export interface IAgentHostRoomsController extends IAgentHostRoomsService, IRoomSessionTools {
+	setMemberConfiguration(session: string, configuration: Partial<IAgentHostRoomConfiguration>, onApplied?: () => void): Promise<void>;
+	getMemberModelForChat(session: string, chat: string): Promise<ModelSelection | undefined>;
+	setMemberModelForChat(session: string, chat: string, model: ModelSelection): Promise<void>;
 	isRoomSessionUri(session: string): boolean;
 	isAdmittedTurn(session: string, chat: string, turnId: string): boolean;
 	shutdown(): Promise<void>;
@@ -33,11 +38,12 @@ export class AgentHostRoomsController extends AgentHostRooms implements IAgentHo
 		@IAgentHostStateManager stateManager: AgentHostStateManager,
 		@IAgentHostTurnService turnService: IAgentHostTurnService,
 		@IAgentHostProviderService providers: IAgentHostProviderService,
+		@IAgentConfigurationService configurationService: IAgentConfigurationService,
 		@ILogService logService: ILogService,
 	) {
 		super(
 			URI.isUri(storage) ? new AgentHostRoomsStorage(storage, logService) : storage ?? new UnavailableRoomStorage(),
-			new AgentHostRoomsRuntime(lifecycle, stateManager, turnService, providers),
+			new AgentHostRoomsRuntime(lifecycle, stateManager, turnService, providers, configurationService),
 			logService,
 		);
 	}

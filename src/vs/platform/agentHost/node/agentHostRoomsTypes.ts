@@ -5,7 +5,9 @@
 
 import { Event } from '../../../base/common/event.js';
 import { IDisposable } from '../../../base/common/lifecycle.js';
-import { IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomMember, IAgentHostRoomMessage } from '../common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomMember, IAgentHostRoomMessage } from '../common/agentHostRooms.js';
+import { ResolveSessionConfigResult } from '../common/state/protocol/commands.js';
+import { ModelSelection } from '../common/state/sessionState.js';
 
 export const roomExcludedTools = ['task', 'search_code_subagent', 'runSubagent', 'run_subagent', 'run_agent', 'run_factory', 'create_session', 'send_message', 'delete_session', 'rubber_duck', 'fleet'];
 
@@ -48,6 +50,12 @@ export interface IRoomRuntimeEvent {
 
 export interface IRoomRuntime extends IDisposable {
 	readonly onDidChange: Event<IRoomRuntimeEvent>;
+	validateModel(model: ModelSelection): void;
+	getModel(member: IAgentHostRoomMember): ModelSelection | undefined;
+	publishModel(member: IAgentHostRoomMember): void;
+	applyModel(member: IAgentHostRoomMember, model: ModelSelection): Promise<void>;
+	resolveConfiguration(member: IAgentHostRoomMember, configuration?: IAgentHostRoomConfiguration): Promise<ResolveSessionConfigResult>;
+	applyConfiguration(member: IAgentHostRoomMember, requested?: Partial<IAgentHostRoomConfiguration>): Promise<void>;
 	prepare(room: IAgentHostRoom, member: IAgentHostRoomMember, initialized: boolean): Promise<void>;
 	isIdle(sessionUri: string): boolean;
 	submit(sessionUri: string, turnId: string, prompt: string): void;

@@ -51,6 +51,7 @@ import { IFileService } from '../../files/common/files.js';
 import { IInstantiationService } from '../../instantiation/common/instantiation.js';
 import { createAgentHostRuntime, type IAgentHostRuntime } from './agentHostBootstrap.js';
 import { AgentHostRoomsChannelName } from '../common/agentHostRooms.js';
+import { createAgentHostRoomsChannel } from './agentHostRoomsChannel.js';
 import { IAgentHostRoomsController } from './agentHostRoomsController.js';
 import { BANG_COMMAND_PREFIX } from './agentHostBangCommand.js';
 import { AgentHostClientFileSystemProvider } from '../common/agentHostClientFileSystemProvider.js';
@@ -153,7 +154,7 @@ async function startAgentHost(): Promise<void> {
 		errorTelemetry.value = new ErrorTelemetry(runtimeServices.telemetryService);
 		const agentSdkDownloader = runtimeServices.agentSdkDownloader;
 		const providerService = runtimeServices.providerService;
-		server.registerChannel(AgentHostRoomsChannelName, ProxyChannel.fromService(runtimeServices.rooms, disposables));
+		server.registerChannel(AgentHostRoomsChannelName, createAgentHostRoomsChannel(runtimeServices.rooms, disposables));
 		sdkDownloadProgress = runtime.sdkDownloadProgress;
 		providerService.registerProvider(instantiationService.createInstance(CopilotAgent));
 		// Claude and Codex providers are gated on two things:

@@ -6,13 +6,17 @@
 import { SequencerByKey } from '../../../base/common/async.js';
 import { Emitter } from '../../../base/common/event.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
+import { equals } from '../../../base/common/objects.js';
 import { URI } from '../../../base/common/uri.js';
 import { generateUuid } from '../../../base/common/uuid.js';
 import { localize } from '../../../nls.js';
 import { ILogService } from '../../log/common/log.js';
-import { AgentHostRoomMessageKind, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsService, MAX_ROOM_WORKERS } from '../common/agentHostRooms.js';
+import { AgentHostRoomMessageKind, defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsService, MAX_ROOM_WORKERS } from '../common/agentHostRooms.js';
 import { AgentSession } from '../common/agentService.js';
-import { buildDefaultChatUri } from '../common/state/sessionState.js';
+import { ResolveSessionConfigResult } from '../common/state/protocol/commands.js';
+import { buildDefaultChatUri, ModelSelection } from '../common/state/sessionState.js';
+import { intersectRoomConfigurations, parseRoomConfiguration, validateRoomConfigurationChange } from './agentHostRoomsConfiguration.js';
+import { getRoomMemberModel, parseRoomModelSelection } from './agentHostRoomsModels.js';
 import { IRoomMemberExecution, IRoomRecord, IRoomRuntime, IRoomRuntimeEvent, IRoomStorage, roomExcludedTools } from './agentHostRoomsTypes.js';
 
 export interface IRoomAgentPost extends IAgentHostRoomPostOptions {
@@ -64,8 +68,10 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 	private readonly _timers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly _stops = new Map<string, Promise<IAgentHostRoom>>();
 	private readonly _memberStops = new Map<string, Promise<IAgentHostRoom>>();
+	private readonly _modelChangeVersions = new Map<string, number>();
 	private readonly _ready: Promise<void>;
 	private _closed = false;
+	private _persistenceError: string | undefined;
 
 	constructor(
 		private readonly _storage: IRoomStorage,
@@ -89,6 +95,11 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					...stored.room,
 					members: stored.room.members.map(member => ({
 						...member, chatUri: member.chatUri ?? buildDefaultChatUri(member.sessionUri),
+						...(member.model?.trim() && !member.model.includes('\0') && member.modelSelection === undefined && member.pendingModel === undefined
+							? stored.executions.find(execution => execution.memberId === member.id)?.initialized
+								? { modelSelection: { id: member.model } } : { pendingModel: { id: member.model } }
+							: {}),
+						configuration: member.configuration ?? { ...defaultAgentHostRoomConfiguration },
 					})),
 				},
 			};
@@ -122,7 +133,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			this._closed = true;
 			this._logService.error('[AgentHostRooms] Room recovery failed; rooms are unavailable', error);
 		}
-		return { version: 1 as const, available: !this._closed, maxWorkers: MAX_ROOM_WORKERS, supportsSteering: true };
+		return { version: 1 as const, available: !this._closed, maxWorkers: MAX_ROOM_WORKERS, supportsSteering: true, supportsConfiguration: true, supportsMemberModels: true };
 	}
 
 	async listRooms(): Promise<readonly IAgentHostRoom[]> {
@@ -133,6 +144,158 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 	async getRoom(roomId: string): Promise<IAgentHostRoom> {
 		await this._ready;
 		return this._record(roomId).room;
+	}
+
+	async setMemberModel(roomId: string, memberId: string, model: ModelSelection | undefined): Promise<IAgentHostRoom> {
+		await this._ready;
+		this._assertOpen();
+		this._member(this._record(roomId), memberId);
+		const selection = parseRoomModelSelection(model === undefined ? { id: 'auto' } : model);
+		this._runtime.validateModel(selection);
+		this._modelChangeVersions.set(memberId, (this._modelChangeVersions.get(memberId) ?? 0) + 1);
+		return this._queue.queue(roomId, async () => {
+			this._assertOpen();
+			this._runtime.validateModel(selection);
+			let record = this._record(roomId);
+			const member = this._member(record, memberId);
+			if (equals(getRoomMemberModel(member), selection) && !member.modelError) {
+				return record.room;
+			}
+			record = await this._save({
+				...record,
+				room: {
+					...record.room,
+					members: record.room.members.map(member => member.id === memberId
+						? { ...member, model: selection.id, pendingModel: selection, modelError: undefined } : member),
+				},
+			});
+			this._runtime.publishModel(this._member(record, memberId));
+			const execution = this._execution(record, memberId);
+			if (execution.initialized && !execution.turnId && this._runtime.isIdle(member.sessionUri)
+				&& !this._stops.has(roomId) && !this._memberStops.has(memberId)) {
+				record = await this._applyMemberModel(record, memberId);
+			}
+			return record.room;
+		});
+	}
+
+	async getMemberModelForChat(session: string, chat: string): Promise<ModelSelection | undefined> {
+		await this._ready;
+		const binding = this._sessions.get(session);
+		if (!binding) {
+			return undefined;
+		}
+		const member = this._member(this._record(binding.roomId), binding.memberId);
+		return member.chatUri === chat ? getRoomMemberModel(member) : undefined;
+	}
+
+	async setMemberModelForChat(session: string, chat: string, model: ModelSelection): Promise<void> {
+		await this._ready;
+		const binding = this._sessions.get(session);
+		if (!binding || this._member(this._record(binding.roomId), binding.memberId).chatUri !== chat) {
+			return;
+		}
+		try {
+			await this.setMemberModel(binding.roomId, binding.memberId, model);
+		} catch (error) {
+			if (this._closed) {
+				throw error;
+			}
+			await this._queue.queue(binding.roomId, async () => {
+				const record = this._record(binding.roomId);
+				const saved = await this._save({
+					...record,
+					room: { ...record.room, members: record.room.members.map(member => member.id === binding.memberId ? { ...member, modelError: String(error) } : member) },
+				});
+				this._runtime.publishModel(this._member(saved, binding.memberId));
+			});
+			throw error;
+		}
+	}
+
+	private async _applyMemberModel(record: IRoomRecord, memberId: string): Promise<IRoomRecord> {
+		const member = this._member(record, memberId);
+		let applied: ModelSelection | undefined;
+		try {
+			const requested = member.pendingModel !== undefined ? getRoomMemberModel(member) : this._runtime.getModel(member) ?? getRoomMemberModel(member);
+			const model = requested === undefined ? undefined : parseRoomModelSelection(requested);
+			if (model) {
+				this._runtime.validateModel(model);
+				await this._runtime.applyModel(member, model);
+			}
+			const current = model ?? this._runtime.getModel(member);
+			applied = current === undefined ? undefined : parseRoomModelSelection(current);
+		} catch (error) {
+			await this._save({
+				...record, room: { ...record.room, members: record.room.members.map(member => member.id === memberId ? { ...member, modelError: String(error) } : member) },
+			});
+			throw error;
+		}
+		const updated = { ...member, model: applied?.id, modelSelection: applied, pendingModel: undefined, modelError: undefined };
+		const saved = equals(member, updated) ? record : await this._save({
+			...record, room: { ...record.room, members: record.room.members.map(member => member.id === memberId ? updated : member) },
+		});
+		this._runtime.publishModel(updated);
+		return saved;
+	}
+
+	async getRoomConfiguration(roomId: string): Promise<ResolveSessionConfigResult> {
+		await this._ready;
+		return this._queue.queue(roomId, async () => intersectRoomConfigurations(
+			await Promise.all(this._record(roomId).room.members.map(member => this._runtime.resolveConfiguration(member))),
+		));
+	}
+
+	async setRoomConfiguration(roomId: string, configuration: Partial<IAgentHostRoomConfiguration>): Promise<IAgentHostRoom> {
+		await this._ready;
+		const patch = parseRoomConfiguration(configuration);
+		return this._queue.queue(roomId, () => this._setConfiguration(this._record(roomId), patch));
+	}
+
+	async setMemberConfiguration(session: string, configuration: Partial<IAgentHostRoomConfiguration>, onApplied?: () => void): Promise<void> {
+		await this._ready;
+		const binding = this._sessions.get(session);
+		if (!binding) {
+			throw new Error(localize('rooms.noBinding', "The session is not a room member."));
+		}
+		const patch = parseRoomConfiguration(configuration);
+		await this._queue.queue(binding.roomId, async () => {
+			await this._setConfiguration(this._record(binding.roomId), patch, binding.memberId);
+			onApplied?.();
+		});
+	}
+
+	private async _setConfiguration(record: IRoomRecord, patch: Partial<IAgentHostRoomConfiguration>, memberId?: string): Promise<IAgentHostRoom> {
+		this._assertOpen();
+		const members = record.room.members.filter(member => memberId === undefined || member.id === memberId);
+		for (const member of members) {
+			const selected = { ...defaultAgentHostRoomConfiguration, ...member.configuration, ...patch };
+			validateRoomConfigurationChange(patch, await this._runtime.resolveConfiguration(member, selected));
+		}
+		if (!Object.keys(patch).length) {
+			return record.room;
+		}
+		const saved = await this._save({
+			...record,
+			room: {
+				...record.room, error: undefined,
+				members: record.room.members.map(member => members.includes(member) ? {
+					...member, configuration: { ...defaultAgentHostRoomConfiguration, ...member.configuration, ...patch },
+				} : member),
+			},
+		});
+		await this._applyMemberConfigurations(saved, saved.room.members.filter(member => memberId === undefined || member.id === memberId), patch);
+		return saved.room;
+	}
+
+	private async _applyMemberConfigurations(record: IRoomRecord, members = record.room.members, requested?: Partial<IAgentHostRoomConfiguration>): Promise<void> {
+		const results = await Promise.allSettled(members.map(member => this._runtime.applyConfiguration(member, requested)));
+		const failures = results.filter(result => result.status === 'rejected');
+		if (failures.length) {
+			const error = localize('rooms.configurationFailed', "Room configuration was saved but could not be applied: {0}", failures.map(result => String(result.reason)).join('\n'));
+			await this._save({ ...record, room: { ...record.room, state: record.room.state === 'running' ? 'paused' : record.room.state, error } });
+			throw new Error(error);
+		}
 	}
 
 	async createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom> {
@@ -146,7 +309,24 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		if (!Number.isInteger(options.workerCount) || options.workerCount < 1 || options.workerCount > MAX_ROOM_WORKERS) {
 			throw new Error(localize('rooms.invalidCount', "A room requires between 1 and {0} members.", MAX_ROOM_WORKERS));
 		}
+		if (options.memberModels !== undefined && (!Array.isArray(options.memberModels) || options.memberModels.length !== options.workerCount)) {
+			throw new Error(localize('rooms.invalidMemberModels', "Provide exactly one model selection per room member."));
+		}
+		const fallback = options.model === undefined ? undefined : parseRoomModelSelection({ id: options.model });
+		const models = Array.from({ length: options.workerCount }, (_, index) => {
+			const selected = options.memberModels?.[index];
+			const model = selected === undefined ? fallback : parseRoomModelSelection(selected);
+			if (model) {
+				this._runtime.validateModel(model);
+			}
+			return model;
+		});
 		const repository = await this._storage.resolveRepository(options.repositoryUri, options.baseRevision);
+		for (const model of models) {
+			if (model) {
+				this._runtime.validateModel(model);
+			}
+		}
 		const id = generateUuid();
 		const now = this._now();
 		const members: IAgentHostRoomMember[] = Array.from({ length: options.workerCount }, (_, index) => {
@@ -154,7 +334,8 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			const sessionUri = AgentSession.uri('copilotcli', generateUuid()).toString();
 			return {
 				id: memberId, name: `Copilot-${index + 1}`, sessionUri, chatUri: buildDefaultChatUri(sessionUri),
-				model: options.model, state: 'pending', turns: 0, worktreeUri: this._storage.worktreeUri(id, memberId),
+				model: models[index]?.id, pendingModel: models[index], state: 'pending', turns: 0, worktreeUri: this._storage.worktreeUri(id, memberId),
+				configuration: { ...defaultAgentHostRoomConfiguration },
 			};
 		});
 		const room: IAgentHostRoom = {
@@ -359,6 +540,15 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		const room = await this._queue.queue(roomId, async () => {
 			this._assertOpen();
 			const record = this._record(roomId);
+			if (record.room.state === 'paused' && record.room.run && !this._stops.has(roomId)
+				&& !record.room.members.some(member => this._memberStops.has(member.id)) && record.executions.some(execution => execution.turnId)) {
+				if ((limits.maxTurns !== undefined && limits.maxTurns !== record.room.run.limits.maxTurns)
+					|| (limits.timeoutMinutes !== undefined && limits.timeoutMinutes !== record.room.run.limits.timeoutMinutes)) {
+					throw new Error(localize('rooms.activeRunLimits', "Resume keeps the current run limits. Stop the room before changing limits."));
+				}
+				await this._applyMemberConfigurations(record);
+				return (await this._save({ ...record, room: { ...record.room, state: 'running' } })).room;
+			}
 			if (record.room.state === 'running' || record.room.state === 'stopping' || this._stops.has(roomId) || record.room.members.some(member => this._memberStops.has(member.id)) || record.executions.some(execution => execution.turnId)) {
 				throw new Error(localize('rooms.alreadyRunning', "Wait for the active room turns to finish before starting a new run."));
 			}
@@ -368,7 +558,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				room: {
 					...record.room, state: 'running', error: undefined,
 					run: { id: generateUuid(), startedAt: now, deadline: limits.timeoutMinutes === undefined ? undefined : now + Math.ceil(limits.timeoutMinutes * 60000), limits: { ...limits }, admittedTurns: 0 },
-					members: record.room.members.map(member => member.state === 'failed' ? member : { ...member, state: 'idle', error: undefined }),
+					members: record.room.members.map(member => ({ ...member, state: 'idle', error: undefined })),
 				},
 				executions: record.executions.map(execution => ({ ...execution, needsTurn: true, readSequence: undefined, announced: false })),
 			})).room;
@@ -542,7 +732,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				messages: record.messages.map(message => ({
 					...message,
 					deliveries: message.deliveries.map(delivery => delivery.memberId === binding.memberId && ['pending', 'submitted', 'steering'].includes(delivery.state)
-						? { ...delivery, state: 'delivered', turnId, error: undefined }
+						? { ...delivery, state: message.mode === 'steer' ? 'delivered' : 'submitted', turnId, error: undefined }
 						: delivery),
 				})),
 			});
@@ -654,7 +844,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 
 	private async _admit(roomId: string): Promise<void> {
 		let record = this._record(roomId);
-		if (this._closed || record.room.state !== 'running' || !record.room.run) {
+		if (this._closed || this._stops.has(roomId) || record.room.state !== 'running' || !record.room.run) {
 			return;
 		}
 		record = await this._reserveSteering(record);
@@ -672,7 +862,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 		const ready = record.room.members.filter(member => {
 			const execution = this._execution(record, member.id);
-			return ['pending', 'idle', 'blocked'].includes(member.state) && !execution.turnId && this._runtime.isIdle(member.sessionUri)
+			return !this._memberStops.has(member.id) && ['pending', 'idle', 'blocked'].includes(member.state) && !execution.turnId && this._runtime.isIdle(member.sessionUri)
 				&& !record.messages.some(message => message.deliveries.some(delivery => delivery.memberId === member.id && delivery.state === 'steering'))
 				&& (execution.needsTurn || record.messages.some(message => message.deliveries.some(delivery => delivery.memberId === member.id && delivery.state === 'pending')));
 		}).slice(0, remaining);
@@ -771,34 +961,60 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				return;
 			}
 			await this._runtime.prepare(reservation.room, member, this._execution(reservation, member.id).initialized);
-			await this._queue.queue(roomId, async () => {
-				let current = this._record(roomId);
-				current = await this._save({ ...current, executions: current.executions.map(execution => execution.memberId === member.id ? { ...execution, initialized: true } : execution) });
-				if (!this._canSubmit(roomId, member.id, turnId, runId)) {
-					return;
-				}
-				const inbox = current.messages.filter(message => message.deliveries.some(delivery => delivery.memberId === member.id && delivery.turnId === turnId && delivery.state === 'submitted'));
-				const prompt = [
-					`You are ${member.name}, an equal peer in the shared collaboration room "${current.room.title}". There is no required lead.`,
-					...(inbox.length ? [
-						'PRIORITY: respond to the addressed messages below. This is a follow-up to existing work, not a request to start the whole project again.',
-						...inbox.map(message => `${message.authorKind === 'human' ? 'Human' : 'Peer'} ${message.authorName} [${message.id}]: ${message.text}`),
-						'Acknowledge the request publicly using room_post with replyTo set to its message ID. Explain concrete actions and results, or ask a focused question if blocked.',
-					] : []),
-					`Shared goal (background context): ${current.room.goal}`, `Room instructions: ${current.room.instructions}`,
-					`Your only working tree is ${URI.parse(member.worktreeUri!).fsPath}. The original repository ${URI.parse(current.room.repositoryUri).fsPath} and other peers' worktrees are not shared writable folders. Do not copy or commit your work there.`,
-					'Begin with room_read. It provides your identity, peer work, pending inbox, human guidance, and published artifacts. Empty files in your worktree do NOT mean peers have done nothing.',
-					'Before choosing work, read recent findings and inspect relevant published patches with room_read_artifact. Build on evidence rather than reimplementing completed work. A peer reporting success is a claim to verify, not proof.',
-					'For a shared patch, inspect it, then use your normal approved shell tools to check and explicitly apply it ONLY inside your own worktree. Never copy files directly out of another peer workspace. Do not apply or merge into the original repository.',
-					'Announce one concrete complementary work item with room_post kind "work" BEFORE edits. Coordinate overlapping work by addressing the existing owner, and reconsider if newer peer work is reported.',
-					'Keep room posts short: intent, changed result, question, or evidence. Publish code with room_share_patch and link the artifact ID in findings, including failed approaches. Never claim a server or test works without verifying it.',
-					'Do not repeat completion/status posts or ask idle peers to confirm a finished task. A finished avenue is a reason to wait, not to loop. Supply nextStep only for a specific unfinished useful action and omit it when done.',
-					'Human guidance takes precedence over an older plan. On new guidance, acknowledge it, revise your work, and tell affected peers. Do not spawn nested agents, factories, or hidden teams. Preserve normal approvals and content exclusions.',
-					'An earlier turn may have been interrupted. Inspect existing work before retrying any action; never assume an interrupted delivery or external operation completed.',
-					...(nextStep ? [`Previously proposed next step: ${nextStep}`] : []),
-				].join('\n\n');
-				this._runtime.submit(member.sessionUri, turnId, prompt);
-			});
+			let retryModelChange: boolean;
+			do {
+				retryModelChange = await this._queue.queue(roomId, async () => {
+					const modelVersion = this._modelChangeVersions.get(member.id);
+					let current = this._record(roomId);
+					current = await this._save({ ...current, executions: current.executions.map(execution => execution.memberId === member.id ? { ...execution, initialized: true } : execution) });
+					if (!this._canSubmit(roomId, member.id, turnId, runId)) {
+						return false;
+					}
+					await this._runtime.applyConfiguration(this._member(current, member.id));
+					if (!this._canSubmit(roomId, member.id, turnId, runId)) {
+						return false;
+					}
+					if (modelVersion !== this._modelChangeVersions.get(member.id)) {
+						return true;
+					}
+					try {
+						current = await this._applyMemberModel(current, member.id);
+					} catch (error) {
+						if (this._canSubmit(roomId, member.id, turnId, runId) && modelVersion !== this._modelChangeVersions.get(member.id)) {
+							return true;
+						}
+						throw error;
+					}
+					if (!this._canSubmit(roomId, member.id, turnId, runId)) {
+						return false;
+					}
+					if (modelVersion !== this._modelChangeVersions.get(member.id)) {
+						return true;
+					}
+					const inbox = current.messages.filter(message => message.deliveries.some(delivery => delivery.memberId === member.id && delivery.turnId === turnId && delivery.state === 'submitted'));
+					const prompt = [
+						`You are ${member.name}, an equal peer in the shared collaboration room "${current.room.title}". There is no required lead.`,
+						...(inbox.length ? [
+							'PRIORITY: respond to the addressed messages below. This is a follow-up to existing work, not a request to start the whole project again.',
+							...inbox.map(message => `${message.authorKind === 'human' ? 'Human' : 'Peer'} ${message.authorName} [${message.id}]: ${message.text}`),
+							'Acknowledge the request publicly using room_post with replyTo set to its message ID. Explain concrete actions and results, or ask a focused question if blocked.',
+						] : []),
+						`Shared goal (background context): ${current.room.goal}`, `Room instructions: ${current.room.instructions}`,
+						`Your only working tree is ${URI.parse(member.worktreeUri!).fsPath}. The original repository ${URI.parse(current.room.repositoryUri).fsPath} and other peers' worktrees are not shared writable folders. Do not copy or commit your work there.`,
+						'Begin with room_read. It provides your identity, peer work, pending inbox, human guidance, and published artifacts. Empty files in your worktree do NOT mean peers have done nothing.',
+						'Before choosing work, read recent findings and inspect relevant published patches with room_read_artifact. Build on evidence rather than reimplementing completed work. A peer reporting success is a claim to verify, not proof.',
+						'For a shared patch, inspect it, then use your normal approved shell tools to check and explicitly apply it ONLY inside your own worktree. Never copy files directly out of another peer workspace. Do not apply or merge into the original repository.',
+						'Announce one concrete complementary work item with room_post kind "work" BEFORE edits. Coordinate overlapping work by addressing the existing owner, and reconsider if newer peer work is reported.',
+						'Keep room posts short: intent, changed result, question, or evidence. Publish code with room_share_patch and link the artifact ID in findings, including failed approaches. Never claim a server or test works without verifying it.',
+						'Do not repeat completion/status posts or ask idle peers to confirm a finished task. A finished avenue is a reason to wait, not to loop. Supply nextStep only for a specific unfinished useful action and omit it when done.',
+						'Human guidance takes precedence over an older plan. On new guidance, acknowledge it, revise your work, and tell affected peers. Do not spawn nested agents, factories, or hidden teams. Preserve normal approvals and content exclusions.',
+						'An earlier turn may have been interrupted. Inspect existing work before retrying any action; never assume an interrupted delivery or external operation completed.',
+						...(nextStep ? [`Previously proposed next step: ${nextStep}`] : []),
+					].join('\n\n');
+					this._runtime.submit(member.sessionUri, turnId, prompt);
+					return false;
+				});
+			} while (retryModelChange);
 			if (!this._canSubmit(roomId, member.id, turnId, runId)) {
 				await this._releaseUnsent(roomId, member.id, turnId);
 			}
@@ -858,7 +1074,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 	private _canSubmit(roomId: string, memberId: string, turnId: string, runId: string): boolean {
 		const record = this._record(roomId);
 		const execution = this._execution(record, memberId);
-		return !this._closed && record.room.state === 'running' && record.room.run?.id === runId && (record.room.run.deadline === undefined || record.room.run.deadline > this._now()) && execution.turnId === turnId && execution.runId === runId && this._member(record, memberId).state !== 'stopping';
+		return !this._closed && !this._stops.has(roomId) && !this._memberStops.has(memberId) && record.room.state === 'running' && record.room.run?.id === runId && (record.room.run.deadline === undefined || record.room.run.deadline > this._now()) && execution.turnId === turnId && execution.runId === runId && this._member(record, memberId).state !== 'stopping';
 	}
 
 	private _assertMemberTurn(record: IRoomRecord, memberId: string): void {
@@ -902,6 +1118,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			await this._storage.save(next);
 		} catch (error) {
 			// Do not admit more work when the write-ahead journal is unavailable.
+			this._persistenceError = String(error);
 			this._closed = true;
 			for (const current of this._records.values()) {
 				for (const execution of current.executions) {
@@ -925,6 +1142,9 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 
 	private _assertOpen(): void {
 		if (this._closed) {
+			if (this._persistenceError) {
+				throw new Error(localize('rooms.persistenceFailed', "The room stopped because its state could not be saved: {0}. Restart the application after resolving the storage error.", this._persistenceError));
+			}
 			throw new Error(localize('rooms.closed', "The room host is shutting down."));
 		}
 	}
@@ -946,6 +1166,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			clearTimeout(timer);
 		}
 		this._timers.clear();
+		this._modelChangeVersions.clear();
 		super.dispose();
 	}
 }

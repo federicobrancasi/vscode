@@ -69,6 +69,7 @@ import type { CreateResourceWatchParams, CreateResourceWatchResult, ResourceCopy
 import type { ActionEnvelope, ChatAction, ClientAnnotationsAction, ClientAutomationAction, ClientAutomationRunAction, ClientChangesetAction, INotification, IRootConfigChangedAction, SessionAction, TerminalAction } from '../common/state/sessionActions.js';
 import type { ComponentToState, RootState, StateComponents } from '../common/state/sessionState.js';
 import { AgentHostRoomsChannelName, IAgentHostRoom, IAgentHostRoomsService } from '../common/agentHostRooms.js';
+import { createAgentHostRoomsClient } from '../common/agentHostRoomsIpc.js';
 
 const LOG_PREFIX = '[AgentHost:renderer]';
 
@@ -166,6 +167,9 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 		stopRoom: roomId => this._roomsProxy().stopRoom(roomId),
 		stopMember: (roomId, memberId) => this._roomsProxy().stopMember(roomId, memberId),
 		retryMember: (roomId, memberId) => this._roomsProxy().retryMember(roomId, memberId),
+		getRoomConfiguration: roomId => this._roomsProxy().getRoomConfiguration(roomId),
+		setRoomConfiguration: (roomId, configuration) => this._roomsProxy().setRoomConfiguration(roomId, configuration),
+		setMemberModel: (roomId, memberId, model) => this._roomsProxy().setMemberModel(roomId, memberId, model),
 		getArtifact: (roomId, artifactId) => this._roomsProxy().getArtifact(roomId, artifactId),
 	};
 	private readonly _ahpLogger: AhpJsonlLogger | undefined;
@@ -298,7 +302,7 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 		const store = new DisposableStore();
 		try {
 			const client = store.add(new MessagePortClient(port, this.clientId));
-			const rooms = ProxyChannel.toService<IAgentHostRoomsService>(client.getChannel(AgentHostRoomsChannelName));
+			const rooms = createAgentHostRoomsClient(client.getChannel(AgentHostRoomsChannelName));
 			store.add(rooms.onDidChangeRoom(room => this._onDidChangeRoom.fire(room)));
 			registerAgentHostClientChannels(
 				client,
@@ -360,7 +364,7 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 	}
 
 	private _roomsProxy(): IAgentHostRoomsService {
-		return ProxyChannel.toService<IAgentHostRoomsService>(
+		return createAgentHostRoomsClient(
 			getDelayedChannel(this._managementConnection.client().then(client => client.getChannel(AgentHostRoomsChannelName))),
 		);
 	}

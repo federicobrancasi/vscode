@@ -25,8 +25,9 @@ suite('CollaborationRoomView', () => {
 
 	function setup() {
 		const customViews = disposables.add(new CustomViewService(new NullLogService(), disposables.add(new InMemoryStorageService())));
-		const service = disposables.add(new CollaborationRoomViewService(customViews));
-		return { customViews, service };
+		const storage = disposables.add(new InMemoryStorageService());
+		const service = disposables.add(new CollaborationRoomViewService(customViews, storage));
+		return { customViews, service, storage };
 	}
 
 	test('does not open before the desktop custom view is registered', () => {
@@ -101,11 +102,19 @@ suite('CollaborationRoomView', () => {
 		const draft = {
 			title: 'Investigate startup', goal: 'Measure before editing', instructions: 'Preserve APIs',
 			repositoryUri: 'file:///repo', baseRevision: 'origin/main', workerCount: '3', model: 'host-model',
+			memberModels: [{ id: 'model-a' }, undefined, { id: 'model-b' }],
 		};
 		service.saveCreationDraft(draft);
 		service.close();
 		assert.deepStrictEqual(service.creationDraft.get(), draft);
 		service.saveCreationDraft(undefined);
 		assert.strictEqual(service.creationDraft.get(), undefined);
+	});
+
+	test('room-owned panel preferences survive service recreation independently from other views', () => {
+		const { customViews, service, storage } = setup();
+		service.savePanelState({ visible: false, width: 420 });
+		const restored = disposables.add(new CollaborationRoomViewService(customViews, storage));
+		assert.deepStrictEqual(restored.panelState.get(), { visible: false, width: 420 });
 	});
 });

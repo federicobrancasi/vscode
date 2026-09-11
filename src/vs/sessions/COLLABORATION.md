@@ -13,16 +13,50 @@ Copilot agent host and `chat.agentHost.collaboration.enabled`, then open
 **Agents: Open Collaboration Room** is also available from the Command Palette.
 AI features must be enabled and a compatible local host available.
 
-Choose a local Git repository, committed baseline, shared goal/rules, model and
-one to ten peers. **Create** records the room; it does not by itself authorize
-model execution. **Start** runs the team, or a human `@mention` requests only the
-addressed peer. Turn caps and deadlines are optional and unset by default, under
+Use **Room Settings** to choose a local Git repository, committed baseline,
+shared goal/rules, and one to ten peers. Each numbered peer has its own model
+menu before creation. Draft model choices stay with their slots when the peer
+count changes or the view closes. **Create** records the room; it does not by itself authorize
+model execution. **Start** runs the team. **Send** requests a response from every
+peer when no `@mentions` are present, or only the mentioned peers otherwise.
+Finished and stopped peers wake for the new message without a separate Resume.
+Turn caps and deadlines are optional and unset by default, under
 **Optional run limits**.
 The host's default model is labeled as such rather than presented as a specific
 model choice.
 
+Model menus remain available in each peer's row after creation. Changing a
+model saves that peer's preference without starting a turn or changing another
+peer. An active turn continues with its current model; a pending choice applies
+on the next turn. Unavailable or policy-rejected choices are errors, not requests
+to fall back silently. Changes made in an individual member chat follow the same
+room-owned preference and application lifecycle. Session, chat, and worktree
+identities do not change when the model changes.
+
+The member's desired selection and last provider-acknowledged selection are
+separate state. `modelSelection` is the acknowledgement; an absent value is
+unconfirmed, not implicit Auto. `pendingModel` stores the next choice (with
+`null` representing an explicit Auto reset), while the legacy `model` field
+mirrors the desired ID and must not be presented as proof of the currently
+running model. Model-application failures remain in `modelError`. An omitted
+creation slot retains the legacy/provider fallback; an explicit reset of an
+existing member requires Auto to be available in the current catalog.
+
+Room peers default to **Autopilot** with manual permissions. The **All peers**
+mode and permissions menu changes the whole room; individual peer choices
+remain valid as well. Explicit selections are persisted and retained through
+Stop, Resume, and application restart. Autopilot governs the agent's autonomous
+work loop; Allow all is a separate approval choice, and neither overrides
+mandatory managed approvals or sandbox policy.
+
 The host resolves and pins the selected branch, tag or commit using its
 sanitized Git environment.
+
+Workspace trust is handled from the room. A single source-repository consent
+also covers the exact peer worktrees supplied by the local room authority,
+never their shared parent directory. Sending messages, starting, resuming,
+retrying, steering, and approving requests require that trust. Reading history
+and choosing models do not authorize execution.
 
 The room picker reopens existing rooms. Use **Back to Sessions** or open a member
 to inspect ordinary session details. Room history, worker transcripts and the
@@ -61,9 +95,14 @@ session; it does not trust a model-supplied display name.
 Everyone can read shared history. Reading permission is separate from turn
 activation:
 
-- A normal post is added to history without waking every worker.
+- A normal human **Send** with no mentions addresses every peer and requests a
+  response, including after peers have finished or a previous run has stopped.
 - A human mention authorizes the named peer to respond, including after a
   previous run has stopped. It does not restart the rest of a stopped team.
+- The composer sends explicit recipient IDs and authorizes execution before
+  posting. This works with older local hosts as well. The host's lower-level
+  context-only posts and previously saved messages keep their original audience;
+  opening a room does not reinterpret or redeliver old posts.
 - Agent mentions can coordinate already available peers within the active run,
   but cannot restart a stopped room or revive stopped peers.
 - Agents do not receive inbox deliveries for mentioning themselves.
@@ -73,10 +112,10 @@ activation:
 
 ### Human steering
 
-**Send** preserves ordinary discussion and mention-only delivery. **Steer
-Agents** (Control/Command+Enter in the composer) explicitly sends guidance to the
-mentioned members, or all members when there are no mentions. This distinction
-keeps a casual room post from unexpectedly starting the entire team.
+**Send** notifies mentioned peers, or the whole room when there are no mentions.
+It wakes finished peers and queues messages for busy peers. **Steer Agents**
+(Control/Command+Enter in the composer) uses the same audience but sends guidance
+into an active turn instead of waiting for the next one.
 
 Steering is persisted before delivery. For an active peer the host injects it
 into the existing SDK turn instead of waiting for that turn to finish or
@@ -101,13 +140,22 @@ acknowledgement confirms submission, not model compliance; the SDK does not
 offer an atomic expected-turn argument for remote races.
 
 After the host acknowledges a human post, the chat reveals that saved message
-and returns to the latest page. An earlier-page cursor must not hide the user's
+and returns to the live tail. Loaded scrollback must not hide the user's
 own successful send. The acknowledgement remains visible if refreshing surrounding
 history fails; no duplicate send is required. Ordinary incoming posts still
 preserve the user's position in older history.
 
-Messages without mentions are labeled as shared with the room without notifying
-agents. Seeing a post and receiving an agent response are separate outcomes.
+History is one continuously growing, ordered conversation rather than separate
+older/newer pages. Scrolling upward fetches earlier messages and preserves the
+visible message anchor. New posts and updated delivery states continue to merge
+into loaded history without moving a reader who is above the live tail.
+**Jump to Latest** returns to the live conversation. Failed loads retain the
+already-loaded messages and expose retry; only visible rows are rendered.
+
+Historical context-only messages remain labeled as not having notified agents;
+they are not replayed when the room opens. New sends show their actual delivery
+states. Delivery and turn submission do not guarantee that a model follows the
+request correctly.
 
 Text follow-ups submitted from a member's individual chat use the same room
 inbox and target that member. The response is a delivery acknowledgement, not a
@@ -141,6 +189,9 @@ admission checks. Runs have no implicit turn cap or deadline; optional limits
 must be finite positive values when supplied. An ordinary SDK turn ending
 does not mean the shared goal has been solved.
 
+- **Resume** retries failed or stopped peers in a fresh run without changing
+  their sessions or worktrees. Resuming while paused turns are still active
+  instead keeps their existing run and limits, and releases held guidance.
 - **Pause** stops admitting new turns while current work finishes.
 - **Stop** closes admission before requesting cancellation.
 - **Stopping** remains distinct from confirmed termination.
@@ -196,10 +247,29 @@ addressed human request and evidence-linked findings.
 
 ## UI and accessibility
 
-The primary content is the multi-author conversation, accompanied by a compact
-roster showing each member's current avenue and actual runtime activity. Users
-can open individual sessions for detailed tool output, approvals or changes.
+The primary content is the multi-author conversation with a bottom composer.
+A room-owned right panel contains the roster, independent model menus,
+configuration, creation fields, and approvals. It is independently scrollable,
+resizable, and collapsible, and becomes a drawer at narrow widths. Panel width
+and wide-layout visibility belong to the collaboration view-state service,
+not the selected peer's editor or the workbench's auxiliary bar.
+
+The compact roster shows each member's model, state, and actual runtime activity;
+explicit work reports appear in the shared conversation without duplicate
+previews or expanded report blocks in the roster. Author accents are stable
+within the room, theme-aware, and accompanied by visible names. Users
+can open individual sessions for detailed tool output or changes.
 Full transcripts are not loaded solely to populate the roster.
+
+The room's **Approvals and questions** section observes each member's
+server-confirmed active requests. It supports tool and result approvals,
+questions, and plan reviews without opening the individual chats. Supplied
+approval choices remain authoritative, and required managed approvals remain
+one-time. Responses stay pending until the host acknowledges and applies them;
+rejection, disconnection, or timeout is visible and does not report success.
+Changing rooms or ending the turn invalidates stale approval controls.
+Collapsing the room panel does not dispose request cards or their drafts.
+The header's needs-attention action opens and focuses the pending requests.
 
 Distinguish explicit shared posts, member-reported work and runtime events.
 Do not manufacture chat messages by extracting hidden reasoning or concatenating
@@ -227,6 +297,9 @@ Background activity must not switch the selected room/member/workspace.
 - `ICustomViewService` hosts the room as a native full-surface custom view.
   The Agent Collab sidebar shortcut opens that view without changing the
   Sessions Part or taking ownership of its active session.
+- The view owns its internal split layout. Its conversation uses the existing
+  virtualized list infrastructure; the renderer facade owns continuous history
+  loading, merge/deduplication, and cancellation when the room or host changes.
 - Backend session/chat identities are resolved by the owning provider.
   Shared room UI opens the resulting chat through `ISessionsService`.
 - Ordinary `ISession` and chat behavior remain independent of room navigation.

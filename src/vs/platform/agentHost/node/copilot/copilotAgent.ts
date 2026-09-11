@@ -48,6 +48,7 @@ import { AgentChatOperationContext, AgentSession, AgentSignal, AuthenticateParam
 import { getReasoningEffortDescription, getReasoningEffortLabel, resolveDefaultReasoningEffort } from '../../common/reasoningEffort.js';
 import { autoModeTiers, defaultAutoModeTier, getAutoModeTierDescription, getAutoModeTierLabel } from '../../common/autoModeTiers.js';
 import { isAutoModel } from './modelIdentifiers.js';
+import { validateRoomModelSelection } from '../agentHostRoomsModels.js';
 import type { IAgentServerToolHost } from '../../common/agentServerTools.js';
 import { IAgentHostOTelService } from '../../common/otel/agentHostOTelService.js';
 import { SessionConfigKey } from '../../common/sessionConfigKeys.js';
@@ -3233,6 +3234,9 @@ export class CopilotAgent extends Disposable implements IAgent {
 		abort: (chatUri: URI, context: URI | IAgentChatContext): Promise<void> => {
 			return this._abortSession(chatUri, context);
 		},
+		applyConfiguration: async (chat, context) => {
+			await this._resolveChatContext(chat, context).target?.applyConfiguration();
+		},
 		sendSteeringInCurrentTurn: async (chat, turnId, prompt, context) => {
 			const current = this._resolveChatContext(chat, context);
 			if (this._isShuttingDown || !this._rooms.isRoomSessionUri(current.configurationResource.toString())
@@ -4272,9 +4276,6 @@ export class CopilotAgent extends Disposable implements IAgent {
 	 * the SDK's current mode is left untouched.
 	 */
 	private _resolveSdkMode(session: URI): CopilotSdkMode | undefined {
-		if (this._rooms.isRoomSessionUri(session.toString())) {
-			return 'interactive';
-		}
 		const sessionKey = session.toString();
 		const mode = this._configurationService.getEffectiveValue(sessionKey, platformSessionSchema, SessionConfigKey.Mode);
 		switch (mode) {
@@ -5078,15 +5079,37 @@ export class CopilotAgent extends Disposable implements IAgent {
 		const context = this._resolveChatContext(chat, operationContext);
 		await this._queueChat(context.configurationId, context.sequencerKey, 'changeModel', async () => {
 			const current = this._resolveChatContext(chat, operationContext);
+			const roomMember = this._rooms.isRoomSessionUri(current.configurationResource.toString());
+			if (roomMember) {
+				validateRoomModelSelection(model, this._models.get());
+			}
 			const longContextWindow = this._longContextWindowFor(model.id);
 			const freeLongContext = this._isFreeLongContext(model.id);
 			// A `family` alias routes the host's prompt and tool profile only. The
 			// selected model's reasoning-effort override is resolved separately.
 			const provisional = this._provisionalSessions.get(current.configurationId);
-			if (provisional) {
+			if (provisional && !roomMember) {
 				provisional.model = model;
 			} else {
-				const entry = current.target ?? await this._ensureResolvedChatSession(current);
+				const previous = provisional?.model;
+				if (provisional) {
+					provisional.model = model;
+				}
+				let entry: CopilotAgentSession | undefined;
+				try {
+					entry = current.target ?? await this._ensureResolvedChatSession(current);
+				} catch (error) {
+					if (provisional) {
+						provisional.model = previous;
+					}
+					throw error;
+				}
+				if (roomMember && !entry) {
+					throw new Error(localize('copilot.roomModelSessionUnavailable', "The room member's preserved session is unavailable; the requested model was not applied."));
+				}
+				if (roomMember) {
+					validateRoomModelSelection(model, this._models.get());
+				}
 				// Clear stale SDK preferences when the picker is disabled or an override is removed.
 				const autoTier = isAutoModel(model.id)
 					? resolveCopilotAutoTier(model, this._configurationService, this._logService, current.configurationId) ?? null

@@ -803,6 +803,9 @@ export interface IAgentChats {
 	/** Abort the in-flight turn for `chat`. */
 	abort(chat: URI, context: AgentChatOperationContext): Promise<void>;
 
+	/** Apply current host configuration to an existing backing without starting a turn. */
+	applyConfiguration?(chat: URI, context: AgentChatOperationContext): Promise<void>;
+
 	/** Inject guidance without opening a new turn; true means the provider acknowledged acceptance. */
 	sendSteeringInCurrentTurn?(chat: URI, turnId: string, prompt: string, context: AgentChatOperationContext): Promise<boolean>;
 

@@ -4834,9 +4834,10 @@ export class AgentService extends Disposable implements IAgentService {
 		const requiresAttachmentRewrite = this._needsAsyncRewrite(sessionChannel, action);
 		const requiresReviewStateUpdate = action.type === ActionType.ChangesetFilesReviewChanged;
 		const requiresAnnotationsRestore = isAnnotationsAction(action);
+		const requiresRoomConfiguration = action.type === ActionType.SessionConfigChanged && this._rooms.isRoomSessionUri(sessionChannel);
 
 		const pending = this._clientDispatchQueues.get(clientId);
-		if (!pending && !requiresSessionRestore && !requiresPeerResolution && !requiresTurnOwnerResolution && !requiresAttachmentRewrite && !requiresReviewStateUpdate && !requiresAnnotationsRestore) {
+		if (!pending && !requiresSessionRestore && !requiresPeerResolution && !requiresTurnOwnerResolution && !requiresAttachmentRewrite && !requiresReviewStateUpdate && !requiresAnnotationsRestore && !requiresRoomConfiguration) {
 			this._dispatchActionNow(channel, sessionChannel, action, clientId, clientSeq, clientContext);
 			return;
 		}
@@ -4891,6 +4892,17 @@ export class AgentService extends Disposable implements IAgentService {
 					throw new Error(`Invalid changeset URI: ${channel}`);
 				}
 				this._changesets.refreshBranchChangeset(changeset.sessionUri);
+			}
+			if (rewritten.type === ActionType.SessionConfigChanged && this._rooms.isRoomSessionUri(sessionChannel)) {
+				if (channel !== sessionChannel || rewritten.replace) {
+					throw new Error(localize('rooms.configurationPatchRequired', "Room members accept only partial configuration changes on their session channel."));
+				}
+				await this._rooms.setMemberConfiguration(sessionChannel, rewritten.config, () => {
+					const current = this._configurationService.getSessionConfigValues(sessionChannel);
+					const config = Object.fromEntries(Object.keys(rewritten.config).map(key => [key, current?.[key]]));
+					this._dispatchActionNow(channel, sessionChannel, { ...rewritten, config }, clientId, clientSeq, clientContext);
+				});
+				return;
 			}
 			this._dispatchActionNow(channel, sessionChannel, rewritten, clientId, clientSeq, clientContext);
 		}).catch(err => {
@@ -4996,7 +5008,7 @@ export class AgentService extends Disposable implements IAgentService {
 			action.type === ActionType.ChatTurnStarted || action.type === ActionType.ChatTurnResume
 			|| action.type === ActionType.ChatPendingMessageSet || action.type === ActionType.ChatPendingMessageRemoved
 			|| action.type === ActionType.ChatQueuedMessagesReordered
-			|| action.type === ActionType.ChatTruncated || action.type === ActionType.SessionConfigChanged
+			|| action.type === ActionType.ChatTruncated
 			|| action.type === ActionType.SessionIsArchivedChanged || action.type === ActionType.SessionWorkingDirectorySet
 			|| action.type === ActionType.SessionWorkingDirectoryRemoved || action.type === ActionType.SessionWorkingDirectoryReplaced
 		)) {

@@ -1115,7 +1115,7 @@ function getCreatedClientOptions(agent: CopilotAgent): readonly CopilotClientOpt
 	return agent.createdClientOptions;
 }
 
-function createTestAgentContext(disposables: Pick<DisposableStore, 'add'>, options?: { sessionDataService?: ISessionDataService; copilotClient?: ITestCopilotClient; useRealResumePath?: boolean; gitService?: TestAgentHostGitService; environmentServiceRegistration?: 'native' | 'none'; pluginManager?: IAgentPluginManager; fileService?: FileService; copilotApiService?: ICopilotApiService; gitHubEndpointService?: IAgentHostGitHubEndpointService; telemetryService?: ITelemetryService; userHome?: URI; logService?: ILogService; proxyResolver?: IAgentHostProxyResolver; byokBridgeRegistry?: IByokLmBridgeRegistry; otelService?: IAgentHostOTelService; customizationEnablementService?: ICustomizationEnablementService; worktreeIsolation?: IAgentHostWorktreeIsolation; rootConfig?: Record<string, unknown>; now?: () => number }): { agent: CopilotAgent; instantiationService: IInstantiationService; authenticationService: AgentHostAuthenticationService; configurationService: IAgentConfigurationService; worktreeIsolation: IAgentHostWorktreeIsolation; managedSettingsService: IAgentHostManagedSettingsService; fileService: FileService; stateManager: AgentHostStateManager } {
+function createTestAgentContext(disposables: Pick<DisposableStore, 'add'>, options?: { sessionDataService?: ISessionDataService; copilotClient?: ITestCopilotClient; useRealResumePath?: boolean; gitService?: TestAgentHostGitService; environmentServiceRegistration?: 'native' | 'none'; pluginManager?: IAgentPluginManager; fileService?: FileService; copilotApiService?: ICopilotApiService; gitHubEndpointService?: IAgentHostGitHubEndpointService; telemetryService?: ITelemetryService; userHome?: URI; logService?: ILogService; proxyResolver?: IAgentHostProxyResolver; byokBridgeRegistry?: IByokLmBridgeRegistry; otelService?: IAgentHostOTelService; customizationEnablementService?: ICustomizationEnablementService; worktreeIsolation?: IAgentHostWorktreeIsolation; rooms?: IAgentHostRoomsController; rootConfig?: Record<string, unknown>; now?: () => number }): { agent: CopilotAgent; instantiationService: IInstantiationService; authenticationService: AgentHostAuthenticationService; configurationService: IAgentConfigurationService; worktreeIsolation: IAgentHostWorktreeIsolation; managedSettingsService: IAgentHostManagedSettingsService; fileService: FileService; stateManager: AgentHostStateManager } {
 	const services = new ServiceCollection();
 	const logService = options?.logService ?? new NullLogService();
 	const authenticationService = disposables.add(new AgentHostAuthenticationService(logService));
@@ -1163,7 +1163,7 @@ function createTestAgentContext(disposables: Pick<DisposableStore, 'add'>, optio
 	services.set(IAgentHostCustomizationEnablementService, options?.customizationEnablementService ?? createNoopCustomizationEnablementService());
 	const worktreeIsolation = options?.worktreeIsolation ?? new NullAgentHostWorktreeIsolation();
 	services.set(IAgentHostWorktreeIsolation, worktreeIsolation);
-	services.set(IAgentHostRoomsController, createNoopRoomsController());
+	services.set(IAgentHostRoomsController, options?.rooms ?? createNoopRoomsController());
 	services.set(IByokLmBridgeRegistry, options?.byokBridgeRegistry ?? new ByokLmBridgeRegistry());
 	const copilotApiService = options?.copilotApiService ?? new TestCopilotApiService();
 	services.set(ICopilotApiService, copilotApiService);
@@ -12273,6 +12273,140 @@ suite('CopilotAgent', () => {
 				});
 			} finally {
 				await disposeAgent(agent);
+			}
+		});
+
+		test('room model selections materialize three independent SDK backings with their configurations and no sends', async () => {
+			const client = new TestCopilotClient([], [
+				{
+					id: 'model-a', name: 'Model A', supportedReasoningEfforts: ['low', 'high'],
+					billing: { multiplier: 1, tokenPrices: { contextMax: 272_000, longContext: { contextMax: 1_000_000, inputPrice: 2 } } },
+				},
+				{ id: 'model-b', name: 'Model B', supportedReasoningEfforts: ['low', 'high'] },
+				{ id: 'auto', name: 'Auto' },
+			]);
+			const configurations: SessionConfig[] = [];
+			let sends = 0;
+			client.createSession = async config => {
+				configurations.push(config);
+				const sdk = new MockCopilotSession(config.sessionId);
+				sdk.send = async () => { sends++; return ''; };
+				return sdk as unknown as CopilotSession;
+			};
+			const rooms = createNoopRoomsController();
+			rooms.isRoomSessionUri = () => true;
+			const { agent } = createTestAgentContext(disposables, {
+				copilotClient: client, rooms, rootConfig: { [CopilotCliConfigKey.AutoModeTiers]: true },
+				sessionDataService: disposables.add(new TestSessionDataService()),
+			});
+			try {
+				await agent.authenticate('https://api.github.com', 'token');
+				await waitForState(agent.models, models => models.length === 3);
+				const models: ModelSelection[] = [
+					{ id: 'model-a', config: { thinkingLevel: 'high', contextSize: 1_000_000 } },
+					{ id: 'model-b', config: { thinkingLevel: 'low' } },
+					{ id: 'auto', config: { tier: 'efficiency' } },
+				];
+				for (const [index, model] of models.entries()) {
+					const session = AgentSession.uri('copilotcli', `room-model-${index}`);
+					const chat = defaultChatUri(session);
+					await provisionSession(agent, { session, workingDirectories: [URI.file('/workspace')], model });
+					await agent.chats.changeModel(chat, model, exactChatContext(session, chat, session));
+				}
+				assert.deepStrictEqual({
+					configurations: configurations.map(config => ({
+						model: config.model, effort: config.reasoningEffort, tier: config.contextTier, autoTier: config.capi?.autoTier,
+					})),
+					sends,
+				}, {
+					configurations: [
+						{ model: 'model-a', effort: 'high', tier: 'long_context', autoTier: undefined },
+						{ model: 'model-b', effort: 'low', tier: undefined, autoTier: undefined },
+						{ model: 'auto', effort: undefined, tier: undefined, autoTier: 'efficiency' },
+					],
+					sends: 0,
+				});
+			} finally {
+				await disposeAgent(agent);
+			}
+		});
+
+		test('room model changes await SDK acknowledgment and preserve the acknowledged selection on rejection', async () => {
+			const sessionDataService = disposables.add(new TestSessionDataService());
+			const client = new TestCopilotClient([], [{ id: 'model-a', name: 'Model A' }, { id: 'model-b', name: 'Model B' }]);
+			const sdk = new MockCopilotSession('room-model-ack');
+			const creating = new DeferredPromise<void>();
+			const created = new DeferredPromise<void>();
+			let createCalls = 0;
+			client.createSession = async () => {
+				createCalls++;
+				await creating.complete();
+				await created.p;
+				return sdk as unknown as CopilotSession;
+			};
+			const rooms = createNoopRoomsController();
+			rooms.isRoomSessionUri = () => true;
+			const { agent } = createTestAgentContext(disposables, { copilotClient: client, sessionDataService, rooms });
+			try {
+				await agent.authenticate('https://api.github.com', 'token');
+				await waitForState(agent.models, models => models.length === 2);
+				const session = AgentSession.uri('copilotcli', 'room-model-ack');
+				const chat = defaultChatUri(session);
+				const context = exactChatContext(session, chat, session);
+				await provisionSession(agent, { session, workingDirectories: [URI.file('/workspace')], model: { id: 'model-a' } });
+				let acknowledged = false;
+				const applying = agent.chats.changeModel(chat, { id: 'model-a' }, context).then(() => { acknowledged = true; });
+				await creating.p;
+				assert.strictEqual(acknowledged, false);
+				await created.complete();
+				await applying;
+				sdk.setModelError = new Error('SDK rejected room model');
+				await assert.rejects(agent.chats.changeModel(chat, { id: 'model-b' }, context), /SDK rejected room model/);
+				const database = disposables.add(sessionDataService.openDatabase(session));
+				assert.deepStrictEqual({
+					model: agent.chats.getModel?.(chat, context),
+					stored: await database.object.getMetadata('copilot.model'),
+					createCalls,
+					changes: sdk.setModelCalls.map(call => call[0]),
+				}, { model: { id: 'model-a' }, stored: JSON.stringify({ id: 'model-a' }), createCalls: 1, changes: ['model-a', 'model-b'] });
+				sdk.setModelError = undefined;
+				await agent.chats.changeModel(chat, { id: 'model-b' }, context);
+				assert.deepStrictEqual(agent.chats.getModel?.(chat, context), { id: 'model-b' });
+			} finally {
+				await created.complete();
+				await disposeAgent(agent);
+			}
+		});
+
+		test('room model validation rejects disabled models and unsupported options before SDK creation', async () => {
+			const workingDirectory = URI.file(await fs.mkdtemp(join(process.cwd(), '.room-model-validation-')));
+			const client = new TestCopilotClient([], [
+				{ id: 'model-a', name: 'Model A', supportedReasoningEfforts: ['low'] },
+				{ id: 'disabled', name: 'Disabled', policy: { state: 'disabled' } },
+			]);
+			let createCalls = 0;
+			client.createSession = async () => { createCalls++; return new MockCopilotSession() as unknown as CopilotSession; };
+			const rooms = createNoopRoomsController();
+			rooms.isRoomSessionUri = () => true;
+			const { agent } = createTestAgentContext(disposables, {
+				copilotClient: client, rooms, sessionDataService: disposables.add(new TestSessionDataService()),
+			});
+			try {
+				await agent.authenticate('https://api.github.com', 'token');
+				await waitForState(agent.models, models => models.length === 2);
+				const session = AgentSession.uri('copilotcli', 'room-model-invalid');
+				const chat = defaultChatUri(session);
+				await provisionSession(agent, { session, workingDirectories: [workingDirectory], model: { id: 'model-a' } });
+				for (const model of [{ id: 'disabled' }, { id: 'missing' }, { id: 'model-a', config: { thinkingLevel: 'high' } }]) {
+					await assert.rejects(agent.chats.changeModel(chat, model, exactChatContext(session, chat, session)));
+				}
+				assert.strictEqual(createCalls, 0);
+			} finally {
+				try {
+					await disposeAgent(agent);
+				} finally {
+					await fs.rm(workingDirectory.fsPath, { recursive: true, force: true });
+				}
 			}
 		});
 

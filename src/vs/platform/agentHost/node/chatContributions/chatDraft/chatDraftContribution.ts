@@ -11,17 +11,7 @@ import { ISessionDataService } from '../../../common/sessionDataService.js';
 import { ActionType } from '../../../common/state/sessionActions.js';
 import { isAhpChatChannel, parseChatUri } from '../../../common/state/sessionState.js';
 
-/**
- * Owns chat draft persistence in both directions. Restore runs eagerly at
- * catalog-registration time, before turns load, so it belongs on
- * {@link onHydrateChat} rather than {@link onHydrateTurns}.
- *
- * Persisting through `onDidApplyClientAction` covers client dispatch only, which is narrower than the
- * `onDidEmitEnvelope` observer this replaced. That is deliberate: `ChatDraftChangedAction`
- * is a `ClientChatAction` that nothing in production server-dispatches, and `onDidApplyClientAction` runs
- * after the reject-and-return guards in `_dispatchActionNow`, so a rejected draft is no
- * longer written.
- */
+/** Persists accepted client drafts. Room-owned model selections are hydrated after the saved draft. */
 export class ChatDraftContribution extends Disposable implements IAgentHostChatContribution {
 
 	static readonly id = 'chatDraft';
