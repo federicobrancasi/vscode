@@ -13,7 +13,6 @@ import { Action2, registerAction2 } from '../../../../platform/actions/common/ac
 import { OpenCollaborationRoomCommandId } from '../../../../platform/agentHost/common/agentHostRooms.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry, ConfigurationScope } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
-import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
@@ -22,13 +21,10 @@ import { ChatContextKeys } from '../../../../workbench/contrib/chat/common/actio
 import { Menus } from '../../../browser/menus.js';
 import { HasSelectedCollaborationRoomContext } from '../../../common/contextkeys.js';
 import { ICollaborationRoomViewService } from '../../../services/collaboration/browser/collaborationRoomView.js';
-import { CollaborationService } from '../../../services/collaboration/browser/collaborationService.js';
 import { CollaborationAvailableContext, CollaborationEnabledSettingId, CollaborationRoomVisibleContext, CollaborationSupportedContext, ICollaborationService } from '../../../services/collaboration/common/collaboration.js';
 import { ICustomViewService } from '../../../services/customView/browser/customViewService.js';
 import { CollaborationArtifactProvider } from './collaborationArtifactProvider.js';
 import { collaborationRoomViewDescriptor } from './collaborationRoomView.js';
-
-registerSingleton(ICollaborationService, CollaborationService, InstantiationType.Delayed);
 
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'chat',

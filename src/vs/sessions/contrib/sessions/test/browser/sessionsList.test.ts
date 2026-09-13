@@ -30,7 +30,7 @@ import { IAutomationRun } from '../../../../../workbench/contrib/chat/common/aut
 import { IAutomationService } from '../../../../../workbench/contrib/chat/common/automations/automationService.js';
 import { ChatAutomationsEnabledContext } from '../../../../../workbench/contrib/chat/common/automations/automationsEnabled.js';
 import { ChatContextKeys } from '../../../../../workbench/contrib/chat/common/actions/chatContextKeys.js';
-import { OpenCollaborationRoomCommandId } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoom, OpenCollaborationRoomCommandId } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { IPreferencesService, IOpenSettingsOptions } from '../../../../../workbench/services/preferences/common/preferences.js';
 import { AgentMergeSessionState } from '../../../../../platform/agentHost/common/agentMerge.js';
 import { getSessionChatDragData, isSessionChatDrag, SessionsDataTransfers } from '../../../../browser/dnd.js';
@@ -45,7 +45,7 @@ import { ChatInteractivity, ChatOriginKind, IChat, ISession, SessionStatus } fro
 import { IActiveSession, ISessionsManagementService } from '../../../../services/sessions/common/sessionsManagement.js';
 import { ISessionsProvider } from '../../../../services/sessions/common/sessionsProvider.js';
 import { ISessionsProvidersService } from '../../../../services/sessions/browser/sessionsProvidersService.js';
-import { COLLABORATION_CUSTOM_VIEW_ID, CollaborationEnabledSettingId, CollaborationSupportedContext } from '../../../../services/collaboration/common/collaboration.js';
+import { COLLABORATION_CUSTOM_VIEW_ID, CollaborationEnabledSettingId, CollaborationSupportedContext, ICollaborationService } from '../../../../services/collaboration/common/collaboration.js';
 import { computeReorderSortChanges, groupByDate, groupByWorkspace, groupSessionsForList, ISessionSection, limitSessionsForList, SessionItemToolbarMenuId, SessionSectionRenderer, SessionsFlatList, SessionsList, SessionsListFocusedChatItemContext, sortSessions, SessionsGrouping, SessionsSorting, SESSIONS_LIST_SHOW_EMPTY_DEFAULT_GROUPS_SETTING } from '../../browser/views/sessionsList.js';
 import { AgentSessionApprovalKind, AgentSessionApprovalModel, IAgentSessionApprovalInfo } from '../../../../../workbench/contrib/chat/browser/agentSessions/agentSessionApprovalModel.js';
 import { getSessionSummaryHoverData } from '../../browser/sessionHoverContent.js';
@@ -109,7 +109,7 @@ suite('Sessions - SessionsList', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 
 	suite('Agent Collab sidebar', () => {
-		function createSidebar(options: { enabled?: boolean; chatEnabled?: boolean; supported?: boolean; automations?: boolean } = {}) {
+		function createSidebar(options: { enabled?: boolean; chatEnabled?: boolean; supported?: boolean; automations?: boolean; rooms?: readonly IAgentHostRoom[] } = {}) {
 			const activeCustomView = observableValue<ICustomViewDescriptor | undefined>(disposables, undefined);
 			let supported!: IContextKey<boolean>;
 			let chatEnabled!: IContextKey<boolean>;
@@ -135,6 +135,9 @@ suite('Sessions - SessionsList', () => {
 				instantiationService.stub(ICustomViewService, new class extends mock<ICustomViewService>() {
 					override readonly activeCustomView = activeCustomView;
 				});
+				instantiationService.stub(ICollaborationService, new class extends mock<ICollaborationService>() {
+					override readonly rooms = constObservable(options.rooms ?? []);
+				});
 			});
 			const container = harness.createContainer();
 			const list = harness.store.add(harness.instantiationService.createInstance(SessionsList, container, {
@@ -146,14 +149,15 @@ suite('Sessions - SessionsList', () => {
 			return { harness, container, list, supported, chatEnabled, activeCustomView };
 		}
 
-		test('renders a fixed leaf alongside Automations and Pinned without room or worker rows', () => {
+		test('lists its rooms alongside Automations and Pinned', () => {
 			const { container, activeCustomView, harness } = createSidebar({ automations: true });
 			const labels = [...container.querySelectorAll('.session-section-label')].map(label => label.textContent);
 			assert.deepStrictEqual(labels.slice(0, 4), ['Automations', 'Agent Collab', 'Pinned', 'Chats']);
 			const row = container.querySelector<HTMLElement>('.monaco-list-row[aria-label^="Agent Collab"]')!;
 			assert.ok(row);
 			assert.strictEqual(row.getAttribute('aria-level'), '1');
-			assert.strictEqual(row.getAttribute('aria-expanded'), null);
+			assert.strictEqual(row.getAttribute('aria-expanded'), 'true');
+			assert.strictEqual(container.querySelector('.session-placeholder-label')?.textContent, 'No rooms');
 			assert.strictEqual(row.querySelector('.session-section-count')?.textContent, '');
 			assert.deepStrictEqual(harness.managementService.sessions.map(session => session.sessionId), ['sidebar-pinned', 'sidebar-quick']);
 			activeCustomView.set(upcastPartial<ICustomViewDescriptor>({ id: COLLABORATION_CUSTOM_VIEW_ID }), undefined);
@@ -161,6 +165,16 @@ suite('Sessions - SessionsList', () => {
 			assert.strictEqual(row.getAttribute('aria-label'), 'Agent Collab, current view, create or open a collaboration room');
 			activeCustomView.set(undefined, undefined);
 			assert.strictEqual(row.querySelector('.session-section.active'), null);
+		});
+
+		test('a room row opens that room instead of the create screen', () => {
+			const room = upcastPartial<IAgentHostRoom>({ id: 'room-1', title: 'Landing page', members: Array.from({ length: 3 }, () => upcastPartial<IAgentHostRoom['members'][number]>({})) });
+			const { container, harness } = createSidebar({ rooms: [room] });
+			const rows = [...container.querySelectorAll<HTMLElement>('.session-placeholder')];
+			assert.deepStrictEqual(rows.map(row => row.textContent), ['Landing page3 agents']);
+			rows[0].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+			rows[0].dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0, detail: 1 }));
+			assert.deepStrictEqual(harness.commandService.calls.map(call => [call.commandId, call.args[0]]), [[OpenCollaborationRoomCommandId, 'room-1']]);
 		});
 
 		test('opens the collaboration destination with Enter and mouse activation', () => {

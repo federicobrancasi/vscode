@@ -18,6 +18,7 @@ import { IWorkbenchAssignmentService } from '../../../../../workbench/services/a
 import { IChatService } from '../../../../../workbench/contrib/chat/common/chatService/chatService.js';
 import { IVoicePlaybackService } from '../../../../../workbench/contrib/chat/common/voicePlaybackService.js';
 import { workbenchInstantiationService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
+import { ICollaborationService } from '../../../../services/collaboration/common/collaboration.js';
 import { IAgentHostFilterService } from '../../../../services/agentHostFilter/common/agentHostFilter.js';
 import { ISessionGroup, ISessionGroupsService } from '../../../../services/sessions/browser/sessionGroupsService.js';
 import { ISessionsListModelService, SessionSortMode } from '../../../../services/sessions/browser/sessionsListModelService.js';
@@ -231,6 +232,9 @@ export function createListHarness(disposables: Pick<DisposableStore, 'add'>, ses
 		override resolveOrder(ids: readonly string[]) { return [...ids]; }
 		override isPromoted() { return false; }
 		override retain(): void { }
+	});
+	instantiationService.stub(ICollaborationService, new class extends mock<ICollaborationService>() {
+		override readonly rooms = constObservable([]);
 	});
 	instantiationService.stub(IAgentHostFilterService, new class extends mock<IAgentHostFilterService>() {
 		override readonly onDidChange = Event.None;

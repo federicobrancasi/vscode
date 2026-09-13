@@ -16,6 +16,7 @@ import { ResolveSessionConfigResult } from '../../../../platform/agentHost/commo
 import { IAgentHostService } from '../../../../platform/agentHost/common/agentService.js';
 import { ModelSelection, PolicyState, SessionModelInfo } from '../../../../platform/agentHost/common/state/protocol/state.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IWorkspaceTrustManagementService, IWorkspaceTrustRequestService } from '../../../../platform/workspace/common/workspaceTrust.js';
 import { resolveSessionForResource } from '../../../../workbench/contrib/chat/browser/agentSessions/agentHost/agentHostAuth.js';
@@ -580,3 +581,5 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		return this.api.getArtifact(roomId, artifactId);
 	}
 }
+
+registerSingleton(ICollaborationService, CollaborationService, InstantiationType.Delayed);

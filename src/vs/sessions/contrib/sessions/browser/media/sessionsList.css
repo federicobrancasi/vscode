@@ -671,6 +671,22 @@
 		white-space: nowrap;
 		opacity: 0.8;
 	}
+
+	.session-placeholder-detail {
+		flex: 0 0 auto;
+		margin-left: var(--vscode-spacing-size80);
+		opacity: 0.8;
+	}
+}
+
+/* A collaboration room reads as an openable row, not a muted placeholder. */
+.session-placeholder.session-room-row {
+	cursor: pointer;
+	color: var(--vscode-foreground);
+
+	.session-placeholder-label {
+		opacity: 1;
+	}
 }
 
 /* Folders show-more/show-less: align with workspace section headers. */

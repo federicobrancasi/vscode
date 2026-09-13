@@ -98,7 +98,7 @@ import { ChatAutomationsEnabledContext } from '../../../../../workbench/contrib/
 import { IAutomationService } from '../../../../../workbench/contrib/chat/common/automations/automationService.js';
 import { ICustomViewService } from '../../../../services/customView/browser/customViewService.js';
 import { ICustomViewDescriptor } from '../../../../services/customView/browser/customView.js';
-import { COLLABORATION_CUSTOM_VIEW_ID, COLLABORATION_SECTION_ID, CollaborationSidebarContext } from '../../../../services/collaboration/common/collaboration.js';
+import { COLLABORATION_CUSTOM_VIEW_ID, COLLABORATION_SECTION_ID, CollaborationSidebarContext, ICollaborationService } from '../../../../services/collaboration/common/collaboration.js';
 import { OpenCollaborationRoomCommandId } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { AUTOMATIONS_CUSTOM_VIEW_ID } from '../automationsConstants.js';
 import { AutomationsNewBadgeState, type AutomationsNewBadgeStyle } from '../automationsNewBadge.js';
@@ -184,12 +184,15 @@ export interface ISessionShowMore {
 	readonly remainingCount: number;
 }
 
-/** Synthetic muted row shown when a section is empty. */
+/** Synthetic row shown when a section is empty, or standing for a collaboration room. */
 export interface ISessionPlaceholder {
 	readonly placeholder: true;
 	readonly sectionId: string;
 	readonly label: string;
 	readonly hover?: string;
+	/** Set when the row opens a collaboration room rather than being a muted placeholder. */
+	readonly roomId?: string;
+	readonly detail?: string;
 }
 
 export class SessionChatItem {
@@ -1747,6 +1750,7 @@ class SessionShowMoreRenderer implements ITreeRenderer<SessionListItem, FuzzySco
 interface ISessionPlaceholderTemplate {
 	readonly container: HTMLElement;
 	readonly label: HTMLElement;
+	readonly detail: HTMLElement;
 	readonly hover: MutableDisposable<IDisposable>;
 }
 
@@ -1763,6 +1767,7 @@ class SessionPlaceholderRenderer implements ITreeRenderer<SessionListItem, Fuzzy
 		return {
 			container,
 			label: DOM.append(container, $('span.session-placeholder-label')),
+			detail: DOM.append(container, $('span.session-placeholder-detail')),
 			hover: new MutableDisposable(),
 		};
 	}
@@ -1773,6 +1778,9 @@ class SessionPlaceholderRenderer implements ITreeRenderer<SessionListItem, Fuzzy
 			return;
 		}
 		template.label.textContent = element.label;
+		template.container.classList.toggle('session-room-row', !!element.roomId);
+		template.detail.textContent = element.detail ?? '';
+		template.detail.hidden = !element.detail;
 		template.hover.value = element.hover
 			? this.hoverService.setupManagedHover(getDefaultHoverDelegate('element'), template.container, element.hover)
 			: undefined;
@@ -1859,6 +1867,9 @@ class SessionsAccessibilityProvider {
 				: localize('showMoreAria', "Show {0} more sessions", element.remainingCount);
 		}
 		if (isSessionPlaceholder(element)) {
+			if (element.detail) {
+				return localize('sessionRoomAria', "{0}, {1}", element.label, element.detail);
+			}
 			return element.hover
 				? localize('sessionPlaceholderAria', "{0}. {1}", element.label, element.hover)
 				: element.label;
@@ -2527,6 +2538,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 		@ISessionGroupsService private readonly _sessionGroupsService: ISessionGroupsService,
 		@ISessionSectionOrderService private readonly _sessionSectionOrderService: ISessionSectionOrderService,
 		@IAgentHostFilterService private readonly _agentHostFilterService: IAgentHostFilterService,
+		@ICollaborationService private readonly collaborationService: ICollaborationService,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IContextKeyService private readonly contextKeyService: IContextKeyService,
 		@IStorageService private readonly storageService: IStorageService,
@@ -2722,7 +2734,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 							return `show-more:${element.kind}:${element.mode}:${element.sectionId}`;
 						}
 						if (isSessionPlaceholder(element)) {
-							return `placeholder:${element.sectionId}`;
+							return element.roomId ? `room:${element.roomId}` : `placeholder:${element.sectionId}`;
 						}
 						if (isSessionChatItem(element)) {
 							return `chat:${element.session.sessionId}:${element.chat.resource.toString()}`;
@@ -2872,6 +2884,10 @@ export class SessionsList extends Disposable implements ISessionsList {
 				return;
 			}
 			if (isSessionPlaceholder(element)) {
+				if (element.roomId) {
+					this.tree.setSelection([]);
+					void this.commandService.executeCommand(OpenCollaborationRoomCommandId, element.roomId).catch(onUnexpectedError);
+				}
 				return;
 			}
 			if (isSessionChatItem(element)) {
@@ -3048,6 +3064,12 @@ export class SessionsList extends Disposable implements ISessionsList {
 		}));
 
 		// Re-render when the active session changes.
+		this._register(autorun(reader => {
+			this.collaborationService.rooms.read(reader);
+			if (this.visible) {
+				this.update();
+			}
+		}));
 		this._register(autorun(reader => {
 			const activeSession = this._sessionsService.activeSession.read(reader);
 			activeSession?.activeChat.read(reader);
@@ -3283,6 +3305,22 @@ export class SessionsList extends Disposable implements ISessionsList {
 		};
 
 		const renderSection = (section: ISessionSection): IObjectTreeElement<SessionListItem> => {
+			if (section.id === COLLABORATION_SECTION_ID) {
+				const rooms = this.collaborationService.rooms.get();
+				return {
+					element: section as SessionListItem,
+					collapsible: true,
+					collapsed: this.getSavedCollapseState(section.id) ?? ObjectTreeElementCollapseState.PreserveOrExpanded,
+					children: rooms.length
+						? rooms.map(room => ({
+							element: {
+								placeholder: true as const, sectionId: section.id, roomId: room.id, label: room.title,
+								detail: localize('roomRowDetail', "{0} agents", room.members.length),
+							},
+						}))
+						: [{ element: { placeholder: true as const, sectionId: section.id, label: localize('noRooms', "No rooms") } }],
+				};
+			}
 			if (getSessionSectionCustomViewId(section.id)) {
 				return {
 					element: section as SessionListItem,
