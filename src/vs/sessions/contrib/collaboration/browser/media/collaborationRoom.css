@@ -71,17 +71,6 @@
 	padding: var(--vscode-spacing-size160);
 }
 
-.collaboration-room .room-panel-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: var(--vscode-spacing-size80);
-}
-
-.collaboration-room .room-panel-header h3 {
-	margin: 0;
-}
-
 .collaboration-room .room-layout-narrow > .room-panel-host {
 	position: absolute;
 	top: 0;
@@ -97,7 +86,6 @@
 
 .collaboration-room .room-header,
 .collaboration-room .room-configuration,
-.collaboration-room .room-navigation,
 .collaboration-room .room-actions,
 .collaboration-room .room-member-actions,
 .collaboration-room .room-message-actions,
@@ -122,10 +110,6 @@
 
 .collaboration-room .room-heading h2 {
 	overflow-wrap: anywhere;
-}
-
-.collaboration-room .room-navigation select {
-	width: 100%;
 }
 
 .collaboration-room .room-configuration {
