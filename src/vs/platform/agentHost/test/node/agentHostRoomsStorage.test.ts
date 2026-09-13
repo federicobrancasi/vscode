@@ -6,6 +6,7 @@
 import assert from 'assert';
 import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
+import { tmpdir } from 'os';
 import { join } from '../../../../base/common/path.js';
 import { DeferredPromise } from '../../../../base/common/async.js';
 import { Emitter } from '../../../../base/common/event.js';
@@ -682,6 +683,31 @@ suite('AgentHostRoomsStorage', function () {
 		assert.throws(() => storage.worktreeUri('../room', 'member'));
 		assert.throws(() => storage.worktreeUri('room', '../member'));
 		assert.throws(() => new AgentHostRoomsStorage(URI.parse('vscode-remote://host/storage'), new NullLogService()));
+	});
+
+	test('a plain folder is only prepared for collaboration when the caller opts in', async () => {
+		// Must live outside any repository: Git resolves a nested folder to its enclosing work tree.
+		const outside = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'agent-collab-plain-')));
+		try {
+			await fs.writeFile(join(outside, 'index.html'), '<h1>Landing</h1>');
+			const uri = URI.file(outside).toString();
+			const before = await storage.isRepository(uri);
+			await assert.rejects(storage.resolveRepository(uri, 'HEAD'));
+			const resolved = await storage.resolveRepository(uri, 'HEAD', true);
+			assert.deepStrictEqual({
+				before, after: await storage.isRepository(uri),
+				repository: resolved.repositoryUri, pinned: /^[0-9a-f]{40}$/.test(resolved.baseRevision),
+				stable: (await storage.resolveRepository(uri, 'HEAD')).baseRevision === resolved.baseRevision,
+			}, { before: false, after: true, repository: URI.file(outside).toString(), pinned: true, stable: true });
+		} finally {
+			await fs.rm(outside, { recursive: true, force: true });
+		}
+	});
+
+	test('preparing an existing repository never adds a second baseline commit', async () => {
+		const snapshot = await initializeRepository();
+		const resolved = await storage.resolveRepository(snapshot.room.repositoryUri, 'HEAD', true);
+		assert.strictEqual(resolved.baseRevision, snapshot.room.baseRevision);
 	});
 
 	test('resolves a local repository and strictly pins requested commits', async () => {

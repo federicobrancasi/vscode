@@ -33,7 +33,8 @@ export interface IRoomRecord {
 export interface IRoomStorage {
 	load(): Promise<readonly IRoomRecord[]>;
 	save(record: IRoomRecord): Promise<void>;
-	resolveRepository(repositoryUri: string, revision?: string): Promise<{ repositoryUri: string; baseRevision: string }>;
+	isRepository(folderUri: string): Promise<boolean>;
+	resolveRepository(repositoryUri: string, revision?: string, initialize?: boolean): Promise<{ repositoryUri: string; baseRevision: string }>;
 	worktreeUri(roomId: string, memberId: string): string;
 	ensureWorktree(room: IAgentHostRoom, member: IAgentHostRoomMember, requireExisting?: boolean): Promise<void>;
 	publishPatch(room: IAgentHostRoom, member: IAgentHostRoomMember, title: string, validateContent?: RoomContentValidator): Promise<IAgentHostRoomArtifact>;

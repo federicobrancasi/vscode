@@ -31,6 +31,15 @@ export const defaultAgentHostRoomConfiguration: IAgentHostRoomConfiguration = {
 	mode: 'autopilot', autoApprove: 'default', sandboxEnabled: 'default',
 };
 
+/**
+ * Applied to members of a newly created room. Existing and legacy rooms keep
+ * {@link defaultAgentHostRoomConfiguration} so reopening one never silently
+ * escalates its approval level.
+ */
+export const newAgentHostRoomConfiguration: IAgentHostRoomConfiguration = {
+	...defaultAgentHostRoomConfiguration, autoApprove: 'assisted',
+};
+
 export interface IAgentHostRoomLimits {
 	readonly maxTurns?: number;
 	readonly timeoutMinutes?: number;
@@ -94,6 +103,8 @@ export interface IAgentHostRoom {
 	readonly createdAt: number;
 	readonly updatedAt: number;
 	readonly state: AgentHostRoomState;
+	/** Keep admitting turns for idle members that have no explicit next step. Absent on legacy rooms. */
+	readonly continuous?: boolean;
 	readonly members: readonly IAgentHostRoomMember[];
 	readonly artifacts: readonly IAgentHostRoomArtifact[];
 	readonly latestMessageSequence: number;
@@ -144,8 +155,12 @@ export interface IAgentHostRoomCreateOptions {
 	readonly repositoryUri: string;
 	/** Branch, tag, or commit to resolve and pin in the host's Git environment. Defaults to HEAD. */
 	readonly baseRevision?: string;
+	/** Prepare a plain folder for collaboration (git init plus a baseline commit) when it is not yet a repository. */
+	readonly initializeRepository?: boolean;
 	readonly workerCount: number;
 	readonly model?: string;
+	/** Keep idle members working without an explicit next step. Defaults to true for new rooms. */
+	readonly continuous?: boolean;
 	/** Ordered by worker index. An undefined entry uses the legacy model option, or the provider default. */
 	readonly memberModels?: readonly (ModelSelection | undefined)[];
 }
@@ -181,6 +196,8 @@ export interface IAgentHostRoomsService {
 	readonly onDidChangeRoom: Event<IAgentHostRoom>;
 
 	getCapabilities(): Promise<IAgentHostRoomsCapabilities>;
+	/** Whether a folder can already back a room, so callers can offer to prepare it first. */
+	isRepository(folderUri: string): Promise<boolean>;
 	listRooms(): Promise<readonly IAgentHostRoom[]>;
 	getRoom(roomId: string): Promise<IAgentHostRoom>;
 	createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom>;
@@ -197,6 +214,8 @@ export interface IAgentHostRoomsService {
 	setRoomConfiguration(roomId: string, configuration: Partial<IAgentHostRoomConfiguration>): Promise<IAgentHostRoom>;
 	/** Undefined selects the catalog's explicit Auto model; rejects when Auto is unavailable. */
 	setMemberModel(roomId: string, memberId: string, model: ModelSelection | undefined): Promise<IAgentHostRoom>;
+	/** Toggle whether idle members keep working without an explicit next step. */
+	setContinuous(roomId: string, continuous: boolean): Promise<IAgentHostRoom>;
 	/** Return immutable patch text; the separately published artifact.uri identifies its file. */
 	getArtifact(roomId: string, artifactId: string): Promise<string>;
 }

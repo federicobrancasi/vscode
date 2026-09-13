@@ -57,6 +57,7 @@ export class AgentHostRoomsController extends AgentHostRooms implements IAgentHo
 class UnavailableRoomStorage implements IRoomStorage {
 	async load(): Promise<readonly IRoomRecord[]> { return []; }
 	async save(): Promise<void> { throw this.unavailable(); }
+	async isRepository(): Promise<boolean> { return false; }
 	async resolveRepository(): Promise<{ repositoryUri: string; baseRevision: string }> { throw this.unavailable(); }
 	worktreeUri(): string { throw this.unavailable(); }
 	async ensureWorktree(): Promise<void> { throw this.unavailable(); }

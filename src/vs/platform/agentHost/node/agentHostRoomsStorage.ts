@@ -63,16 +63,54 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		});
 	}
 
-	async resolveRepository(repositoryUri: string, revision = 'HEAD'): Promise<{ repositoryUri: string; baseRevision: string }> {
+	/** True when the folder is already inside a Git work tree with at least one commit. */
+	async isRepository(folderUri: string): Promise<boolean> {
+		const requested = localFile(folderUri, 'folderUri');
+		try {
+			const toplevel = (await this.git(requested.fsPath, ['rev-parse', '--show-toplevel'])).trim();
+			if (!toplevel.length) {
+				return false;
+			}
+			await this.git(toplevel, ['rev-parse', '--verify', 'HEAD^{commit}']);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	async resolveRepository(repositoryUri: string, revision = 'HEAD', initialize = false): Promise<{ repositoryUri: string; baseRevision: string }> {
 		const requested = localFile(repositoryUri, 'repositoryUri');
 		text(revision, 'revision', false);
 		check(!revision.startsWith('-') && !revision.includes('\0'), 'revision');
+		if (initialize && !(await this.isRepository(repositoryUri))) {
+			await this.initializeRepository(requested.fsPath);
+		}
 		const toplevel = (await this.git(requested.fsPath, ['rev-parse', '--show-toplevel'])).trim();
 		check(toplevel.length > 0, 'repository toplevel');
 		const repository = await fs.realpath(toplevel);
 		const baseRevision = (await this.git(repository, ['rev-parse', '--verify', '--end-of-options', `${revision}^{commit}`])).trim();
 		commit(baseRevision, 'baseRevision');
 		return { repositoryUri: URI.file(repository).toString(), baseRevision };
+	}
+
+	/**
+	 * Prepare a plain folder for collaboration. Worktrees require Git, so a room
+	 * cannot isolate members without a repository and at least one commit. Only
+	 * ever reached through an explicit caller opt-in.
+	 */
+	private async initializeRepository(path: string): Promise<void> {
+		const stats = await statIfPresent(path);
+		check(stats?.isDirectory() === true, 'folder does not exist');
+		const inside = (await this.git(path, ['rev-parse', '--show-toplevel']).catch(() => '')).trim();
+		if (!inside.length) {
+			await this.git(path, ['init', '--quiet']);
+		}
+		const root = (await this.git(path, ['rev-parse', '--show-toplevel'])).trim();
+		check(root.length > 0, 'repository toplevel');
+		const identity = ['-c', 'user.name=Agent Collab', '-c', 'user.email=agent-collab@localhost'];
+		await this.git(root, ['add', '--all', '--', '.']).catch(() => undefined);
+		await this.git(root, [...identity, 'commit', '--quiet', '--allow-empty', '--no-verify', '-m', 'Baseline for Agent Collab']);
+		this.logService.info('[AgentHostRoomsStorage] Initialized a repository for collaboration', root);
 	}
 
 	worktreeUri(roomId: string, memberId: string): string {
@@ -267,7 +305,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 	}
 
 	private validateRoom(value: unknown): asserts value is IAgentHostRoom {
-		const room = object(value, 'room', ['id', 'revision', 'title', 'goal', 'instructions', 'repositoryUri', 'baseRevision', 'createdAt', 'updatedAt', 'state', 'members', 'artifacts', 'latestMessageSequence', 'run', 'error']);
+		const room = object(value, 'room', ['id', 'revision', 'title', 'goal', 'instructions', 'repositoryUri', 'baseRevision', 'createdAt', 'updatedAt', 'state', 'continuous', 'members', 'artifacts', 'latestMessageSequence', 'run', 'error']);
 		identifier(room.id, 'room.id');
 		count(room.revision, 'room.revision');
 		text(room.title, 'room.title', false);
@@ -279,6 +317,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		count(room.updatedAt, 'room.updatedAt');
 		check(room.updatedAt >= room.createdAt, 'room.updatedAt precedes creation');
 		enumValue(room.state, ['created', 'running', 'idle', 'paused', 'stopping', 'stopped', 'interrupted'], 'room.state');
+		check(room.continuous === undefined || typeof room.continuous === 'boolean', 'room.continuous');
 		count(room.latestMessageSequence, 'room.latestMessageSequence');
 		optional(room.error, text, 'room.error');
 		const members = array(room.members, 'room.members');

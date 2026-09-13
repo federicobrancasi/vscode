@@ -19,7 +19,7 @@ import { NullLogService } from '../../../log/common/log.js';
 import { IProductService } from '../../../product/common/productService.js';
 import { IAgentModelInfo } from '../../common/agent.js';
 import { createAgentHostRoomsClient } from '../../common/agentHostRoomsIpc.js';
-import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomMember, IAgentHostRoomsService } from '../../common/agentHostRooms.js';
+import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomMember, IAgentHostRoomsService, newAgentHostRoomConfiguration } from '../../common/agentHostRooms.js';
 import { AgentHostAutoApprovePolicyRestrictedConfigKey, platformSessionSchema } from '../../common/agentHostSchema.js';
 import { ResolveSessionConfigResult } from '../../common/state/protocol/commands.js';
 import { AgentSession } from '../../common/agentService.js';
@@ -61,6 +61,7 @@ class MemoryRoomStorage implements IRoomStorage {
 	async save(record: IRoomRecord): Promise<void> {
 		this.records.set(record.room.id, structuredClone(record));
 	}
+	async isRepository(): Promise<boolean> { return true; }
 	async resolveRepository(repositoryUri: string) { return { repositoryUri, baseRevision: 'a'.repeat(40) }; }
 	worktreeUri(roomId: string, memberId: string): string { return `file:///room-worktrees/${roomId}/${memberId}`; }
 	async ensureWorktree(room: IAgentHostRoom, member: IAgentHostRoomMember): Promise<void> {
@@ -214,7 +215,8 @@ suite('AgentHostRooms', () => {
 	function setup(workerCount = 2, storage = new MemoryRoomStorage(), now?: () => number) {
 		const runtime = new RoomRuntime();
 		const rooms = disposables.add(new AgentHostRooms(storage, runtime, new NullLogService(), now));
-		const create = () => rooms.createRoom({ title: 'Shared work', goal: 'Measure before changing code', repositoryUri: 'file:///repository', workerCount });
+		// These suites describe wind-down semantics; continuous rooms are covered separately.
+		const create = (continuous = false) => rooms.createRoom({ title: 'Shared work', goal: 'Measure before changing code', repositoryUri: 'file:///repository', workerCount, continuous });
 		return { storage, runtime, rooms, create };
 	}
 
@@ -285,7 +287,7 @@ suite('AgentHostRooms', () => {
 				{ id: 'model-b', config: { thinkingLevel: 'low', contextSize: 200_000 } },
 				{ id: 'auto', config: { tier: 'efficiency' } },
 			];
-			const room = await rooms.createRoom({ title: 'Models', goal: 'Use independent choices', repositoryUri: 'file:///repository', workerCount: 3, memberModels: models });
+			const room = await rooms.createRoom({ title: 'Models', goal: 'Use independent choices', repositoryUri: 'file:///repository', workerCount: 3, memberModels: models, continuous: false });
 			assert.deepStrictEqual({
 				models: room.members.map(getRoomMemberModel),
 				applied: room.members.map(member => member.modelSelection),
@@ -351,7 +353,7 @@ suite('AgentHostRooms', () => {
 				for (const model of [undefined, 'model-c']) {
 					created.push(await client.createRoom({
 						title: 'IPC', goal: 'Keep absence distinct', repositoryUri: 'file:///repository',
-						workerCount: 3, memberModels, model,
+						workerCount: 3, memberModels, model, continuous: false,
 					}));
 				}
 			}
@@ -377,10 +379,10 @@ suite('AgentHostRooms', () => {
 
 		test('the legacy all-model option remains a fallback for unspecified peers', async () => {
 			const { rooms } = setup();
-			const legacy = await rooms.createRoom({ title: 'Legacy', goal: 'Keep choices', repositoryUri: 'file:///repository', workerCount: 3, model: 'model-a' });
+			const legacy = await rooms.createRoom({ title: 'Legacy', goal: 'Keep choices', repositoryUri: 'file:///repository', workerCount: 3, model: 'model-a', continuous: false });
 			const mixed = await rooms.createRoom({
 				title: 'Mixed', goal: 'Keep choices', repositoryUri: 'file:///repository', workerCount: 3, model: 'model-a',
-				memberModels: [undefined, { id: 'model-b' }, { id: 'auto' }],
+				memberModels: [undefined, { id: 'model-b' }, { id: 'auto' }], continuous: false,
 			});
 			assert.deepStrictEqual({
 				legacy: legacy.members.map(getRoomMemberModel), mixed: mixed.members.map(getRoomMemberModel),
@@ -392,7 +394,7 @@ suite('AgentHostRooms', () => {
 
 		test('legacy room journals distinguish an applied selection from an unstarted preference', async () => {
 			const { rooms, storage } = setup();
-			const room = await rooms.createRoom({ title: 'Legacy journal', goal: 'Restore selections', repositoryUri: 'file:///repository', workerCount: 2, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Legacy journal', goal: 'Restore selections', repositoryUri: 'file:///repository', workerCount: 2, model: 'model-a', continuous: false });
 			const record = storage.records.get(room.id)!;
 			storage.records.set(room.id, {
 				...record,
@@ -458,7 +460,7 @@ suite('AgentHostRooms', () => {
 			const { rooms, runtime, storage } = setup(1);
 			const initial = { id: 'model-a' };
 			const next = { id: 'model-b', config: { thinkingLevel: 'high' } };
-			const room = await rooms.createRoom({ title: 'Busy', goal: 'Finish the current turn', repositoryUri: 'file:///repository', workerCount: 1, memberModels: [initial] });
+			const room = await rooms.createRoom({ title: 'Busy', goal: 'Finish the current turn', repositoryUri: 'file:///repository', workerCount: 1, memberModels: [initial], continuous: false });
 			await rooms.startRoom(room.id, { maxTurns: 2 });
 			await runtime.whenSubmitted(1);
 			const executions = storage.records.get(room.id)!.executions;
@@ -483,7 +485,7 @@ suite('AgentHostRooms', () => {
 		test('the latest choice during preparation applies once before submission', async () => {
 			const { rooms, runtime } = setup(1);
 			runtime.blockPrepare = true;
-			const room = await rooms.createRoom({ title: 'Preparing', goal: 'Use the latest choice', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Preparing', goal: 'Use the latest choice', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a', continuous: false });
 			await rooms.startRoom(room.id, { maxTurns: 1 });
 			await runtime.whenPrepared(1);
 			await rooms.setMemberModel(room.id, room.members[0].id, { id: 'model-b' });
@@ -503,7 +505,7 @@ suite('AgentHostRooms', () => {
 				await applying.complete();
 				await applied.p;
 			};
-			const room = await rooms.createRoom({ title: 'Ack', goal: 'Use the newest model', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Ack', goal: 'Use the newest model', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a', continuous: false });
 			await rooms.startRoom(room.id, { maxTurns: 1 });
 			await applying.p;
 			const updated = rooms.setMemberModel(room.id, room.members[0].id, { id: 'model-b' });
@@ -527,7 +529,7 @@ suite('AgentHostRooms', () => {
 				await applying.complete();
 				await applied.p;
 			};
-			const room = await rooms.createRoom({ title: 'Stop', goal: 'Do not send', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Stop', goal: 'Do not send', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a', continuous: false });
 			await rooms.startRoom(room.id, { maxTurns: 1 });
 			await applying.p;
 			const stopped = rooms.stopRoom(room.id);
@@ -540,7 +542,7 @@ suite('AgentHostRooms', () => {
 			const initial = { id: 'model-a' };
 			const next = { id: 'auto', config: { tier: 'intelligence' } };
 			const configuration: IAgentHostRoomConfiguration = { mode: 'plan', autoApprove: 'assisted', sandboxEnabled: 'on' };
-			const room = await rooms.createRoom({ title: 'Restart', goal: 'Preserve selections', repositoryUri: 'file:///repository', workerCount: 1, memberModels: [initial] });
+			const room = await rooms.createRoom({ title: 'Restart', goal: 'Preserve selections', repositoryUri: 'file:///repository', workerCount: 1, memberModels: [initial], continuous: false });
 			await rooms.setRoomConfiguration(room.id, configuration);
 			await rooms.startRoom(room.id, { maxTurns: 1 });
 			await runtime.whenSubmitted(1);
@@ -573,7 +575,7 @@ suite('AgentHostRooms', () => {
 
 		test('SDK rejection keeps the applied model and pending retry while exposing the error', async () => {
 			const { rooms, runtime, storage } = setup(1);
-			const room = await rooms.createRoom({ title: 'Rejected', goal: 'Do not fall back', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Rejected', goal: 'Do not fall back', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a', continuous: false });
 			await rooms.startRoom(room.id, { maxTurns: 1 });
 			await runtime.whenSubmitted(1);
 			runtime.finish(room.members[0].sessionUri);
@@ -595,7 +597,7 @@ suite('AgentHostRooms', () => {
 
 		test('a rejected pending model blocks the next turn without replacing the current model or scheduling a model-only turn', async () => {
 			const { rooms, runtime } = setup(1);
-			const room = await rooms.createRoom({ title: 'Next turn rejection', goal: 'Do not fall back', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Next turn rejection', goal: 'Do not fall back', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a', continuous: false });
 			await rooms.startRoom(room.id, { maxTurns: 3 });
 			await runtime.whenSubmitted(1);
 			await rooms.setMemberModel(room.id, room.members[0].id, { id: 'model-b' });
@@ -634,7 +636,7 @@ suite('AgentHostRooms', () => {
 
 		test('a pending choice disabled by policy fails before submission without corrupting the journal or shutting down rooms', async () => {
 			const { rooms, runtime, storage } = setup(1);
-			const room = await rooms.createRoom({ title: 'Policy changed', goal: 'Fail closed', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Policy changed', goal: 'Fail closed', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a', continuous: false });
 			runtime.models = roomModelCatalog.map(model => ({ ...model, policyState: PolicyState.Disabled }));
 			await rooms.startRoom(room.id, { maxTurns: 1 });
 			const failed = await whenRoom(rooms, room.id, room => room.state === 'idle' && room.members[0].state === 'failed');
@@ -651,7 +653,7 @@ suite('AgentHostRooms', () => {
 
 		test('reset requires the live Auto catalog entry and never falls back to an arbitrary model', async () => {
 			const { rooms, runtime } = setup(1);
-			const room = await rooms.createRoom({ title: 'Reset', goal: 'Use explicit Auto', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Reset', goal: 'Use explicit Auto', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a', continuous: false });
 			runtime.models = roomModelCatalog.filter(model => model.id !== 'auto');
 			await assert.rejects(rooms.setMemberModel(room.id, room.members[0].id, undefined), /unavailable/);
 			assert.deepStrictEqual((await rooms.getRoom(room.id)).members.map(getRoomMemberModel), [{ id: 'model-a' }]);
@@ -659,7 +661,7 @@ suite('AgentHostRooms', () => {
 
 		test('native member chat picker changes are journalled and survive Stop/Resume', async () => {
 			const { rooms, service, provider, state, whenSent } = setupProduction();
-			const room = await rooms.createRoom({ title: 'Native', goal: 'Keep picker changes', repositoryUri: 'file:///repository', workerCount: 2, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Native', goal: 'Keep picker changes', repositoryUri: 'file:///repository', workerCount: 2, model: 'model-a', continuous: false });
 			await rooms.startRoom(room.id, { maxTurns: 2 });
 			await whenSent(2);
 			const selected = { id: 'model-b', config: { thinkingLevel: 'high' } };
@@ -684,7 +686,7 @@ suite('AgentHostRooms', () => {
 
 		test('provider-native applied choices are reconciled rather than overwritten on Resume', async () => {
 			const { rooms, provider, whenSent } = setupProduction();
-			const room = await rooms.createRoom({ title: 'Reconcile', goal: 'Keep provider choices', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Reconcile', goal: 'Keep provider choices', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a', continuous: false });
 			await rooms.startRoom(room.id, { maxTurns: 1 });
 			await whenSent(1);
 			await rooms.stopRoom(room.id);
@@ -697,7 +699,7 @@ suite('AgentHostRooms', () => {
 
 		test('native draft clearing and other chat identities cannot reset a member model', async () => {
 			const { rooms, service, whenSent } = setupProduction();
-			const room = await rooms.createRoom({ title: 'Identity', goal: 'Keep selections', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a' });
+			const room = await rooms.createRoom({ title: 'Identity', goal: 'Keep selections', repositoryUri: 'file:///repository', workerCount: 1, model: 'model-a', continuous: false });
 			await rooms.startRoom(room.id, { maxTurns: 1 });
 			await whenSent(1);
 			const member = room.members[0];
@@ -813,7 +815,7 @@ suite('AgentHostRooms', () => {
 			await assert.rejects(channel.call('room-client', command, [room.members[0].sessionUri, { mode: 'plan' }]), /Unknown room method/);
 		}
 		await channel.call('room-client', 'setRoomConfiguration', [room.id, { mode: 'plan' }]);
-		assert.deepStrictEqual((await rooms.getRoomConfiguration(room.id)).values, { ...defaultAgentHostRoomConfiguration, mode: 'plan' });
+		assert.deepStrictEqual((await rooms.getRoomConfiguration(room.id)).values, { ...newAgentHostRoomConfiguration, mode: 'plan' });
 	});
 
 	test('two preserved sessions apply room and individual choices immediately and retain them after Stop and Resume', async () => {
@@ -823,7 +825,7 @@ suite('AgentHostRooms', () => {
 			const session = URI.isUri(context) ? context.toString() : context.configurationResource.toString();
 			applied.set(session, { ...state.getSessionState(session)!.config!.values });
 		};
-		const room = await rooms.createRoom({ title: 'Configuration', goal: 'Keep selections', repositoryUri: 'file:///repository', workerCount: 2 });
+		const room = await rooms.createRoom({ title: 'Configuration', goal: 'Keep selections', repositoryUri: 'file:///repository', workerCount: 2, continuous: false });
 		await rooms.startRoom(room.id, { maxTurns: 2 });
 		await whenSent(2);
 		const shared: IAgentHostRoomConfiguration = { mode: 'interactive', autoApprove: 'autoApprove', sandboxEnabled: 'off' };
@@ -854,7 +856,7 @@ suite('AgentHostRooms', () => {
 
 	test('configuration receipts reject invalid, immutable, and policy-restricted selections without changing the journal', async () => {
 		const { rooms, storage, configuration, changeConfiguration, whenSent } = setupProduction();
-		const room = await rooms.createRoom({ title: 'Policy', goal: 'Preserve restrictions', repositoryUri: 'file:///repository', workerCount: 2 });
+		const room = await rooms.createRoom({ title: 'Policy', goal: 'Preserve restrictions', repositoryUri: 'file:///repository', workerCount: 2, continuous: false });
 		await rooms.startRoom(room.id, { maxTurns: 2 });
 		await whenSent(2);
 		const session = room.members[0].sessionUri;
@@ -893,7 +895,7 @@ suite('AgentHostRooms', () => {
 
 	test('provider choices are intersected and validated for every member before changing the journal', async () => {
 		const { rooms, storage, provider } = setupProduction();
-		const room = await rooms.createRoom({ title: 'Provider choices', goal: 'Use supported modes', repositoryUri: 'file:///repository', workerCount: 2 });
+		const room = await rooms.createRoom({ title: 'Provider choices', goal: 'Use supported modes', repositoryUri: 'file:///repository', workerCount: 2, continuous: false });
 		provider.resolveChatConfig = async params => {
 			const modes = params.workingDirectory?.toString() === room.members[0].worktreeUri ? ['interactive', 'plan'] : ['plan', 'autopilot'];
 			const schema = platformSessionSchema.toProtocol();
@@ -917,7 +919,7 @@ suite('AgentHostRooms', () => {
 
 	test('a rejected SDK update rolls back live configuration and rejects the client receipt while preserving the desired retry', async () => {
 		const { rooms, state, storage, provider, changeConfiguration, whenSent } = setupProduction();
-		const room = await rooms.createRoom({ title: 'Failure', goal: 'Do not acknowledge failed SDK changes', repositoryUri: 'file:///repository', workerCount: 2 });
+		const room = await rooms.createRoom({ title: 'Failure', goal: 'Do not acknowledge failed SDK changes', repositoryUri: 'file:///repository', workerCount: 2, continuous: false });
 		await rooms.startRoom(room.id, { maxTurns: 2 });
 		await whenSent(2);
 		let rejectNext = true;
@@ -935,7 +937,7 @@ suite('AgentHostRooms', () => {
 			desired: storage.records.get(room.id)!.room.members[0].configuration,
 		}, {
 			rejected: true,
-			live: { isolation: 'folder', ...defaultAgentHostRoomConfiguration },
+			live: { isolation: 'folder', ...newAgentHostRoomConfiguration },
 			desired: { mode: 'plan', autoApprove: 'autoApprove', sandboxEnabled: 'default' },
 		});
 		await rooms.stopRoom(room.id);
@@ -1094,7 +1096,7 @@ suite('AgentHostRooms', () => {
 				started.complete();
 			}
 		}));
-		const room = await rooms.createRoom({ title: 'Shared work', goal: 'Inspect the form', repositoryUri: 'file:///repository', workerCount: 10 });
+		const room = await rooms.createRoom({ title: 'Shared work', goal: 'Inspect the form', repositoryUri: 'file:///repository', workerCount: 10, continuous: false });
 		await rooms.startRoom(room.id, { maxTurns: 10 });
 		await started.p;
 		const expected = room.members.map(member => ({
@@ -1113,7 +1115,7 @@ suite('AgentHostRooms', () => {
 		}, {
 			steered: expected, chats: expected.map(member => member.chat),
 			activeTurns: expected.map(member => member.turnId), sends: 10, worktrees: 10,
-			modes: Array(10).fill('autopilot'), approvals: Array(10).fill('default'),
+			modes: Array(10).fill('autopilot'), approvals: Array(10).fill('assisted'),
 		});
 		const member = room.members[0];
 		const chat = buildDefaultChatUri(member.sessionUri);
@@ -1209,7 +1211,7 @@ suite('AgentHostRooms', () => {
 			sessions: (await rooms.getRoom(room.id)).members.map(member => member.sessionUri),
 			sends: provider.sendMessageCalls.length,
 		}, {
-			modes: ['interactive', ...Array(9).fill('autopilot')], approvals: Array(10).fill('default'),
+			modes: ['interactive', ...Array(9).fill('autopilot')], approvals: Array(10).fill('assisted'),
 			sessions: room.members.map(member => member.sessionUri), sends: 20,
 		});
 		await rooms.stopRoom(room.id);
@@ -1583,6 +1585,51 @@ suite('AgentHostRooms', () => {
 		await runtime.abortGate.complete();
 		await stopped;
 		assert.deepStrictEqual({ submissions: runtime.submitted.length, state: (await rooms.getRoom(room.id)).state }, { submissions: 1, state: 'stopped' });
+	});
+
+	test('a continuous room keeps admitting turns for an idle member that proposed no next step', async () => {
+		const { rooms, runtime } = setup(1);
+		const room = await rooms.createRoom({ title: 'Open ended', goal: 'Keep improving the result', repositoryUri: 'file:///repository', workerCount: 1 });
+		assert.strictEqual(room.continuous, true);
+		await rooms.startRoom(room.id, { maxTurns: 3 });
+		const member = room.members[0];
+		for (let turn = 1; turn <= 3; turn++) {
+			await runtime.whenSubmitted(turn);
+			runtime.finish(member.sessionUri);
+		}
+		await whenRoom(rooms, room.id, room => room.state === 'idle');
+		assert.deepStrictEqual({
+			turns: runtime.submitted.length,
+			continuationPrompt: runtime.submitted[1].prompt.includes('You were woken to continue'),
+			neverStops: runtime.submitted[1].prompt.includes('there is always a further improvement to attempt'),
+		}, { turns: 3, continuationPrompt: true, neverStops: true });
+	});
+
+	test('continuous mode can be turned off, and off is the wind-down contract', async () => {
+		const { rooms, runtime, create } = setup(1);
+		const room = await create();
+		assert.strictEqual(room.continuous, false);
+		await rooms.startRoom(room.id, { maxTurns: 3 });
+		await runtime.whenSubmitted(1);
+		runtime.finish(room.members[0].sessionUri);
+		await whenRoom(rooms, room.id, room => room.state === 'idle');
+		const enabled = await rooms.setContinuous(room.id, true);
+		assert.deepStrictEqual({
+			stoppedWithoutNextStep: runtime.submitted.length, continuous: enabled.continuous,
+		}, { stoppedWithoutNextStep: 1, continuous: true });
+	});
+
+	test('peer work is surfaced on an interval so a shared board cannot homogenise every member', async () => {
+		const { rooms, runtime } = setup(1);
+		const room = await rooms.createRoom({ title: 'Islands', goal: 'Explore independently', repositoryUri: 'file:///repository', workerCount: 1 });
+		await rooms.startRoom(room.id, { maxTurns: 3 });
+		const member = room.members[0];
+		for (let turn = 1; turn <= 3; turn++) {
+			await runtime.whenSubmitted(turn);
+			runtime.finish(member.sessionUri);
+		}
+		await whenRoom(rooms, room.id, room => room.state === 'idle');
+		assert.deepStrictEqual(runtime.submitted.map(submission => submission.prompt.includes('This is a review turn')), [false, false, true]);
 	});
 
 	test('a substantive next step continues after ordinary SDK idle, within finite limits', async () => {

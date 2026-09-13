@@ -12,9 +12,9 @@ import { IAgentHostRoomsService } from '../common/agentHostRooms.js';
 export function createAgentHostRoomsChannel(rooms: IAgentHostRoomsService, disposables: DisposableStore): IServerChannel {
 	const channel = ProxyChannel.fromService(rooms, disposables);
 	const methods = new Set<string>([
-		'getCapabilities', 'listRooms', 'getRoom', 'createRoom', 'getMessages', 'postMessage', 'retryMessage',
+		'getCapabilities', 'isRepository', 'listRooms', 'getRoom', 'createRoom', 'getMessages', 'postMessage', 'retryMessage',
 		'startRoom', 'pauseRoom', 'stopRoom', 'stopMember', 'retryMember', 'getArtifact',
-		'getRoomConfiguration', 'setRoomConfiguration', 'setMemberModel',
+		'getRoomConfiguration', 'setRoomConfiguration', 'setMemberModel', 'setContinuous',
 	] satisfies (keyof IAgentHostRoomsService)[]);
 	return {
 		call: (context, command, args) => {

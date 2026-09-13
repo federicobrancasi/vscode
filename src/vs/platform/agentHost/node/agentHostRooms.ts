@@ -11,7 +11,7 @@ import { URI } from '../../../base/common/uri.js';
 import { generateUuid } from '../../../base/common/uuid.js';
 import { localize } from '../../../nls.js';
 import { ILogService } from '../../log/common/log.js';
-import { AgentHostRoomMessageKind, defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsService, MAX_ROOM_WORKERS } from '../common/agentHostRooms.js';
+import { AgentHostRoomMessageKind, defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsService, MAX_ROOM_WORKERS, newAgentHostRoomConfiguration } from '../common/agentHostRooms.js';
 import { AgentSession } from '../common/agentService.js';
 import { ResolveSessionConfigResult } from '../common/state/protocol/commands.js';
 import { buildDefaultChatUri, ModelSelection } from '../common/state/sessionState.js';
@@ -53,6 +53,9 @@ export interface IRoomArtifactContent {
 	readonly totalCharacters: number;
 	readonly nextOffset?: number;
 }
+
+/** Turn interval on which a member is pointed at peer work, to slow diversity collapse. */
+const PEER_REVIEW_INTERVAL = 3;
 
 /**
  * The room is a separate durable authority, not an AHP queued message.
@@ -141,6 +144,10 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		return [...this._records.values()].map(record => record.room).sort((a, b) => b.updatedAt - a.updatedAt);
 	}
 
+	isRepository(folderUri: string): Promise<boolean> {
+		return this._storage.isRepository(folderUri);
+	}
+
 	async getRoom(roomId: string): Promise<IAgentHostRoom> {
 		await this._ready;
 		return this._record(roomId).room;
@@ -177,6 +184,23 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			}
 			return record.room;
 		});
+	}
+
+	async setContinuous(roomId: string, continuous: boolean): Promise<IAgentHostRoom> {
+		await this._ready;
+		this._assertOpen();
+		if (typeof continuous !== 'boolean') {
+			throw new Error(localize('rooms.invalidContinuous', "Choose whether idle members keep working."));
+		}
+		const room = await this._queue.queue(roomId, async () => {
+			const record = this._record(roomId);
+			if (record.room.continuous === continuous) {
+				return record.room;
+			}
+			return (await this._save({ ...record, room: { ...record.room, continuous } })).room;
+		});
+		this._schedule(roomId);
+		return room;
 	}
 
 	async getMemberModelForChat(session: string, chat: string): Promise<ModelSelection | undefined> {
@@ -321,7 +345,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			}
 			return model;
 		});
-		const repository = await this._storage.resolveRepository(options.repositoryUri, options.baseRevision);
+		const repository = await this._storage.resolveRepository(options.repositoryUri, options.baseRevision, options.initializeRepository === true);
 		for (const model of models) {
 			if (model) {
 				this._runtime.validateModel(model);
@@ -335,12 +359,13 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			return {
 				id: memberId, name: `Copilot-${index + 1}`, sessionUri, chatUri: buildDefaultChatUri(sessionUri),
 				model: models[index]?.id, pendingModel: models[index], state: 'pending', turns: 0, worktreeUri: this._storage.worktreeUri(id, memberId),
-				configuration: { ...defaultAgentHostRoomConfiguration },
+				configuration: { ...newAgentHostRoomConfiguration },
 			};
 		});
 		const room: IAgentHostRoom = {
 			id, title: options.title.trim(), goal: options.goal.trim(), instructions: options.instructions ?? '',
 			...repository, createdAt: now, updatedAt: now, revision: 1, state: 'created',
+			continuous: options.continuous !== false,
 			members, artifacts: [], latestMessageSequence: 0,
 		};
 		const record: IRoomRecord = {
@@ -992,6 +1017,10 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 						return true;
 					}
 					const inbox = current.messages.filter(message => message.deliveries.some(delivery => delivery.memberId === member.id && delivery.turnId === turnId && delivery.state === 'submitted'));
+					// Advisory island model: peer work is surfaced on an interval so a shared
+					// board cannot homogenise every member's approach within a few turns.
+					const reviewPeers = this._member(current, member.id).turns % PEER_REVIEW_INTERVAL === 0;
+					const continuation = !inbox.length && !nextStep;
 					const prompt = [
 						`You are ${member.name}, an equal peer in the shared collaboration room "${current.room.title}". There is no required lead.`,
 						...(inbox.length ? [
@@ -1002,11 +1031,18 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 						`Shared goal (background context): ${current.room.goal}`, `Room instructions: ${current.room.instructions}`,
 						`Your only working tree is ${URI.parse(member.worktreeUri!).fsPath}. The original repository ${URI.parse(current.room.repositoryUri).fsPath} and other peers' worktrees are not shared writable folders. Do not copy or commit your work there.`,
 						'Begin with room_read. It provides your identity, peer work, pending inbox, human guidance, and published artifacts. Empty files in your worktree do NOT mean peers have done nothing.',
-						'Before choosing work, read recent findings and inspect relevant published patches with room_read_artifact. Build on evidence rather than reimplementing completed work. A peer reporting success is a claim to verify, not proof.',
+						...(reviewPeers
+							? ['This is a review turn. Read recent findings and inspect relevant published patches with room_read_artifact. Build on evidence rather than reimplementing completed work. A peer reporting success is a claim to verify, not proof.']
+							: ['This is a solo turn. Pursue YOUR OWN approach rather than adopting a peer\'s, even if theirs looks promising; you will get a review turn shortly. Independent approaches are the reason this room has several members. Still avoid duplicating work a peer has already announced.']),
 						'For a shared patch, inspect it, then use your normal approved shell tools to check and explicitly apply it ONLY inside your own worktree. Never copy files directly out of another peer workspace. Do not apply or merge into the original repository.',
 						'Announce one concrete complementary work item with room_post kind "work" BEFORE edits. Coordinate overlapping work by addressing the existing owner, and reconsider if newer peer work is reported.',
 						'Keep room posts short: intent, changed result, question, or evidence. Publish code with room_share_patch and link the artifact ID in findings, including failed approaches. Never claim a server or test works without verifying it.',
-						'Do not repeat completion/status posts or ask idle peers to confirm a finished task. A finished avenue is a reason to wait, not to loop. Supply nextStep only for a specific unfinished useful action and omit it when done.',
+						...(current.room.continuous
+							? ['The shared goal is open-ended and this room keeps running: there is always a further improvement to attempt. Do not stop because one avenue is finished. Supply nextStep with your intended follow-up, and never post repeated status updates or ask idle peers to confirm finished work.']
+							: ['Do not repeat completion/status posts or ask idle peers to confirm a finished task. A finished avenue is a reason to wait, not to loop. Supply nextStep only for a specific unfinished useful action and omit it when done.']),
+						...(continuation && current.room.continuous ? [
+							'You were woken to continue, not to answer a new request. Review your own most recent result first, then choose ONE concrete improvement on it or a different approach you have not tried. Do not restart the whole task and do not re-announce work you already finished.',
+						] : []),
 						'Human guidance takes precedence over an older plan. On new guidance, acknowledge it, revise your work, and tell affected peers. Do not spawn nested agents, factories, or hidden teams. Preserve normal approvals and content exclusions.',
 						'An earlier turn may have been interrupted. Inspect existing work before retrying any action; never assume an interrupted delivery or external operation completed.',
 						...(nextStep ? [`Previously proposed next step: ${nextStep}`] : []),
@@ -1061,7 +1097,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 						...item, state: event.state === 'idle' && item.work?.blocked ? 'blocked' : event.state, activity: event.activity, error: event.error,
 					} : item),
 				},
-				executions: record.executions.map(item => item.memberId === member.id && finished ? { ...item, turnId: undefined, runId: undefined, needsTurn: event.state === 'idle' && !!member.work?.nextStep && !member.work.blocked } : item),
+				executions: record.executions.map(item => item.memberId === member.id && finished ? { ...item, turnId: undefined, runId: undefined, needsTurn: event.state === 'idle' && !member.work?.blocked && (!!member.work?.nextStep || record.room.continuous === true) } : item),
 				messages: finished ? record.messages.map(message => ({
 					...message, deliveries: message.deliveries.map(delivery => delivery.memberId === member.id && delivery.turnId === execution.turnId && ['submitted', 'delivered'].includes(delivery.state)
 						? { ...delivery, state: event.state === 'idle' ? 'completed' : event.state === 'stopped' ? 'cancelled' : 'failed', error: event.error } : delivery),
