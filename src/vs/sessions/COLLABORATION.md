@@ -17,8 +17,9 @@ The room's home screen asks for a shared goal, a working folder, and one to ten
 peers with a model menu for each. Shared rules, the committed baseline and
 optional run limits are under **Advanced**; the room title is taken from the
 goal. Draft model choices stay with their slots when the peer count changes or
-the view closes. Existing rooms are listed beside the form, so starting another
-room never requires finding a control inside a panel.
+the view closes. Existing rooms are listed in the Sessions sidebar under
+**Agent Collab**, which expands to open one directly; the section header itself
+opens this creation screen.
 
 Peers work in Git worktrees, so a room needs a repository. A plain folder is
 accepted: the room offers to prepare it, showing the exact path, and only then
