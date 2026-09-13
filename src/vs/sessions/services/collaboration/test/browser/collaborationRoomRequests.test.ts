@@ -280,6 +280,18 @@ suite('CollaborationRoomRequests', () => {
 		assert.deepStrictEqual({ reads, sent, content: controller.requests.get()[0].content }, { reads: 1, sent: [], content: 'npm test -- --grep Room' });
 	});
 
+	test('a room that was created and never started has no sessions to observe', () => {
+		const { room, acquisitions, controller } = setup();
+		const before = acquisitions.length;
+		room.set({
+			...room.get()!, state: 'stopped',
+			members: room.get()!.members.map(member => ({ ...member, state: 'stopped' as const, turns: 0 })),
+		}, undefined);
+		assert.deepStrictEqual({
+			subscribed: acquisitions.length - before, requests: controller.requests.get().length, error: controller.error.get(),
+		}, { subscribed: 0, requests: 0, error: undefined });
+	});
+
 	test('old hosts use the main default-chat helper and never subscribe to more than ten peers', () => {
 		const { room, acquisitions } = setup();
 		room.set({

@@ -1193,7 +1193,12 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 	async shutdown(): Promise<void> {
 		await this._ready;
 		this._closed = true;
-		await Promise.all([...this._records.keys()].map(roomId => this.stopRoom(roomId)));
+		// A room that never ran has nothing to cancel; marking it stopped would claim
+		// on the next launch that work had been interrupted.
+		const active = [...this._records.values()].filter(record => record.room.run
+			|| record.executions.some(execution => execution.turnId)
+			|| ['running', 'idle', 'paused', 'stopping'].includes(record.room.state));
+		await Promise.all(active.map(record => this.stopRoom(record.room.id)));
 	}
 
 	override dispose(): void {

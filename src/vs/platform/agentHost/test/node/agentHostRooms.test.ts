@@ -1587,6 +1587,19 @@ suite('AgentHostRooms', () => {
 		assert.deepStrictEqual({ submissions: runtime.submitted.length, state: (await rooms.getRoom(room.id)).state }, { submissions: 1, state: 'stopped' });
 	});
 
+	test('shutting down leaves a room that never ran in its created state', async () => {
+		const storage = new MemoryRoomStorage();
+		const first = setup(2, storage);
+		const room = await first.create();
+		await first.rooms.shutdown();
+		first.rooms.dispose();
+		const restored = setup(2, storage);
+		const reopened = await restored.rooms.getRoom(room.id);
+		assert.deepStrictEqual({
+			state: reopened.state, members: reopened.members.map(member => [member.state, member.turns]),
+		}, { state: 'created', members: [['pending', 0], ['pending', 0]] });
+	});
+
 	test('a continuous room keeps admitting turns for an idle member that proposed no next step', async () => {
 		const { rooms, runtime } = setup(1);
 		const room = await rooms.createRoom({ title: 'Open ended', goal: 'Keep improving the result', repositoryUri: 'file:///repository', workerCount: 1 });
