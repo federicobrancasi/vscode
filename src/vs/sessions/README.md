@@ -17,13 +17,20 @@ Each contract has one authoritative home:
 
 Do not duplicate detailed guidance across these artifacts. Concise routing summaries may restate enough of a rule to identify its owning specification, which remains authoritative.
 
-Only the documents indexed below are subsystem architecture specifications. Other Markdown in this directory has narrower ownership:
+Only the documents in the architecture specifications table below are subsystem architecture specifications. Other Markdown in this directory has narrower ownership:
 
 - `skills/*/SKILL.md` files are executable product workflows;
 - `test/**/*.md` files are test infrastructure and scenario inputs;
 - code-adjacent Markdown may specify a test-backed state machine or a scoped external contract.
 
 Do not turn those files into general Sessions guidance.
+
+## Guides
+
+- [Agent Collab guide and implementation overview](AGENT_COLLAB_GUIDE.md) -
+  setup, everyday use, models, approvals, implementation pointers, validation,
+  and the Gemma Challenge/Hugging Face references. This is a companion guide,
+  not a replacement for the collaboration architecture specification below.
 
 ## Architecture specifications
 
