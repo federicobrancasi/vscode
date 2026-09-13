@@ -31,7 +31,7 @@
 }
 
 .collaboration-room .room-composer,
-.collaboration-room .room-saved-rooms,
+.collaboration-room .room-home-recent,
 .collaboration-room .room-message,
 .collaboration-room .room-notice,
 .collaboration-room .room-history-controls {
@@ -149,28 +149,6 @@
 	font-size: var(--vscode-fontSize-heading3);
 	font-weight: var(--vscode-fontWeight-semiBold);
 	margin: 0 0 var(--vscode-spacing-size80);
-}
-
-.collaboration-room .room-saved-room-list {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-	gap: 12px;
-	list-style: none;
-	padding: 0;
-	margin: 0;
-	max-height: 240px;
-	overflow-y: auto;
-}
-
-.collaboration-room .room-saved-room button {
-	width: 100%;
-	text-align: left;
-	overflow-wrap: anywhere;
-}
-
-.collaboration-room .room-saved-room .room-hint {
-	display: block;
-	margin-top: 4px;
 }
 
 .collaboration-room .room-subtitle,
@@ -310,7 +288,7 @@
 }
 
 .collaboration-room .room-feed,
-.collaboration-room .room-start-container {
+.collaboration-room .room-home {
 	flex: 1;
 	min-height: 0;
 	min-width: 0;
@@ -318,7 +296,7 @@
 	overscroll-behavior: contain;
 }
 
-.collaboration-room .room-start-container {
+.collaboration-room .room-home {
 	padding: var(--vscode-spacing-size320);
 	box-sizing: border-box;
 	overflow-y: auto;
@@ -503,40 +481,118 @@
 	background: var(--vscode-list-activeSelectionBackground);
 }
 
-.collaboration-room .room-start-form {
-	display: flex;
-	flex-direction: column;
-	gap: var(--vscode-spacing-size120);
-}
-
-.collaboration-room .room-start-form label {
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-}
-
-.collaboration-room .room-start-form textarea {
-	min-height: 80px;
-	resize: vertical;
-}
-
-.collaboration-room .room-creation-models {
-	display: flex;
-	flex-direction: column;
-	gap: var(--vscode-spacing-size120);
-}
-
-.collaboration-room .room-initial-peer-name {
-	font-weight: var(--vscode-fontWeight-semiBold);
-}
-
-.collaboration-room .room-start-form fieldset {
-	border: 0;
-	margin: 0;
-	padding: 0;
-}
-
 .collaboration-room .room-notice {
 	border: 1px solid transparent;
 	white-space: pre-wrap;
+}
+
+/* Home: one centred card. The goal leads; everything else is secondary. */
+
+.collaboration-room .room-home-card {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size200);
+	width: 100%;
+	max-width: 560px;
+	margin: 0 auto;
+}
+
+.collaboration-room .room-home-recent {
+	width: 100%;
+	max-width: 560px;
+	margin: var(--vscode-spacing-size320) auto 0;
+}
+
+.collaboration-room .room-home-title {
+	font-size: var(--vscode-fontSize-heading1);
+	font-weight: var(--vscode-fontWeight-semiBold);
+	margin: 0 0 var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-home-field {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size60);
+}
+
+.collaboration-room .room-home-label {
+	font-size: var(--vscode-fontSize-label1);
+	font-weight: var(--vscode-fontWeight-semiBold);
+}
+
+.collaboration-room .room-home-row {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-home-grow {
+	flex: 1;
+	min-width: 0;
+}
+
+.collaboration-room .room-home-count {
+	max-width: 96px;
+}
+
+.collaboration-room .room-home-models {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size80);
+	margin-top: var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-home-model {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--vscode-spacing-size120);
+	min-width: 0;
+}
+
+.collaboration-room .room-home-model-name {
+	color: var(--vscode-descriptionForeground);
+}
+
+.collaboration-room .room-home-advanced > summary {
+	cursor: pointer;
+	color: var(--vscode-descriptionForeground);
+}
+
+.collaboration-room .room-home-advanced[open] {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size120);
+}
+
+.collaboration-room .room-home-error {
+	color: var(--vscode-errorForeground);
+}
+
+.collaboration-room .room-home-actions {
+	display: flex;
+	justify-content: flex-end;
+}
+
+.collaboration-room .room-home-recent ul {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size60);
+	list-style: none;
+	padding: 0;
+	margin: 0;
+}
+
+.collaboration-room .room-home-recent-item {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: var(--vscode-spacing-size120);
+	width: 100%;
+	text-align: left;
+}
+
+.collaboration-room .room-home-recent-detail {
+	color: var(--vscode-descriptionForeground);
+	flex-shrink: 0;
 }

@@ -9,17 +9,18 @@ import { status } from '../../../../base/browser/ui/aria/aria.js';
 import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { CancellationError, isCancellationError } from '../../../../base/common/errors.js';
-import { Disposable, DisposableMap, DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
 import { autorun, observableValue } from '../../../../base/common/observable.js';
 import { equals } from '../../../../base/common/objects.js';
+import { Schemas } from '../../../../base/common/network.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
-import { AgentHostRoomMessageMode, IAgentHostRoom, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage } from '../../../../platform/agentHost/common/agentHostRooms.js';
-import { ModelSelection, SessionModelInfo } from '../../../../platform/agentHost/common/state/sessionState.js';
+import { AgentHostRoomMessageMode, IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, MAX_ROOM_WORKERS } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { SessionModelInfo } from '../../../../platform/agentHost/common/state/sessionState.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
-import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
@@ -38,6 +39,7 @@ import { CollaborationArtifactProvider } from './collaborationArtifactProvider.j
 import { CollaborationRequestWidget } from './collaborationRequestWidget.js';
 import { CollaborationConfigurationPicker } from './collaborationConfigurationPicker.js';
 import { CollaborationConversation } from './collaborationConversation.js';
+import { CollaborationHome } from './collaborationHome.js';
 import { CollaborationRoomLayout } from './collaborationRoomLayout.js';
 import { CollaborationModelCatalog, CollaborationModelPicker, getCollaborationMemberModelState } from './collaborationModelPicker.js';
 import { collaborationAuthorAccent } from './collaborationColors.js';
@@ -53,13 +55,6 @@ interface IMemberElements {
 	readonly error: HTMLElement;
 	readonly stop: HTMLButtonElement;
 	readonly retry: HTMLButtonElement;
-}
-
-interface ISavedRoomElements {
-	readonly element: HTMLElement;
-	readonly open: HTMLButtonElement;
-	readonly state: HTMLElement;
-	readonly disposables: DisposableStore;
 }
 
 export class CollaborationRoomWidget extends Disposable implements ICollaborationRoomView {
@@ -96,20 +91,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private readonly replyLabel: HTMLElement;
 	private readonly cancelReply: HTMLButtonElement;
 	private readonly suggestions: HTMLElement;
-	private readonly startContainer: HTMLElement;
-	private readonly savedRoomsSection: HTMLElement;
-	private readonly savedRoomsList: HTMLElement;
-	private readonly startForm: HTMLFormElement;
-	private readonly titleInput: HTMLInputElement;
-	private readonly goalInput: HTMLTextAreaElement;
-	private readonly instructionsInput: HTMLTextAreaElement;
-	private readonly repositoryInput: HTMLInputElement;
-	private readonly baseInput: HTMLInputElement;
-	private readonly countInput: HTMLInputElement;
-	private readonly creationModelsContainer: HTMLElement;
-	private readonly creationPickers = this._register(new DisposableMap<number, CollaborationModelPicker>());
-	private creationModels: readonly (ModelSelection | undefined)[] = [];
-	private readonly createButton: HTMLButtonElement;
+	private readonly home: CollaborationHome;
 	private readonly runForm: HTMLFormElement;
 	private readonly turnsInput: HTMLInputElement;
 	private readonly deadlineInput: HTMLInputElement;
@@ -122,14 +104,11 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private readonly memberDisposables = this._register(new DisposableStore());
 	private readonly requestElements = new Map<string, CollaborationRequestWidget>();
 	private readonly requestDisposables = this._register(new DisposableStore());
-	private readonly savedRoomElements = new Map<string, ISavedRoomElements>();
-	private readonly savedRoomDisposables = this._register(new DisposableStore());
 	private readonly suggestionDisposables = this._register(new DisposableStore());
 	private readonly suggestionId = `collaboration-mentions-${generateUuid()}`;
 	private suggestionMembers: readonly IAgentHostRoomMember[] = [];
 	private suggestionIndex = 0;
 	private mentionQuery: ICollaborationMentionQuery | undefined;
-	private repository: URI | undefined;
 	private followingLatest = true;
 	private pendingScroll: ICollaborationRoomScrollState | undefined;
 	private initialSelection = true;
@@ -146,6 +125,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IKeybindingService private readonly keybindingService: IKeybindingService,
 		@IMarkdownRendererService private readonly markdownRenderer: IMarkdownRendererService,
+		@IDialogService private readonly dialogService: IDialogService,
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
 		@ISessionsProvidersService private readonly sessionsProvidersService: ISessionsProvidersService,
 		@ISessionsService private readonly sessionsService: ISessionsService,
@@ -188,12 +168,11 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		}));
 		this.button(navigation, localize('room.new', "New Room"), async () => {
 			await this.collaborationService.selectRoom(undefined);
-			this.layoutWidget.setPanelVisible(true);
-			this.titleInput.focus();
+			this.layoutWidget.setPanelVisible(false);
+			this.home.focus();
 		});
 		this.button(navigation, localize('room.back', "Back to Sessions"), () => {
 			this.roomViewService.close();
-			this.sessionsPartService.focusSession(this.sessionsService.activeSession.get());
 		}, this._store, false);
 		this.pauseButton = this.button(this.header, localize('room.pause', "Pause"), () => this.collaborationService.pauseRoom());
 		this.stopButton = this.button(this.header, localize('room.stop', "Stop All"), () => this.collaborationService.stopRoom());
@@ -278,46 +257,25 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.requestsSection.appendChild($('h3')).textContent = localize('room.requestsHeading', "Approvals and questions");
 		this.requestsList = this.requestsSection.appendChild($('.room-request-list'));
 
-		this.startContainer = this.layoutWidget.main.appendChild($('.room-start-container'));
-		this.startContainer.appendChild($('h2')).textContent = localize('room.welcome', "Bring Your Copilots Together");
-		this.startContainer.appendChild($('p.room-hint')).textContent = localize('room.welcomeDescription', "A shared conversation for you and up to ten equal Copilot peers. Choose a model for each peer in Room Settings, then create the room. Nothing runs until you ask.");
-		this.button(this.startContainer, localize('room.setup', "Set Up a Room"), () => {
-			this.layoutWidget.focusPanel();
-			this.titleInput.focus();
-		}, this._store, false);
-		this.savedRoomsSection = this.startContainer.appendChild($('section.room-saved-rooms'));
-		this.savedRoomsSection.appendChild($('h3')).textContent = localize('room.savedRooms', "Saved rooms");
-		this.savedRoomsList = this.savedRoomsSection.appendChild($('ul.room-saved-room-list'));
-		this.savedRoomsList.setAttribute('aria-label', localize('room.savedRoomsLabel', "Saved collaboration rooms"));
-		this.startForm = this.layoutWidget.panelContent.appendChild($('form.room-start-form')) as HTMLFormElement;
-		this.startForm.appendChild($('h3')).textContent = localize('room.createHeading', "Create a room");
-		const introduction = this.startForm.appendChild($('p'));
-		introduction.textContent = localize('room.introduction', "One shared conversation, equal Copilot peers, and a separate Git worktree for each peer. Creating a room does not start a paid run. Start the team in Autopilot when ready, or send a message to request a response. A message without @mentions reaches every peer, including peers that have finished. Peers keep their normal and managed approvals, which you can answer here. Run limits are optional.");
-		this.titleInput = this.textField(this.startForm, localize('room.title', "Room title"));
-		this.titleInput.required = true;
-		this.goalInput = this.textArea(this.startForm, localize('room.goal', "Shared goal"));
-		this.goalInput.required = true;
-		this.instructionsInput = this.textArea(this.startForm, localize('room.rules', "Shared rules (optional)"));
-		this.repositoryInput = this.textField(this.startForm, localize('room.repository', "Local Git repository"));
-		this.repositoryInput.readOnly = true;
-		this.repositoryInput.required = true;
-		this.button(this.startForm, localize('room.browse', "Choose Repository"), () => this.chooseRepository());
-		this.baseInput = this.textField(this.startForm, localize('room.base', "Base branch, tag, or commit"));
-		this.baseInput.value = 'HEAD';
-		this.baseInput.required = true;
-		const baselineHint = this.startForm.appendChild($('p.room-hint'));
-		baselineHint.textContent = localize('room.baselineHint', "The selected committed revision is pinned before creation. Uncommitted workspace changes are not included, committed, or discarded. Published patches are never applied automatically.");
-		this.countInput = this.numberField(this.startForm, localize('room.count', "Number of Copilot peers (1-10)"), 10);
-		this.countInput.value = '3';
-		this.creationModelsContainer = this.startForm.appendChild($('.room-creation-models'));
-		this.creationModelsContainer.setAttribute('aria-label', localize('room.initialModels', "Choose a model for each Copilot before starting"));
-		this.createButton = this.button(this.startForm, localize('room.create', "Create Room"), () => this.createRoom());
-		this.createButton.classList.add('primary');
-		this._register(addDisposableListener(this.startForm, EventType.INPUT, () => this.saveCreationDraft()));
-		this._register(addDisposableListener(this.startForm, EventType.CHANGE, () => this.saveCreationDraft()));
-		this._register(addDisposableListener(this.startForm, EventType.SUBMIT, event => {
-			event.preventDefault();
-			void this.perform(() => this.createRoom());
+		this.home = this._register(instantiationService.createInstance(CollaborationHome, this.layoutWidget.main, this.modelCatalog, {
+			isRepository: folderUri => this.collaborationService.isRepository(folderUri),
+			confirmInitialize: path => this.confirmInitializeFolder(path),
+			browseForFolder: current => this.browseForFolder(current),
+			create: options => this.createRoom(options),
+			open: roomId => this.perform(() => this.collaborationService.selectRoom(roomId)),
+			readDraft: () => {
+				const draft = this.roomViewService.creationDraft.get();
+				return {
+					goal: draft?.goal ?? '', folder: draft?.repositoryUri ? URI.parse(draft.repositoryUri).fsPath : '',
+					count: draft?.workerCount ?? '3', instructions: draft?.instructions ?? '', baseRevision: draft?.baseRevision ?? '',
+					memberModels: draft?.memberModels ?? (draft?.model ? Array.from({ length: MAX_ROOM_WORKERS }, () => ({ id: draft.model })) : []),
+				};
+			},
+			saveDraft: draft => this.roomViewService.saveCreationDraft(draft && {
+				title: '', goal: draft.goal, instructions: draft.instructions,
+				repositoryUri: draft.folder ? URI.file(draft.folder).toString() : undefined,
+				baseRevision: draft.baseRevision, workerCount: draft.count, model: '', memberModels: draft.memberModels,
+			}),
 		}));
 
 		this.runForm = this.layoutWidget.panelContent.appendChild($('form.room-run-controls')) as HTMLFormElement;
@@ -418,7 +376,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			const hint = this.configurationService.getValue<boolean>(AccessibilityVerbositySettingId.CollaborationRoom) && keybinding
 				? localize('room.accessibilityHint', " Press {0} for collaboration accessibility help.", keybinding) : '';
 			this.input.setAttribute('aria-label', localize('room.inputLabel', "Message the collaboration room.{0}", hint));
-			for (const element of [this.element, this.titleInput]) {
+			for (const element of [this.element]) {
 				if (hint) {
 					element.setAttribute('aria-description', hint.trim());
 				} else {
@@ -442,24 +400,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 
 	private observeState(): void {
 		this._register(autorun(reader => {
-			const draft = this.roomViewService.creationDraft.read(reader);
-			for (const [field, value] of [
-				[this.titleInput, draft?.title ?? ''],
-				[this.goalInput, draft?.goal ?? ''],
-				[this.instructionsInput, draft?.instructions ?? ''],
-				[this.baseInput, draft?.baseRevision ?? 'HEAD'],
-				[this.countInput, draft?.workerCount ?? '3'],
-			] as const) {
-				if (field.value !== value) {
-					field.value = value;
-				}
-			}
-			this.repository = draft?.repositoryUri ? URI.parse(draft.repositoryUri) : undefined;
-			this.repositoryInput.value = this.repository?.fsPath ?? '';
-			this.creationModels = draft?.memberModels ?? (draft?.model ? Array.from({ length: 10 }, () => ({ id: draft.model })) : []);
-			this.renderCreationModels();
-		}));
-		this._register(autorun(reader => {
 			const rooms = this.collaborationService.rooms.read(reader);
 			const selected = this.collaborationService.activeRoomId.read(reader);
 			const catalog = JSON.stringify(rooms.map(room => [room.id, room.title]));
@@ -472,7 +412,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				}
 			}
 			this.roomPicker.value = selected ?? '';
-			this.renderSavedRooms(rooms, this.busy.read(reader) || this.collaborationService.availability.read(reader) !== 'available');
+			this.home.setRooms(rooms);
 		}));
 		this._register(autorun(reader => {
 			const id = this.collaborationService.activeRoomId.read(reader);
@@ -542,19 +482,12 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.subtitle.title = room ? localize('room.repositorySummary', "{0}\nGoal: {1}", room.repositoryUri, room.goal) : '';
 			this.goalDetails.hidden = !room;
 			this.goalContent.textContent = room ? localize('room.goalDetails', "Goal: {0}\nRules: {1}\nRepository: {2}\nPinned base: {3}", room.goal, room.instructions, room.repositoryUri, room.baseRevision) : '';
-			this.startContainer.hidden = !!roomId;
-			this.startForm.hidden = !!roomId;
+			this.home.element.hidden = !!roomId;
 			this.runForm.hidden = !room || room.state === 'running' || room.state === 'stopping';
 			this.roster.hidden = !room;
 			this.historyControls.hidden = !room;
 			this.feed.hidden = !roomId;
 			this.composer.hidden = !room;
-			this.createButton.disabled = creationBusy || !available;
-			for (const field of this.startForm.elements) {
-				if (isHTMLElement(field) && ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(field.tagName)) {
-					field.toggleAttribute('disabled', creationBusy || !available);
-				}
-			}
 			this.roomPicker.disabled = busy;
 			this.startButton.textContent = room?.state === 'created' ? localize('room.start', "Start") : localize('room.resume', "Resume");
 			this.startButton.hidden = !room || room.state === 'running' || room.state === 'stopping';
@@ -573,13 +506,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.send.textContent = this.collaborationService.sending.read(reader) ? localize('room.sending', "Sending...") : localize('room.send', "Send");
 			const supportsModels = this.collaborationService.canSetMemberModel.read(reader);
 			const models = this.collaborationService.models.read(reader);
-			for (const picker of this.creationPickers.values()) {
-				picker.state.set({
-					...picker.state.read(undefined),
-					enabled: !creationBusy && available && supportsModels,
-					detail: supportsModels ? undefined : unsupportedMemberModelsMessage,
-				}, undefined);
-			}
+			this.home.setDisabled(creationBusy || !available, supportsModels ? undefined : unsupportedMemberModelsMessage);
 			if (room) {
 				this.renderRoster(room, busy || !available, models);
 			}
@@ -619,80 +546,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		}));
 	}
 
-	private renderCreationModels(): void {
-		const count = this.countInput.valueAsNumber;
-		for (let index = 0; index < 10; index++) {
-			if (index < count && !this.creationPickers.has(index)) {
-				const name = localize('room.initialPeer', "Copilot {0}", index + 1);
-				const row = this.creationModelsContainer.appendChild($('.room-initial-peer'));
-				row.appendChild($('span.room-initial-peer-name')).textContent = name;
-				this.creationPickers.set(index, this.instantiationService.createInstance(CollaborationModelPicker, row, name, this.modelCatalog, model => {
-					if (this.collaborationService.activeRoomId.get() || this._store.isDisposed) {
-						return;
-					}
-					const choices = [...this.creationModels];
-					choices[index] = model;
-					this.creationModels = choices;
-					this.saveCreationDraft();
-				}));
-			}
-			const picker = this.creationPickers.get(index);
-			if (picker) {
-				picker.element.parentElement!.hidden = index >= count;
-				picker.state.set({
-					selection: this.creationModels[index],
-					enabled: !this.collaborationService.creating.get() && this.collaborationService.availability.get() === 'available' && this.collaborationService.canSetMemberModel.get(),
-					detail: this.collaborationService.canSetMemberModel.get() ? undefined : unsupportedMemberModelsMessage,
-				}, undefined);
-			}
-		}
-	}
-
 	private get currentDraft() {
 		const id = this.collaborationService.activeRoomId.get();
 		return id ? this.collaborationService.getDraft(id) : undefined;
-	}
-
-	private renderSavedRooms(rooms: readonly IAgentHostRoom[], disabled: boolean): void {
-		this.savedRoomsSection.hidden = rooms.length === 0;
-		const ids = new Set(rooms.map(room => room.id));
-		for (const [id, entry] of this.savedRoomElements) {
-			if (!ids.has(id)) {
-				this.savedRoomDisposables.delete(entry.disposables);
-				entry.element.remove();
-				this.savedRoomElements.delete(id);
-			}
-		}
-		let previous: HTMLElement | undefined;
-		for (const room of rooms) {
-			let entry = this.savedRoomElements.get(room.id);
-			if (!entry) {
-				const disposables = this.savedRoomDisposables.add(new DisposableStore());
-				const element = $('li.room-saved-room');
-				const open = this.button(element, room.title, async () => {
-					try {
-						await this.collaborationService.selectRoom(room.id);
-					} finally {
-						if (!this._store.isDisposed && this.roomViewService.visible.get() && this.collaborationService.activeRoomId.get() === room.id) {
-							this.focus();
-						}
-					}
-				}, disposables);
-				const state = element.appendChild($('span.room-hint'));
-				state.setAttribute('aria-hidden', 'true');
-				entry = { element, open, state, disposables };
-				this.savedRoomElements.set(room.id, entry);
-			}
-			entry.open.textContent = room.title;
-			entry.open.disabled = disabled;
-			entry.open.setAttribute('aria-label', localize('room.openSaved', "Open {0}, {1}", room.title, roomStateLabel(room.state)));
-			entry.state.textContent = roomStateLabel(room.state);
-			const expected = previous ? previous.nextElementSibling : this.savedRoomsList.firstElementChild;
-			if (expected !== entry.element) {
-				this.savedRoomsList.insertBefore(entry.element, expected);
-			}
-			previous = entry.element;
-		}
 	}
 
 	private updateDraft(replyTo: string | undefined): void {
@@ -707,64 +563,41 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.replyLabel.textContent = replyId ? localize('room.replying', "Replying to {0}", target?.authorName ?? replyId) : '';
 	}
 
-	private async chooseRepository(): Promise<void> {
+	private async browseForFolder(current: URI | undefined): Promise<URI | undefined> {
 		const selected = await this.fileDialogService.showOpenDialog({
-			title: localize('room.selectRepository', "Choose a Local Git Repository"),
+			title: localize('room.selectFolder', "Choose a Folder"),
 			canSelectFiles: false, canSelectFolders: true, canSelectMany: false, availableFileSystems: ['file'],
-			defaultUri: this.repository,
+			defaultUri: current,
 		});
-		if (selected?.[0] && !this._store.isDisposed && !this.collaborationService.activeRoomId.get()) {
-			if (selected[0].scheme !== 'file') {
-				throw new Error(localize('room.localOnly', "Choose a local Git repository."));
-			}
-			this.repository = selected[0];
-			this.repositoryInput.value = selected[0].fsPath;
-			this.saveCreationDraft();
+		if (!selected?.[0] || this._store.isDisposed || this.collaborationService.activeRoomId.get()) {
+			return undefined;
 		}
+		if (selected[0].scheme !== Schemas.file) {
+			throw new Error(localize('room.localOnly', "Choose a local folder."));
+		}
+		return selected[0];
 	}
 
-	private saveCreationDraft(): void {
-		this.roomViewService.saveCreationDraft({
-			title: this.titleInput.value,
-			goal: this.goalInput.value,
-			instructions: this.instructionsInput.value,
-			repositoryUri: this.repository?.toString(),
-			baseRevision: this.baseInput.value,
-			workerCount: this.countInput.value,
-			model: '',
-			memberModels: this.creationModels,
+	/** Preparing a plain folder writes to it, so the exact path is always confirmed first. */
+	private async confirmInitializeFolder(path: string): Promise<boolean> {
+		const { confirmed } = await this.dialogService.confirm({
+			type: 'question',
+			message: localize('room.initializeFolder', "Set up this folder for collaboration?"),
+			detail: localize('room.initializeFolderDetail', "{0}\n\nAgents each work in their own Git worktree, so this folder needs to be a Git repository. It will be initialized and its current contents committed as the starting point.", path),
+			primaryButton: localize('room.initializeFolderConfirm', "Set Up Folder"),
 		});
+		return confirmed;
 	}
 
-	private async createRoom(): Promise<void> {
-		if (!this.startForm.reportValidity()) {
-			return;
-		}
-		if (!this.repository) {
-			throw new Error(localize('room.repositoryRequired', "Choose a local Git repository before creating a room."));
-		}
-		if (!this.titleInput.value.trim() || !this.goalInput.value.trim()) {
-			throw new Error(localize('room.goalRequired', "Enter a room title and a shared goal."));
-		}
-		const base = this.baseInput.value.trim();
-		if (!base || base.startsWith('-') || /[\r\n]/.test(base)) {
-			throw new Error(localize('room.invalidBase', "Enter a valid Git branch, tag, or commit."));
-		}
-		const memberModels = Array.from({ length: this.countInput.valueAsNumber }, (_, index) => this.creationModels[index]);
-		if (memberModels.some(model => model && !this.collaborationService.models.get().some(candidate => candidate.id === model.id))) {
+	private async createRoom(options: IAgentHostRoomCreateOptions): Promise<void> {
+		if (options.memberModels?.some(model => model && !this.collaborationService.models.get().some(candidate => candidate.id === model.id))) {
 			throw new Error(localize('room.modelUnavailable', "The selected model is no longer available. Choose a model from the current host catalog."));
 		}
-		const repository = this.repository;
-		const options = {
-			title: this.titleInput.value.trim(), goal: this.goalInput.value.trim(), instructions: this.instructionsInput.value.trim(),
-			workerCount: this.countInput.valueAsNumber, memberModels,
-		};
 		if (this._store.isDisposed || this.collaborationService.activeRoomId.get() || !this.roomViewService.visible.get()) {
 			return;
 		}
-		this.saveCreationDraft();
 		const draft = this.roomViewService.creationDraft.get();
-		const room = await this.collaborationService.createRoom({ ...options, repositoryUri: repository.toString(), baseRevision: base });
+		const room = await this.collaborationService.createRoom(options);
 		if (equals(this.roomViewService.creationDraft.get(), draft)) {
 			this.roomViewService.saveCreationDraft(undefined);
 		}
@@ -1042,12 +875,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		return container.appendChild($('input')) as HTMLInputElement;
 	}
 
-	private textArea(parent: HTMLElement, label: string): HTMLTextAreaElement {
-		const container = parent.appendChild($('label'));
-		container.append(label);
-		return container.appendChild($('textarea')) as HTMLTextAreaElement;
-	}
-
 	private numberField(parent: HTMLElement, label: string, maximum?: number): HTMLInputElement {
 		const field = this.textField(parent, label);
 		field.type = 'number';
@@ -1097,9 +924,8 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	focus(): void {
 		if (this.collaborationService.activeRoomId.get() && !this.input.disabled) {
 			this.input.focus();
-		} else if (!this.collaborationService.activeRoomId.get() && !this.titleInput.disabled) {
-			this.layoutWidget.setPanelVisible(true);
-			this.titleInput.focus();
+		} else if (!this.collaborationService.activeRoomId.get()) {
+			this.home.focus();
 		} else if (!this.retryLoad.hidden) {
 			this.retryLoad.focus();
 		} else {
@@ -1154,7 +980,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		const room = this.collaborationService.activeRoom.get();
 		if (!room) {
 			return [
-				localize('room.accessibleNew', "Agent Collab. Open Room Settings to create a room, choose a local Git repository, committed base, goal, and one to ten equal Copilot peers. Each numbered peer has its own model menu before creation. Create the room, then start the team or send a message. Messages notify mentioned peers, or everyone without mentions, even after they have finished. Turn and deadline limits are optional and unset by default."),
+				localize('room.accessibleNew', "Agent Collab. Describe the goal, choose a folder, and pick how many Copilot agents to use and a model for each. Advanced holds shared rules, the Git branch, and optional run limits. Creating a room does not start paid work until you start it or send a message."),
 				...this.collaborationService.rooms.get().map(saved => localize('room.accessibleSavedRoom', "Saved room: {0}. {1}.", saved.title, roomStateLabel(saved.state))),
 				this.notice.textContent ?? '',
 			].join('\n\n');
@@ -1185,9 +1011,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	override dispose(): void {
 		if (this._store.isDisposed) {
 			return;
-		}
-		if (!this.collaborationService.activeRoomId.get()) {
-			this.saveCreationDraft();
 		}
 		this.saveScrollPosition();
 		this.clearMessages();

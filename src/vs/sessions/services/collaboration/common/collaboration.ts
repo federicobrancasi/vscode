@@ -92,6 +92,8 @@ export interface ICollaborationService {
 	setConfiguration(configuration: Partial<IAgentHostRoomConfiguration>): Promise<void>;
 	setMemberModel(memberId: string, model: ModelSelection | undefined): Promise<void>;
 	refresh(): Promise<void>;
+	/** Whether a folder can already back a room, so the UI can offer to prepare it. */
+	isRepository(folderUri: string): Promise<boolean>;
 	selectRoom(roomId: string | undefined): Promise<void>;
 	createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom>;
 	loadMessages(): Promise<void>;

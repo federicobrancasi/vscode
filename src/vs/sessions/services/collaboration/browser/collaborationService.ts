@@ -172,6 +172,10 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		});
 	}
 
+	isRepository(folderUri: string): Promise<boolean> {
+		return this.api.isRepository(folderUri);
+	}
+
 	async refresh(): Promise<void> {
 		if (!this.enabled || !this.host.rooms) {
 			return;

@@ -1,0 +1,285 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import { $ } from '../../../../base/browser/dom.js';
+import { Button } from '../../../../base/browser/ui/button/button.js';
+import { InputBox } from '../../../../base/browser/ui/inputbox/inputBox.js';
+import { SelectBox } from '../../../../base/browser/ui/selectBox/selectBox.js';
+import { Disposable, DisposableMap, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { autorun, observableValue } from '../../../../base/common/observable.js';
+import { URI } from '../../../../base/common/uri.js';
+import { localize } from '../../../../nls.js';
+import { IAgentHostRoom, IAgentHostRoomCreateOptions, MAX_ROOM_WORKERS } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { ModelSelection } from '../../../../platform/agentHost/common/state/sessionState.js';
+import { IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { defaultButtonStyles, defaultInputBoxStyles, defaultSelectBoxStyles } from '../../../../platform/theme/browser/defaultStyles.js';
+import { CollaborationModelCatalog, CollaborationModelPicker } from './collaborationModelPicker.js';
+
+export interface ICollaborationHomeDraft {
+	readonly goal: string;
+	readonly folder: string;
+	readonly count: string;
+	readonly instructions: string;
+	readonly baseRevision: string;
+	readonly memberModels: readonly (ModelSelection | undefined)[];
+}
+
+export interface ICollaborationHomeDelegate {
+	/** Ask the host whether the folder can already back a room. */
+	isRepository(folderUri: string): Promise<boolean>;
+	/** Confirm preparing a plain folder. The exact path is always shown. */
+	confirmInitialize(path: string): Promise<boolean>;
+	browseForFolder(current: URI | undefined): Promise<URI | undefined>;
+	create(options: IAgentHostRoomCreateOptions): Promise<void>;
+	open(roomId: string): Promise<void>;
+	readDraft(): ICollaborationHomeDraft | undefined;
+	saveDraft(draft: ICollaborationHomeDraft | undefined): void;
+}
+
+const EMPTY_DRAFT: ICollaborationHomeDraft = { goal: '', folder: '', count: '3', instructions: '', baseRevision: '', memberModels: [] };
+
+/**
+ * The room's landing surface: one card that asks only for a goal, a folder and
+ * the peers, plus the rooms that already exist. Everything else is advanced.
+ */
+export class CollaborationHome extends Disposable {
+	readonly element: HTMLElement;
+	readonly busy = observableValue(this, false);
+	private readonly goalInput: InputBox;
+	private readonly folderInput: InputBox;
+	private readonly instructionsInput: InputBox;
+	private readonly baseInput: InputBox;
+	private readonly countSelect: SelectBox;
+	private readonly createButton: Button;
+	private readonly modelsContainer: HTMLElement;
+	private readonly recentSection: HTMLElement;
+	private readonly recentList: HTMLElement;
+	private readonly errorElement: HTMLElement;
+	private readonly pickers = this._register(new DisposableMap<number, CollaborationModelPicker>());
+	private readonly recentStore = this._register(new DisposableStore());
+	private folder: URI | undefined;
+	private memberModels: (ModelSelection | undefined)[] = [];
+
+	constructor(
+		parent: HTMLElement,
+		private readonly catalog: CollaborationModelCatalog,
+		private readonly delegate: ICollaborationHomeDelegate,
+		@IContextViewService contextViewService: IContextViewService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
+	) {
+		super();
+		this.element = parent.appendChild($('.room-home'));
+		const card = this.element.appendChild($('.room-home-card'));
+		card.appendChild($('h1.room-home-title')).textContent = localize('room.homeTitle', "Agent Collab");
+
+		this.goalInput = this._register(new InputBox(this.field(card, localize('room.homeGoal', "Goal")), contextViewService, {
+			inputBoxStyles: defaultInputBoxStyles, flexibleHeight: true, flexibleMaxHeight: 140,
+			placeholder: localize('room.homeGoalPlaceholder', "What should the agents work on?"),
+			ariaLabel: localize('room.homeGoal', "Goal"),
+		}));
+
+		const folderField = this.field(card, localize('room.homeFolder', "Folder"));
+		const folderRow = folderField.appendChild($('.room-home-row'));
+		this.folderInput = this._register(new InputBox(folderRow.appendChild($('.room-home-grow')), contextViewService, {
+			inputBoxStyles: defaultInputBoxStyles,
+			placeholder: localize('room.homeFolderPlaceholder', "Choose a folder"),
+			ariaLabel: localize('room.homeFolder', "Folder"),
+		}));
+		this.folderInput.inputElement.readOnly = true;
+		const browse = this._register(new Button(folderRow, { ...defaultButtonStyles, secondary: true, title: localize('room.homeBrowse', "Browse") }));
+		browse.label = localize('room.homeBrowse', "Browse");
+		this._register(browse.onDidClick(() => void this.browse()));
+
+		const agentsField = this.field(card, localize('room.homeAgents', "Agents"));
+		this.countSelect = this._register(new SelectBox(
+			Array.from({ length: MAX_ROOM_WORKERS }, (_, index) => ({ text: String(index + 1) })), 2,
+			contextViewService, defaultSelectBoxStyles, { ariaLabel: localize('room.homeAgents', "Agents") }));
+		this.countSelect.render(agentsField.appendChild($('.room-home-count')));
+		this._register(this.countSelect.onDidSelect(event => {
+			this.selectedCount = event.index + 1;
+			this.renderModelPickers();
+			this.save();
+		}));
+		this.modelsContainer = agentsField.appendChild($('.room-home-models'));
+
+		const advanced = card.appendChild($('details.room-home-advanced')) as HTMLDetailsElement;
+		advanced.appendChild($('summary')).textContent = localize('room.homeAdvanced', "Advanced");
+		this.instructionsInput = this._register(new InputBox(this.field(advanced, localize('room.homeRules', "Rules")), contextViewService, {
+			inputBoxStyles: defaultInputBoxStyles, flexibleHeight: true, flexibleMaxHeight: 120,
+			placeholder: localize('room.homeRulesPlaceholder', "How should the agents work together?"),
+			ariaLabel: localize('room.homeRules', "Rules"),
+		}));
+		this.baseInput = this._register(new InputBox(this.field(advanced, localize('room.homeBase', "Branch, tag, or commit")), contextViewService, {
+			inputBoxStyles: defaultInputBoxStyles, placeholder: 'HEAD', ariaLabel: localize('room.homeBase', "Branch, tag, or commit"),
+		}));
+
+		this.errorElement = card.appendChild($('.room-home-error'));
+		this.errorElement.setAttribute('role', 'alert');
+		this.errorElement.hidden = true;
+
+		this.createButton = this._register(new Button(card.appendChild($('.room-home-actions')), { ...defaultButtonStyles, title: localize('room.homeCreate', "Create and Start") }));
+		this.createButton.label = localize('room.homeCreate', "Create and Start");
+		this._register(this.createButton.onDidClick(() => void this.create()));
+
+		this.recentSection = this.element.appendChild($('section.room-home-recent'));
+		this.recentSection.appendChild($('h2')).textContent = localize('room.homeRecent', "Recent");
+		this.recentList = this.recentSection.appendChild($('ul'));
+		this.recentList.setAttribute('aria-label', localize('room.homeRecentLabel', "Recent collaboration rooms"));
+
+		for (const input of [this.goalInput, this.instructionsInput, this.baseInput]) {
+			this._register(input.onDidChange(() => this.save()));
+		}
+		this._register(autorun(reader => this.createButton.enabled = !this.busy.read(reader)));
+		this.restore();
+	}
+
+	private field(parent: HTMLElement, label: string): HTMLElement {
+		const field = parent.appendChild($('.room-home-field'));
+		field.appendChild($('label.room-home-label')).textContent = label;
+		return field;
+	}
+
+	private selectedCount = 3;
+
+	private get count(): number {
+		return this.selectedCount;
+	}
+
+	private restore(): void {
+		const draft = this.delegate.readDraft() ?? EMPTY_DRAFT;
+		this.goalInput.value = draft.goal;
+		this.instructionsInput.value = draft.instructions;
+		this.baseInput.value = draft.baseRevision;
+		this.folderInput.value = draft.folder;
+		this.folder = draft.folder ? URI.file(draft.folder) : undefined;
+		this.memberModels = [...draft.memberModels];
+		const count = Number(draft.count);
+		this.selectedCount = Number.isInteger(count) && count >= 1 && count <= MAX_ROOM_WORKERS ? count : 3;
+		this.countSelect.select(this.selectedCount - 1);
+		this.renderModelPickers();
+	}
+
+	private save(): void {
+		this.delegate.saveDraft({
+			goal: this.goalInput.value, folder: this.folder?.fsPath ?? '', count: String(this.count),
+			instructions: this.instructionsInput.value, baseRevision: this.baseInput.value,
+			memberModels: this.memberModels.slice(0, this.count),
+		});
+	}
+
+	/** Draft model choices stay with their slot when the agent count changes. */
+	private renderModelPickers(): void {
+		const count = this.count;
+		for (const [index] of [...this.pickers.keys()].map(index => [index] as const)) {
+			if (index >= count) {
+				this.pickers.deleteAndDispose(index);
+			}
+		}
+		this.modelsContainer.textContent = '';
+		for (let index = 0; index < count; index++) {
+			const row = this.modelsContainer.appendChild($('.room-home-model'));
+			row.appendChild($('span.room-home-model-name')).textContent = localize('room.homeAgentName', "Copilot-{0}", index + 1);
+			const picker = this.instantiationService.createInstance(CollaborationModelPicker, row,
+				localize('room.homeAgentName', "Copilot-{0}", index + 1), this.catalog, model => {
+					this.memberModels[index] = model;
+					this.save();
+				});
+			picker.state.set({ selection: this.memberModels[index], enabled: true }, undefined);
+			this.pickers.set(index, picker);
+		}
+	}
+
+	setRooms(rooms: readonly IAgentHostRoom[]): void {
+		this.recentStore.clear();
+		this.recentList.textContent = '';
+		this.recentSection.hidden = !rooms.length;
+		for (const room of rooms.slice(0, 8)) {
+			const item = this.recentList.appendChild($('li'));
+			const open = this.recentStore.add(new Button(item, { ...defaultButtonStyles, secondary: true, title: room.title }));
+			open.element.classList.add('room-home-recent-item');
+			open.element.textContent = '';
+			open.element.appendChild($('span.room-home-recent-title')).textContent = room.title;
+			open.element.appendChild($('span.room-home-recent-detail')).textContent = localize(
+				'room.homeRecentDetail', "{0} agents", room.members.length);
+			this.recentStore.add(open.onDidClick(() => void this.delegate.open(room.id)));
+		}
+	}
+
+	setError(error: string | undefined): void {
+		this.errorElement.textContent = error ?? '';
+		this.errorElement.hidden = !error;
+	}
+
+	/** Reflects host availability and whether per-peer model choice is supported. */
+	setDisabled(disabled: boolean, modelDetail?: string): void {
+		this.createButton.enabled = !disabled && !this.busy.get();
+		for (const picker of this.pickers.values()) {
+			picker.state.set({ ...picker.state.get(), enabled: !disabled && !modelDetail, detail: modelDetail }, undefined);
+		}
+	}
+
+	focus(): void {
+		this.goalInput.focus();
+	}
+
+	private async browse(): Promise<void> {
+		const selected = await this.delegate.browseForFolder(this.folder);
+		if (selected && !this._store.isDisposed) {
+			this.folder = selected;
+			this.folderInput.value = selected.fsPath;
+			this.setError(undefined);
+			this.save();
+		}
+	}
+
+	private async create(): Promise<void> {
+		if (this.busy.get()) {
+			return;
+		}
+		const goal = this.goalInput.value.trim();
+		if (!goal) {
+			this.setError(localize('room.homeGoalRequired', "Describe what the agents should work on."));
+			this.goalInput.focus();
+			return;
+		}
+		if (!this.folder) {
+			this.setError(localize('room.homeFolderRequired', "Choose a folder for the agents to work in."));
+			return;
+		}
+		const base = this.baseInput.value.trim();
+		if (base.startsWith('-') || /[\r\n]/.test(base)) {
+			this.setError(localize('room.homeInvalidBase', "Enter a valid Git branch, tag, or commit."));
+			return;
+		}
+		this.setError(undefined);
+		this.busy.set(true, undefined);
+		try {
+			const folderUri = this.folder.toString();
+			let initializeRepository = false;
+			if (!(await this.delegate.isRepository(folderUri))) {
+				if (this._store.isDisposed || !(await this.delegate.confirmInitialize(this.folder.fsPath))) {
+					return;
+				}
+				initializeRepository = true;
+			}
+			if (this._store.isDisposed) {
+				return;
+			}
+			await this.delegate.create({
+				title: goal.split('\n')[0].slice(0, 80), goal,
+				instructions: this.instructionsInput.value.trim(),
+				repositoryUri: folderUri, workerCount: this.count,
+				...(base ? { baseRevision: base } : {}),
+				initializeRepository,
+				memberModels: Array.from({ length: this.count }, (_, index) => this.memberModels[index]),
+			});
+		} finally {
+			if (!this._store.isDisposed) {
+				this.busy.set(false, undefined);
+			}
+		}
+	}
+}

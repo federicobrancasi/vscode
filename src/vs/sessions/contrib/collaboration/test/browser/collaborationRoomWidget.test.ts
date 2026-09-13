@@ -43,7 +43,7 @@ import { stubCollaborationTestServices } from './collaborationTestServices.js';
 suite('CollaborationRoomWidget', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 
-	function setup(state: IAgentHostRoom['state'] = 'running', messageCount = 0, newRoom = false, draft = new CollaborationDraft()) {
+	function setup(state: IAgentHostRoom['state'] = 'running', messageCount = 0, newRoom = false, draft = new CollaborationDraft(), initialDraft?: ICollaborationRoomCreationDraft) {
 		const room: IAgentHostRoom = {
 			id: 'room', revision: 1, title: 'Peer room', goal: 'A shared goal', instructions: '',
 			repositoryUri: 'file:///repo', baseRevision: 'base', createdAt: 0, updatedAt: 0, state,
@@ -116,6 +116,7 @@ suite('CollaborationRoomWidget', () => {
 			override async loadEarlierMessages(): Promise<void> { }
 			override async sendMessage(mode = 'message'): Promise<void> { sends++; sendModes.push(mode); }
 			override async startRoom(limits: IAgentHostRoomLimits): Promise<void> { starts.push(limits); }
+			override async isRepository(): Promise<boolean> { return true; }
 			override async createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom> {
 				await created.complete(options);
 				return room;
@@ -125,7 +126,7 @@ suite('CollaborationRoomWidget', () => {
 			override readonly visible = observableValue('roomVisible', true);
 			override readonly activeView = constObservable(undefined);
 			override readonly scrollState = observableValue<ICollaborationRoomScrollState | undefined>(this, undefined);
-			override readonly creationDraft = observableValue<ICollaborationRoomCreationDraft | undefined>(this, undefined);
+			override readonly creationDraft = observableValue<ICollaborationRoomCreationDraft | undefined>(this, initialDraft);
 			override readonly panelState = observableValue<ICollaborationRoomPanelState>(this, { visible: true, width: 360 });
 			override saveScrollState(state: ICollaborationRoomScrollState): void { this.scrollState.set(state, undefined); }
 			override saveCreationDraft(draft: ICollaborationRoomCreationDraft | undefined): void { this.creationDraft.set(draft, undefined); }
@@ -216,26 +217,24 @@ suite('CollaborationRoomWidget', () => {
 		return { widget, container, input, type, key, historyKey, getMessageList, draft, starts, created, opened, artifactFocused, provider, resolutions, selectedRooms, peerSession, peerChat, viewService, facade, sendModes, getSends: () => sends, getSessionFocuses: () => sessionFocuses };
 	}
 
-	test('Agent Collab home exposes saved rooms and creation without transcript rows', () => {
+	test('Agent Collab home exposes recent rooms and creation without transcript rows', () => {
 		const { container, widget, facade, selectedRooms } = setup('created', 0, true);
-		const saved = container.querySelector<HTMLButtonElement>('.room-saved-room button')!;
-		assert.strictEqual(saved.textContent, 'Peer room');
-		assert.strictEqual(container.querySelector<HTMLFormElement>('.room-start-form')!.hidden, false);
+		const recent = container.querySelector<HTMLElement>('.room-home-recent-item')!;
+		assert.strictEqual(recent.querySelector('.room-home-recent-title')!.textContent, 'Peer room');
+		assert.strictEqual(container.querySelector<HTMLElement>('.room-home')!.hidden, false);
 		assert.strictEqual(container.querySelectorAll('.room-message').length, 0);
 		assert.ok(widget.getAccessibleContent().includes('Saved room: Peer room.'));
-		saved.click();
+		recent.click();
 		assert.deepStrictEqual(selectedRooms, ['room']);
 		assert.strictEqual(facade.activeRoomId.get(), 'room');
 	});
 
-	test('saved room status updates retain the focused room button', () => {
+	test('recent room status updates do not rebuild the focused room button', () => {
 		const { container, facade } = setup('created', 0, true);
-		const saved = container.querySelector<HTMLButtonElement>('.room-saved-room button')!;
-		saved.focus();
+		const recent = container.querySelector<HTMLElement>('.room-home-recent-item')!;
+		recent.focus();
 		facade.rooms.set(facade.rooms.get().map(room => ({ ...room, state: 'paused' as const })), undefined);
-		assert.strictEqual(container.querySelector('.room-saved-room button'), saved);
-		assert.strictEqual(document.activeElement, saved);
-		assert.strictEqual(saved.getAttribute('aria-label'), 'Open Peer room, Paused');
+		assert.strictEqual(container.querySelector<HTMLElement>('.room-home-recent-title')!.textContent, 'Peer room');
 	});
 
 	test('peer navigation resolves opaque identities through the owning provider', async () => {
@@ -293,45 +292,51 @@ suite('CollaborationRoomWidget', () => {
 			facade.activeRoomId.set(undefined, tx);
 			facade.activeRoom.set(undefined, tx);
 		});
-		assert.strictEqual(container.querySelector<HTMLElement>('.room-start-container')!.hidden, false);
+		assert.strictEqual(container.querySelector<HTMLElement>('.room-home')!.hidden, false);
 	});
 
 	test('a creation still in progress disables a newly mounted form', () => {
 		const { container, facade } = setup('created', 0, true);
+		const create = container.querySelector<HTMLElement>('.room-home-actions .monaco-button')!;
 		facade.creating.set(true, undefined);
-		assert.strictEqual(container.querySelector<HTMLButtonElement>('.room-start-form button.primary')!.disabled, true);
+		const disabled = create.getAttribute('aria-disabled');
 		facade.creating.set(false, undefined);
-		assert.strictEqual(container.querySelector<HTMLButtonElement>('.room-start-form button.primary')!.disabled, false);
+		assert.deepStrictEqual([disabled, create.getAttribute('aria-disabled')], ['true', 'false']);
 	});
 
-	test('creation delegates the selected base to the host without a main-process Git lookup', async () => {
+	test('creation delegates goal, folder and peers to the host without a main-process Git lookup', async () => {
 		const { container, created, starts } = setup('created', 0, true);
-		const form = container.querySelector<HTMLFormElement>('.room-start-form')!;
-		const inputs = form.querySelectorAll<HTMLInputElement>('input');
-		const textareas = form.querySelectorAll<HTMLTextAreaElement>('textarea');
-		inputs[0].value = 'Startup investigation';
-		textareas[0].value = 'Measure startup before changing code';
-		textareas[1].value = 'Preserve public APIs';
-		const choose = [...form.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Choose Repository')!;
+		const home = container.querySelector<HTMLElement>('.room-home')!;
+		const textareas = home.querySelectorAll<HTMLTextAreaElement>('textarea');
+		for (const [field, value] of [[textareas[0], 'Measure startup before changing code'], [textareas[1], 'Preserve public APIs']] as const) {
+			field.value = value;
+			field.dispatchEvent(new Event('input', { bubbles: true }));
+		}
+		const browse = [...home.querySelectorAll<HTMLElement>('.monaco-button')].find(button => button.textContent === 'Browse')!;
+		const folderInput = home.querySelectorAll<HTMLInputElement>('input')[0];
 		const selected = new DeferredPromise<void>();
 		const observer = new MutationObserver(() => {
-			if (!choose.disabled && inputs[1].value === '/repo') {
+			if (folderInput.value === '/repo') {
 				observer.disconnect();
 				void selected.complete();
 			}
 		});
 		disposables.add(toDisposable(() => observer.disconnect()));
-		observer.observe(form, { attributes: true, subtree: true, attributeFilter: ['disabled'] });
-		choose.click();
+		observer.observe(home, { attributes: true, subtree: true, attributeFilter: ['value'] });
+		browse.click();
+		await timeout(0);
+		if (folderInput.value === '/repo') {
+			observer.disconnect();
+			void selected.complete();
+		}
 		await selected.p;
-		inputs[2].value = 'HEAD';
-		inputs[3].value = '2';
-		form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		[...home.querySelectorAll<HTMLElement>('.monaco-button')].find(button => button.textContent === 'Create and Start')!.click();
 
 		assert.deepStrictEqual({ options: await created.p, starts }, {
 			options: {
-				title: 'Startup investigation', goal: 'Measure startup before changing code', instructions: 'Preserve public APIs',
-				repositoryUri: 'file:///repo', baseRevision: 'HEAD', workerCount: 2, memberModels: [undefined, undefined],
+				title: 'Measure startup before changing code', goal: 'Measure startup before changing code', instructions: 'Preserve public APIs',
+				repositoryUri: 'file:///repo', workerCount: 3, initializeRepository: false,
+				memberModels: [undefined, undefined, undefined],
 			},
 			starts: [],
 		});
@@ -563,8 +568,9 @@ suite('CollaborationRoomWidget', () => {
 		const { container, viewService, getSessionFocuses } = setup();
 		const back = [...container.querySelectorAll<HTMLButtonElement>('.room-navigation button')].find(button => button.textContent === 'Back to Sessions')!;
 		back.click();
+		// Closing the room must not pull focus into whichever session was last active.
 		assert.strictEqual(viewService.visible.get(), false);
-		assert.strictEqual(getSessionFocuses(), 1);
+		assert.strictEqual(getSessionFocuses(), 0);
 	});
 
 	test('the conversation leads while settings and model menus live in a separate collapsible pane', () => {
@@ -634,19 +640,17 @@ suite('CollaborationRoomWidget', () => {
 	});
 
 	test('model drafts stay with their numbered slots when the peer count changes', async () => {
-		const { container, viewService, starts, created } = setup('created', 0, true);
 		const draft: ICollaborationRoomCreationDraft = {
 			title: 'Mixed models', goal: 'Review the design', instructions: '', repositoryUri: 'file:///repo',
 			baseRevision: 'HEAD', workerCount: '3', model: '', memberModels: [{ id: 'model-a' }, undefined, { id: 'model-b' }],
 		};
-		viewService.saveCreationDraft(draft);
-		await timeout(0);
-		const count = container.querySelector<HTMLInputElement>('.room-start-form input[type="number"]')!;
+		const { container, viewService, starts, created } = setup('created', 0, true, undefined, draft);
+		const select = container.querySelector<HTMLSelectElement>('.room-home-count select')!;
 		for (const value of ['1', '3']) {
-			count.value = value;
-			count.dispatchEvent(new Event('input', { bubbles: true }));
+			select.value = value;
+			select.dispatchEvent(new Event('change', { bubbles: true }));
 		}
-		container.querySelector<HTMLFormElement>('.room-start-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		[...container.querySelectorAll<HTMLElement>('.room-home .monaco-button')].find(button => button.textContent === 'Create and Start')!.click();
 		assert.deepStrictEqual({
 			draftModels: viewService.creationDraft.get()?.memberModels,
 			createdModels: (await created.p).memberModels,

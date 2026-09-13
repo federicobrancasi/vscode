@@ -25,8 +25,6 @@ import { ICollaborationRoomViewService } from '../../../services/collaboration/b
 import { CollaborationService } from '../../../services/collaboration/browser/collaborationService.js';
 import { CollaborationAvailableContext, CollaborationEnabledSettingId, CollaborationRoomVisibleContext, CollaborationSupportedContext, ICollaborationService } from '../../../services/collaboration/common/collaboration.js';
 import { ICustomViewService } from '../../../services/customView/browser/customViewService.js';
-import { ISessionsPartService } from '../../../services/sessions/browser/sessionsPartService.js';
-import { ISessionsService } from '../../../services/sessions/browser/sessionsService.js';
 import { CollaborationArtifactProvider } from './collaborationArtifactProvider.js';
 import { collaborationRoomViewDescriptor } from './collaborationRoomView.js';
 
@@ -176,8 +174,9 @@ registerAction2(class CloseCollaborationRoomAction extends Action2 {
 	override run(accessor: ServicesAccessor): void {
 		const viewService = accessor.get(ICollaborationRoomViewService);
 		if (viewService.visible.get()) {
+			// Closing the room returns to the sessions grid as it was; it must not
+			// pull focus into whichever session happened to be active last.
 			viewService.close();
-			accessor.get(ISessionsPartService).focusSession(accessor.get(ISessionsService).activeSession.get());
 		}
 	}
 });
