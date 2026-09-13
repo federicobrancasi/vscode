@@ -31,7 +31,9 @@ export class CollaborationTabs extends Disposable {
 
 	constructor(parent: HTMLElement, private readonly onDidChangeTab: (id: string) => void) {
 		super();
-		this.element = parent.appendChild($('.room-tabs'));
+		// The shared modern editor-tab hooks own the pill geometry and states, exactly
+		// as the Agents window composite bar adopts them; this widget supplies layout.
+		this.element = parent.appendChild($('.room-tabs.modern-ui-editor-tab-group.modern-ui-editor-tab-group-active'));
 		this.element.setAttribute('role', 'tablist');
 		this.element.setAttribute('aria-label', localize('room.tabsLabel', "Room panels"));
 		this._register(addDisposableListener(this.element, EventType.KEY_DOWN, event => this.onKeyDown(event)));
@@ -83,11 +85,12 @@ export class CollaborationTabs extends Disposable {
 		this.buttons.clear();
 		this.element.textContent = '';
 		for (const tab of this.tabs) {
-			const button = this.element.appendChild($('button.room-tab')) as HTMLButtonElement;
+			const button = this.element.appendChild($('button.room-tab.modern-ui-editor-tab')) as HTMLButtonElement;
 			button.id = `room-tab-${generateUuid()}`;
 			button.setAttribute('role', 'tab');
 			button.type = 'button';
-			button.appendChild($('span.room-tab-label')).textContent = tab.label;
+			button.appendChild($('span.room-tab-fill.modern-ui-editor-tab-fill'));
+			button.appendChild($('span.room-tab-label.modern-ui-editor-tab-label')).textContent = tab.label;
 
 			if (tab.badge) {
 				button.appendChild($('span.room-tab-badge')).textContent = String(tab.badge);

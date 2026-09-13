@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { $, getActiveElement, getWindow, isAncestor, isHTMLElement, scheduleAtNextAnimationFrame } from '../../../../base/browser/dom.js';
+import '../../../../workbench/contrib/chat/browser/widget/media/chat.css';
 import { IRenderedMarkdown } from '../../../../base/browser/markdownRenderer.js';
 import { Button } from '../../../../base/browser/ui/button/button.js';
 import { IListRenderer, IListVirtualDelegate } from '../../../../base/browser/ui/list/list.js';
@@ -30,6 +31,7 @@ interface IConversationActions {
 
 interface IMessageTemplate {
 	readonly element: HTMLElement;
+	readonly avatar: HTMLElement;
 	readonly author: HTMLElement;
 	readonly metadata: HTMLElement;
 	readonly body: HTMLElement;
@@ -114,14 +116,27 @@ export class CollaborationConversation extends Disposable {
 	get scrollTop(): number { return this.list.scrollTop; }
 	get length(): number { return this.list.length; }
 
+	/**
+	 * Mirrors the agent chat's row structure and adopts its presentational classes,
+	 * so a room post reads as a chat turn. The chat's own renderer is not reusable:
+	 * it is driven by an IChatViewModel the room does not have.
+	 */
 	private createTemplate(parent: HTMLElement): IMessageTemplate {
 		const lifetime = new DisposableStore();
-		const element = parent.appendChild($('article.room-message'));
+		const element = parent.appendChild($('article.room-message.interactive-item-container'));
+		const header = element.appendChild($('.header'));
+		const user = header.appendChild($('.user'));
+		const avatarContainer = user.appendChild($('.avatar-container'));
+		const avatar = avatarContainer.appendChild($('.avatar.codicon-avatar'));
+		const author = user.appendChild($('h3.username'));
+		const detail = user.appendChild($('.detail-container')).appendChild($('span.detail'));
+		const body = element.appendChild($('.value')).appendChild($('.chat-markdown-part'));
 		const template: IMessageTemplate = {
 			element,
-			author: element.appendChild($('.room-message-author')),
-			metadata: element.appendChild($('.room-message-meta')),
-			body: element.appendChild($('.room-message-body')),
+			avatar,
+			author,
+			metadata: detail,
+			body,
 			actions: element.appendChild($('.room-message-actions')),
 			lifetime,
 			current: lifetime.add(new DisposableStore()),
@@ -137,8 +152,10 @@ export class CollaborationConversation extends Disposable {
 	private renderMessage(message: IAgentHostRoomMessage, template: IMessageTemplate): void {
 		const changed = !equals(template.message, message) || template.roomState !== this.room?.state;
 		const accent = collaborationAuthorAccent(this.room, message.authorId);
-		template.element.style.borderLeftColor = accent;
-		template.author.style.color = accent;
+		// The chat identifies a speaker by avatar and name; ten agents still need telling apart.
+		template.avatar.style.background = accent;
+		template.element.classList.toggle('interactive-request', message.authorKind === 'human');
+		template.element.classList.toggle('interactive-response', message.authorKind !== 'human');
 		if (!changed) {
 			return;
 		}
@@ -147,7 +164,8 @@ export class CollaborationConversation extends Disposable {
 		template.message = message;
 		template.roomState = this.room?.state;
 		template.element.dataset.messageId = message.id;
-		template.author.textContent = message.authorKind === 'human' ? localize('room.humanAuthor', "{0} (human)", message.authorName) : message.authorName;
+		template.author.textContent = message.authorName;
+		template.avatar.textContent = message.authorName.replace(/[^0-9]/g, '') || message.authorName.slice(0, 1).toUpperCase();
 		const delivery = message.authorKind === 'human' && !message.mentions.length && message.mode !== 'steer'
 			? [localize('room.noRecipients', "Shared with room; no agents notified")]
 			: message.deliveries.map(delivery => {

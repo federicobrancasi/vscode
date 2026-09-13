@@ -5,6 +5,7 @@
 
 .custom-view-content.collaboration-view-content {
 	padding: 0;
+	height: 100%;
 }
 
 .collaboration-room {
@@ -310,20 +311,23 @@
 }
 
 .collaboration-room .room-message {
-	border-left: var(--vscode-strokeThickness) solid var(--vscode-foreground);
-	border-bottom: var(--vscode-strokeThickness) solid var(--vscode-contrastBorder, transparent);
-	white-space: normal;
-	overflow-wrap: anywhere;
-	color: var(--vscode-foreground);
+	box-sizing: border-box;
+	width: 100%;
+	max-width: 950px;
+	margin: 0 auto;
 }
 
-.collaboration-room .room-message-body {
-	user-select: text;
-}
-
-.collaboration-room .room-message-author {
+.collaboration-room .room-message .avatar {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--vscode-button-foreground);
+	font-size: var(--vscode-fontSize-label2);
 	font-weight: var(--vscode-fontWeight-semiBold);
-	color: var(--vscode-foreground);
+}
+
+.collaboration-room .room-message .detail {
+	color: var(--vscode-descriptionForeground);
 }
 
 .collaboration-room .room-message-meta {
@@ -575,35 +579,40 @@
 
 /* Panel tabs: one per agent, then the shared rules and pending decisions. */
 
+.collaboration-room .room-panel-header-bar {
+	flex-shrink: 0;
+	padding: var(--vscode-spacing-size40) var(--vscode-spacing-size80);
+	box-sizing: border-box;
+}
+
 .collaboration-room .room-tabs {
 	display: flex;
 	align-items: stretch;
-	gap: var(--vscode-spacing-size20);
 	overflow-x: auto;
 	overflow-y: hidden;
 	scrollbar-width: none;
-	border-bottom: var(--vscode-strokeThickness) solid var(--vscode-widget-border, transparent);
-	flex-shrink: 0;
 }
 
 .collaboration-room .room-tabs::-webkit-scrollbar {
 	display: none;
 }
 
+/* Layout only: geometry, hover and active fills come from the shared tab hooks. */
 .collaboration-room .room-tab {
 	display: flex;
 	align-items: center;
 	gap: var(--vscode-spacing-size60);
+	position: relative;
 	flex-shrink: 0;
-	padding: var(--vscode-spacing-size80) var(--vscode-spacing-size120);
+	padding: var(--vscode-spacing-size60) var(--vscode-spacing-size120);
 	border: none;
-	border-bottom: 2px solid transparent;
-	border-radius: 0;
+	border-radius: var(--vscode-cornerRadius-small);
 	background: transparent;
 	color: var(--vscode-descriptionForeground);
 	cursor: pointer;
 	font: inherit;
 	white-space: nowrap;
+	min-height: 26px;
 }
 
 .collaboration-room .room-tab:hover:not(.active) {
@@ -612,7 +621,30 @@
 
 .collaboration-room .room-tab.active {
 	color: var(--vscode-foreground);
-	border-bottom-color: currentColor;
+}
+
+/* Fallback fill for workbenches without the modern tab styles. */
+.collaboration-room .room-tab > .room-tab-fill {
+	display: block;
+	position: absolute;
+	inset: 0;
+	z-index: 0;
+	border-radius: var(--vscode-cornerRadius-small);
+	pointer-events: none;
+}
+
+.collaboration-room .room-tab:hover:not(.active) > .room-tab-fill {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.collaboration-room .room-tab.active > .room-tab-fill {
+	background: var(--vscode-tab-activeBackground, var(--vscode-editor-background));
+}
+
+.collaboration-room .room-tab > .room-tab-label,
+.collaboration-room .room-tab > .room-tab-badge {
+	position: relative;
+	z-index: 1;
 }
 
 .collaboration-room .room-tab-badge {
@@ -639,5 +671,17 @@
 }
 
 .collaboration-room .room-tab-panel[hidden] {
+	display: none;
+}
+
+/* Run controls sit with the run, above the panel's tabs. */
+.collaboration-room .room-run-controls-host {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--vscode-spacing-size60);
+	padding: var(--vscode-spacing-size40) var(--vscode-spacing-size40) var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-run-controls-host:empty {
 	display: none;
 }

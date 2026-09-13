@@ -68,7 +68,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private readonly subtitle: HTMLElement;
 	private readonly goalDetails: HTMLDetailsElement;
 	private readonly goalContent: HTMLElement;
-	private readonly roomPicker: HTMLSelectElement;
 	private readonly notice: HTMLElement;
 	private readonly retryLoad: HTMLButtonElement;
 	private readonly roster: HTMLElement;
@@ -96,6 +95,8 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private readonly cancelReply: HTMLButtonElement;
 	private readonly suggestions: HTMLElement;
 	private readonly home: CollaborationHome;
+	private readonly runControls: HTMLElement;
+	private lastHeight = 0;
 	private readonly tabs: CollaborationTabs;
 	private readonly agentsPanel: HTMLElement;
 	private readonly rulesPanel: HTMLElement;
@@ -121,7 +122,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private initialSelection = true;
 	private previousRoomId: string | undefined;
 	private lastAnnouncedSequence = 0;
-	private roomCatalog = '';
 	private readonly navigationCancellation = new CancellationTokenSource();
 
 	constructor(
@@ -161,29 +161,10 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			visible => {
 				this.panelButton?.setAttribute('aria-expanded', String(visible));
 			}, () => this.panelButton.focus()));
-		const panelHeader = this.layoutWidget.panelContent.appendChild($('.room-panel-header'));
-		panelHeader.appendChild($('h3')).textContent = localize('room.panelTitle', "Room Settings");
-		this.button(panelHeader, localize('room.closePanel', "Close"), () => {
-			this.layoutWidget.setPanelVisible(false);
-			this.panelButton.focus();
-		}, this._store, false);
-		const navigation = this.layoutWidget.panelContent.appendChild($('.room-navigation'));
-		this.roomPicker = navigation.appendChild($('select')) as HTMLSelectElement;
-		this.roomPicker.setAttribute('aria-label', localize('room.choose', "Choose collaboration room"));
-		this._register(addDisposableListener(this.roomPicker, EventType.CHANGE, () => {
-			void this.perform(() => this.collaborationService.selectRoom(this.roomPicker.value || undefined));
-		}));
-		this.button(navigation, localize('room.new', "New Room"), async () => {
-			await this.collaborationService.selectRoom(undefined);
-			this.layoutWidget.setPanelVisible(false);
-			this.home.focus();
-		});
-		this.button(navigation, localize('room.back', "Back to Sessions"), () => {
-			this.roomViewService.close();
-		}, this._store, false);
-		this.pauseButton = this.button(this.header, localize('room.pause', "Pause"), () => this.collaborationService.pauseRoom());
-		this.stopButton = this.button(this.header, localize('room.stop', "Stop All"), () => this.collaborationService.stopRoom());
-		this.attentionButton = this.button(this.header, localize('room.attention', "Needs Attention"), () => {
+		this.runControls = this.layoutWidget.panelHeader.appendChild($('.room-run-controls-host'));
+		this.pauseButton = this.button(this.runControls, localize('room.pause', "Pause"), () => this.collaborationService.pauseRoom());
+		this.stopButton = this.button(this.runControls, localize('room.stop', "Stop All"), () => this.collaborationService.stopRoom());
+		this.attentionButton = this.button(this.runControls, localize('room.attention', "Needs Attention"), () => {
 			this.layoutWidget.focusPanel();
 			const failedMember = this.collaborationService.activeRoom.get()?.members.find(member => member.error || member.modelError || member.state === 'failed');
 			this.tabs.select(this.requestElements.size || !this.trustNotice.hidden || !failedMember ? APPROVALS_TAB : `member:${failedMember.id}`);
@@ -228,7 +209,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.modelCatalog = this._register(instantiationService.createInstance(CollaborationModelCatalog, collaborationService.models, error => {
 			this.localError.set(toErrorMessage(error), undefined);
 		}));
-		this.tabs = this._register(new CollaborationTabs(this.layoutWidget.panelContent, () => this.updateTabPanels()));
+		this.tabs = this._register(new CollaborationTabs(this.layoutWidget.panelHeader, () => this.updateTabPanels()));
 		const tabContent = this.layoutWidget.panelContent.appendChild($('.room-tab-content'));
 		this.agentsPanel = tabContent.appendChild($('.room-tab-panel'));
 		this.roster = this.agentsPanel.appendChild($('.room-roster'));
@@ -303,8 +284,8 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.deadlineInput.required = false;
 		this.turnsInput.placeholder = localize('room.noLimit', "No limit");
 		this.deadlineInput.placeholder = localize('room.noDeadline', "No deadline");
-		this.startButton = this.button(this.header, localize('room.start', "Start"), () => this.startRun());
-		this.header.insertBefore(this.startButton, this.pauseButton);
+		this.startButton = this.button(this.runControls, localize('room.start', "Start"), () => this.startRun());
+		this.runControls.insertBefore(this.startButton, this.pauseButton);
 		this.startButton.classList.add('primary');
 		this._register(addDisposableListener(this.runForm, EventType.SUBMIT, event => {
 			event.preventDefault();
@@ -408,27 +389,13 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this._register(this.keybindingService.onDidUpdateKeybindings(updateInputLabel));
 		updateInputLabel();
 		this.observeState();
-		const observer = new (getWindow(parent).ResizeObserver)(() => this.layout(this.element.clientWidth, this.element.clientHeight));
+		const observer = new (getWindow(parent).ResizeObserver)(() => this.layout(this.element.clientWidth, this.lastHeight || this.element.clientHeight));
 		observer.observe(this.element);
 		observer.observe(this.header);
 		this._register({ dispose: () => observer.disconnect() });
 	}
 
 	private observeState(): void {
-		this._register(autorun(reader => {
-			const rooms = this.collaborationService.rooms.read(reader);
-			const selected = this.collaborationService.activeRoomId.read(reader);
-			const catalog = JSON.stringify(rooms.map(room => [room.id, room.title]));
-			if (catalog !== this.roomCatalog) {
-				this.roomCatalog = catalog;
-				this.roomPicker.replaceChildren();
-				this.roomPicker.add(new Option(localize('room.newChoice', "New collaboration room"), ''));
-				for (const room of rooms) {
-					this.roomPicker.add(new Option(room.title, room.id));
-				}
-			}
-			this.roomPicker.value = selected ?? '';
-		}));
 		this._register(autorun(reader => {
 			const id = this.collaborationService.activeRoomId.read(reader);
 			const scrollState = this.initialSelection ? this.roomViewService.scrollState.read(undefined) : undefined;
@@ -512,7 +479,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			if (!room && this.layoutWidget.panelVisible) {
 				this.layoutWidget.setPanelVisible(false);
 			}
-			this.roomPicker.disabled = busy;
 			this.startButton.textContent = room?.state === 'created' ? localize('room.start', "Start") : localize('room.resume', "Resume");
 			this.startButton.hidden = !room || room.state === 'running' || room.state === 'stopping';
 			const canStart = !!room && ['created', 'idle', 'paused', 'stopped', 'interrupted'].includes(room.state);
@@ -982,12 +948,14 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		} else if (!this.retryLoad.hidden) {
 			this.retryLoad.focus();
 		} else {
-			this.roomPicker.focus();
+			this.tabs.focusActive();
 		}
 	}
 
 	layout(width: number, height: number): void {
-		this.element.style.height = `${height}px`;
+		// The element fills its container through CSS. Setting its height here while
+		// also observing it would let any content that cannot shrink lock the size in.
+		this.lastHeight = height;
 		this.layoutWidget.layout(width, Math.max(0, height - this.header.offsetHeight));
 		this.restoreScrollPosition();
 	}

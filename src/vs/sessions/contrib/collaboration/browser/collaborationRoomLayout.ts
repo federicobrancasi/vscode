@@ -18,7 +18,10 @@ export class CollaborationRoomLayout extends Disposable {
 	readonly element = $('.room-layout');
 	readonly main = $('.room-main');
 	readonly panel = $('aside.room-side-panel');
+	/** Fixed strip above the scrolling body; the tab bar lives here. */
+	readonly panelHeader = $('.room-panel-header-bar');
 	readonly panelContent = $('.room-panel-content');
+	private readonly panelBody = $('.room-panel-body');
 	private readonly panelHost = $('.room-panel-host');
 	private readonly splitStore = this._register(new DisposableStore());
 	private readonly scrollable: DomScrollableElement;
@@ -43,12 +46,13 @@ export class CollaborationRoomLayout extends Disposable {
 		this.main.tabIndex = -1;
 		this.panel.setAttribute('aria-label', localize('room.settingsPane', "Room settings"));
 		this.panel.tabIndex = -1;
-		this.panel.appendChild(this.panelContent);
-		this.scrollable = this._register(new DomScrollableElement(this.panel, {
+		this.panelBody.appendChild(this.panelContent);
+		this.scrollable = this._register(new DomScrollableElement(this.panelBody, {
 			vertical: ScrollbarVisibility.Auto, horizontal: ScrollbarVisibility.Hidden, useShadows: false,
 		}));
 		this.scrollable.getDomNode().classList.add('room-panel-scrollable');
-		this.panelHost.appendChild(this.scrollable.getDomNode());
+		this.panel.append(this.panelHeader, this.scrollable.getDomNode());
+		this.panelHost.appendChild(this.panel);
 		const observer = new (getWindow(parent).ResizeObserver)(() => this.scrollable.scanDomNode());
 		observer.observe(this.panelContent);
 		this._register({ dispose: () => observer.disconnect() });
@@ -146,10 +150,13 @@ export class CollaborationRoomLayout extends Disposable {
 	private layoutPanel(width: number): void {
 		this.panelHost.style.width = `${width}px`;
 		this.panelHost.style.height = `${this.height}px`;
-		this.scrollable.getDomNode().style.width = `${width}px`;
-		this.scrollable.getDomNode().style.height = `${this.height}px`;
 		this.panel.style.width = `${width}px`;
 		this.panel.style.height = `${this.height}px`;
+		// Only the body scrolls, so the tab strip stays pinned to the top.
+		const body = Math.max(0, this.height - this.panelHeader.clientHeight);
+		this.scrollable.getDomNode().style.width = `${width}px`;
+		this.scrollable.getDomNode().style.height = `${body}px`;
+		this.panelBody.style.width = `${width}px`;
 		this.scrollable.scanDomNode();
 	}
 

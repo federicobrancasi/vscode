@@ -442,7 +442,7 @@ suite('CollaborationRoomWidget', () => {
 		}, undefined);
 		const explanation = 'Shared with room; no agents notified';
 		assert.deepStrictEqual({
-			visible: container.querySelector('.room-message-meta')?.textContent?.includes(explanation),
+			visible: container.querySelector('.room-message .detail')?.textContent?.includes(explanation),
 			accessible: widget.getAccessibleContent().includes(explanation),
 		}, { visible: true, accessible: true });
 	});
@@ -459,7 +459,7 @@ suite('CollaborationRoomWidget', () => {
 
 	test('Start does not require a turn cap or deadline', () => {
 		const { container, starts } = setup('created');
-		container.querySelector<HTMLButtonElement>('.room-header button.primary')!.click();
+		container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!.click();
 		assert.deepStrictEqual(starts, [{}]);
 	});
 
@@ -468,24 +468,24 @@ suite('CollaborationRoomWidget', () => {
 		const limits = container.querySelectorAll<HTMLInputElement>('form.room-run-controls input');
 		limits[0].value = '12';
 		limits[1].value = '5';
-		container.querySelector<HTMLButtonElement>('.room-header button.primary')!.click();
+		container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!.click();
 		assert.deepStrictEqual(starts, [{ maxTurns: 12, timeoutMinutes: 5 }]);
 	});
 
 	test('turn caps and deadlines can be chosen independently', () => {
 		const first = setup('created');
 		first.container.querySelectorAll<HTMLInputElement>('form.room-run-controls input')[0].value = '12';
-		first.container.querySelector<HTMLButtonElement>('.room-header button.primary')!.click();
+		first.container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!.click();
 		const second = setup('created');
 		second.container.querySelectorAll<HTMLInputElement>('form.room-run-controls input')[1].value = '5';
-		second.container.querySelector<HTMLButtonElement>('.room-header button.primary')!.click();
+		second.container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!.click();
 		assert.deepStrictEqual([first.starts, second.starts], [[{ maxTurns: 12 }], [{ timeoutMinutes: 5 }]]);
 	});
 
 	test('an idle room supports both an explicit bounded Resume and Pause', () => {
 		const { container, starts } = setup('idle');
-		const resume = container.querySelector<HTMLButtonElement>('.room-header button.primary')!;
-		const pause = [...container.querySelectorAll<HTMLButtonElement>('.room-header button')].find(button => button.textContent === 'Pause')!;
+		const resume = container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!;
+		const pause = [...container.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent === 'Pause')!;
 		assert.strictEqual(resume.textContent, 'Resume');
 		assert.strictEqual(resume.disabled, false);
 		assert.strictEqual(pause.disabled, false);
@@ -511,7 +511,7 @@ suite('CollaborationRoomWidget', () => {
 			hasEarlier: false, hasLater: false,
 		}, undefined);
 		const row = container.querySelector<HTMLElement>('.room-message')!;
-		const content = row.querySelector<HTMLElement>('.room-message-body > div')!;
+		const content = row.querySelector<HTMLElement>('.chat-markdown-part > div')!;
 		const range = document.createRange();
 		range.selectNodeContents(content);
 		const wrappedLines = range.getClientRects().length;
@@ -553,15 +553,6 @@ suite('CollaborationRoomWidget', () => {
 		assert.strictEqual(loads, 1);
 	});
 
-	test('returning to sessions hides the room without changing the session model', () => {
-		const { container, viewService, getSessionFocuses } = setup();
-		const back = [...container.querySelectorAll<HTMLButtonElement>('.room-navigation button')].find(button => button.textContent === 'Back to Sessions')!;
-		back.click();
-		// Closing the room must not pull focus into whichever session was last active.
-		assert.strictEqual(viewService.visible.get(), false);
-		assert.strictEqual(getSessionFocuses(), 0);
-	});
-
 	test('the conversation leads while settings and model menus live in a separate collapsible pane', () => {
 		const { container, viewService } = setup('running', 1);
 		const main = container.querySelector<HTMLElement>('.room-main')!;
@@ -585,7 +576,7 @@ suite('CollaborationRoomWidget', () => {
 			...room, members: room.members.map((member, index) => index === 0 ? { ...member, state: 'failed', error: 'Could not prepare the worktree' } : member),
 		}, undefined);
 		viewService.savePanelState({ visible: false, width: 360 });
-		const attention = [...container.querySelectorAll<HTMLButtonElement>('.room-header button')].find(button => button.textContent === 'Needs Attention (1)')!;
+		const attention = [...container.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent === 'Needs Attention (1)')!;
 		attention.click();
 		assert.deepStrictEqual({
 			expanded: viewService.panelState.get().visible,
@@ -617,7 +608,7 @@ suite('CollaborationRoomWidget', () => {
 		}, undefined);
 		await timeout(0);
 		viewService.savePanelState({ visible: false, width: 360 });
-		[...container.querySelectorAll<HTMLButtonElement>('.room-header button')].find(button => button.textContent === 'Needs Attention (1)')!.click();
+		[...container.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent === 'Needs Attention (1)')!.click();
 		assert.deepStrictEqual({
 			detail: container.querySelector('.room-roster .room-model-detail.error')?.textContent,
 			focus: document.activeElement?.getAttribute('aria-label'),
@@ -655,7 +646,7 @@ suite('CollaborationRoomWidget', () => {
 		}, undefined);
 		const page = facade.messages.get();
 		facade.messages.set({ ...page, messages: page.messages.map((message, index) => ({ ...message, authorId: `member-${index + 1}`, authorName: `Copilot-${index + 1}` })) }, undefined);
-		const accents = [...container.querySelectorAll<HTMLElement>('.room-message')].map(message => message.style.borderLeftColor);
+		const accents = [...container.querySelectorAll<HTMLElement>('.room-message .avatar')].map(avatar => avatar.style.background);
 		assert.deepStrictEqual({
 			repeatedReport: container.querySelector('.room-roster')?.textContent?.includes('Duplicate report'),
 			distinctAuthors: new Set(accents).size,
@@ -786,7 +777,7 @@ suite('CollaborationRoomWidget', () => {
 		const field = container.querySelector<HTMLInputElement>('.room-request input')!;
 		field.value = 'Keep my answer';
 		viewService.savePanelState({ visible: false, width: 360 });
-		const attention = [...container.querySelectorAll<HTMLButtonElement>('.room-header button')].find(button => button.textContent?.startsWith('Needs Attention'))!;
+		const attention = [...container.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent?.startsWith('Needs Attention'))!;
 		attention.click();
 		container.style.width = '640px';
 		widget.layout(640, 760);
