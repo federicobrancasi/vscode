@@ -162,7 +162,6 @@ registerAction2(class CloseCollaborationRoomAction extends Action2 {
 			icon: Codicon.arrowLeft,
 			f1: true,
 			precondition: CollaborationRoomVisibleContext,
-			menu: [{ id: Menus.CustomViewCollaboration, group: 'navigation', order: 1 }],
 			keybinding: {
 				primary: KeyMod.CtrlCmd | KeyCode.KeyW,
 				weight: KeybindingWeight.WorkbenchContrib + 3,

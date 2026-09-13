@@ -35,6 +35,7 @@ export interface ICollaborationHomeDelegate {
 	browseForFolder(current: URI | undefined): Promise<URI | undefined>;
 	create(options: IAgentHostRoomCreateOptions): Promise<void>;
 	open(roomId: string): Promise<void>;
+	describeState(room: IAgentHostRoom): string;
 	readDraft(): ICollaborationHomeDraft | undefined;
 	saveDraft(draft: ICollaborationHomeDraft | undefined): void;
 }
@@ -72,7 +73,8 @@ export class CollaborationHome extends Disposable {
 	) {
 		super();
 		this.element = parent.appendChild($('.room-home'));
-		const card = this.element.appendChild($('.room-home-card'));
+		const columns = this.element.appendChild($('.room-home-columns'));
+		const card = columns.appendChild($('.room-home-card'));
 		card.appendChild($('h1.room-home-title')).textContent = localize('room.homeTitle', "Agent Collab");
 
 		this.goalInput = this._register(new InputBox(this.field(card, localize('room.homeGoal', "Goal")), contextViewService, {
@@ -124,8 +126,8 @@ export class CollaborationHome extends Disposable {
 		this.createButton.label = localize('room.homeCreate', "Create and Start");
 		this._register(this.createButton.onDidClick(() => void this.create()));
 
-		this.recentSection = this.element.appendChild($('section.room-home-recent'));
-		this.recentSection.appendChild($('h2')).textContent = localize('room.homeRecent', "Recent");
+		this.recentSection = columns.appendChild($('section.room-home-recent'));
+		this.recentSection.appendChild($('h2')).textContent = localize('room.homeRecent', "Your rooms");
 		this.recentList = this.recentSection.appendChild($('ul'));
 		this.recentList.setAttribute('aria-label', localize('room.homeRecentLabel', "Recent collaboration rooms"));
 
@@ -196,14 +198,17 @@ export class CollaborationHome extends Disposable {
 		this.recentStore.clear();
 		this.recentList.textContent = '';
 		this.recentSection.hidden = !rooms.length;
-		for (const room of rooms.slice(0, 8)) {
+		this.element.classList.toggle('has-recent', rooms.length > 0);
+		for (const room of rooms) {
 			const item = this.recentList.appendChild($('li'));
 			const open = this.recentStore.add(new Button(item, { ...defaultButtonStyles, secondary: true, title: room.title }));
 			open.element.classList.add('room-home-recent-item');
 			open.element.textContent = '';
-			open.element.appendChild($('span.room-home-recent-title')).textContent = room.title;
-			open.element.appendChild($('span.room-home-recent-detail')).textContent = localize(
-				'room.homeRecentDetail', "{0} agents", room.members.length);
+			const text = open.element.appendChild($('.room-home-recent-text'));
+			text.appendChild($('span.room-home-recent-title')).textContent = room.title;
+			text.appendChild($('span.room-home-recent-detail')).textContent = localize(
+				'room.homeRecentDetail', "{0} agents · {1}", room.members.length, this.delegate.describeState(room));
+			open.element.setAttribute('aria-label', localize('room.homeOpenRecent', "Open {0}, {1} agents, {2}", room.title, room.members.length, this.delegate.describeState(room)));
 			this.recentStore.add(open.onDidClick(() => void this.delegate.open(room.id)));
 		}
 	}

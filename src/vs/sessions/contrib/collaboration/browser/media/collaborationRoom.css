@@ -300,6 +300,7 @@
 	padding: var(--vscode-spacing-size320);
 	box-sizing: border-box;
 	overflow-y: auto;
+	container-type: inline-size;
 }
 
 .collaboration-room .room-feed .monaco-list-row {
@@ -488,19 +489,36 @@
 
 /* Home: one centred card. The goal leads; everything else is secondary. */
 
-.collaboration-room .room-home-card {
-	display: flex;
-	flex-direction: column;
-	gap: var(--vscode-spacing-size200);
+.collaboration-room .room-home-columns {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: var(--vscode-spacing-size320);
 	width: 100%;
 	max-width: 560px;
 	margin: 0 auto;
 }
 
+/* Beside the form once there is room for it, so previous rooms are never below the fold. */
+.collaboration-room .room-home.has-recent .room-home-columns {
+	max-width: 980px;
+}
+
+@container (min-width: 900px) {
+	.collaboration-room .room-home.has-recent .room-home-columns {
+		grid-template-columns: minmax(0, 3fr) minmax(240px, 2fr);
+		align-items: start;
+	}
+}
+
+.collaboration-room .room-home-card {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size200);
+	min-width: 0;
+}
+
 .collaboration-room .room-home-recent {
-	width: 100%;
-	max-width: 560px;
-	margin: var(--vscode-spacing-size320) auto 0;
+	min-width: 0;
 }
 
 .collaboration-room .room-home-title {
@@ -585,11 +603,22 @@
 
 .collaboration-room .room-home-recent-item {
 	display: flex;
-	align-items: baseline;
-	justify-content: space-between;
-	gap: var(--vscode-spacing-size120);
 	width: 100%;
 	text-align: left;
+	justify-content: flex-start;
+}
+
+.collaboration-room .room-home-recent-text {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size20);
+	min-width: 0;
+}
+
+.collaboration-room .room-home-recent-title {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .collaboration-room .room-home-recent-detail {

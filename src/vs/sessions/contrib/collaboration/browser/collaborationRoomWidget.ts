@@ -279,6 +279,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			browseForFolder: current => this.browseForFolder(current),
 			create: options => this.createRoom(options),
 			open: roomId => this.perform(() => this.collaborationService.selectRoom(roomId)),
+			describeState: room => roomStateLabel(room.state),
 			readDraft: () => {
 				const draft = this.roomViewService.creationDraft.get();
 				return {
@@ -506,6 +507,13 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.historyControls.hidden = !room;
 			this.feed.hidden = !roomId;
 			this.composer.hidden = !room;
+			// The home screen owns room selection and creation, so the settings panel
+			// has nothing to offer until a room is open.
+			this.panelButton.hidden = !room;
+			this.layoutWidget.element.classList.toggle('room-no-panel', !room);
+			if (!room && this.layoutWidget.panelVisible) {
+				this.layoutWidget.setPanelVisible(false);
+			}
 			this.roomPicker.disabled = busy;
 			this.startButton.textContent = room?.state === 'created' ? localize('room.start', "Start") : localize('room.resume', "Resume");
 			this.startButton.hidden = !room || room.state === 'running' || room.state === 'stopping';
