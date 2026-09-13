@@ -109,7 +109,7 @@ suite('Collaboration accessibility', () => {
 			liveGuidance: content.includes('Steer Agents instead sends live guidance'),
 			sidebarHome: content.includes('Agent Collab in the Sessions sidebar'),
 			memberBusyInput: content.includes('Native Queue and Steer are unavailable'),
-			roomApprovals: content.includes('Approvals and questions appear directly in the room'),
+			roomApprovals: content.includes('Approvals and questions appear in the Approvals tab'),
 			trust: content.includes('exact local worktree of each peer'),
 			autopilot: content.includes('Autopilot is separate from Allow all'),
 			configuration: content.includes('All peers controls') && content.includes('Choices are saved across Stop and Resume'),
