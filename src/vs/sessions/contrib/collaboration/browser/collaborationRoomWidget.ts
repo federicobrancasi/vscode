@@ -474,7 +474,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			const available = this.collaborationService.availability.read(reader) === 'available';
 			const busy = this.busy.read(reader);
 			const creationBusy = busy || this.collaborationService.creating.read(reader);
-			this.heading.textContent = room?.title ?? localize('room.heading', "Create or open a room");
+			// The home card carries its own title, so the header stays empty until a room is open.
+			this.heading.textContent = room?.title ?? '';
+			this.header.classList.toggle('room-header-empty', !room);
 			this.subtitle.textContent = room ? localize('room.summary', "{0} | {1} peers | Base {2}{3}", roomStateLabel(room.state), room.members.length, room.baseRevision.slice(0, 8),
 				room.run ? localize('room.runSummary', " | {0} turns{1}{2}", room.run.admittedTurns,
 					room.run.limits.maxTurns === undefined ? '' : localize('room.turnLimit', " / {0} maximum", room.run.limits.maxTurns),

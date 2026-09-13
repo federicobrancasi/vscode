@@ -596,3 +596,8 @@
 	color: var(--vscode-descriptionForeground);
 	flex-shrink: 0;
 }
+
+/* Before a room exists the home card leads; the header carries nothing. */
+.collaboration-room .room-header.room-header-empty {
+	padding-bottom: 0;
+}
