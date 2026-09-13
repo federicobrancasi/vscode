@@ -31,10 +31,10 @@ import { CollaborationFixtureService, createCollaborationFixtureMessages, create
 import { stubCollaborationTestServices } from './collaborationTestServices.js';
 import '../../../../common/theme.js';
 
-type RoomFixtureState = 'new' | 'home' | 'running' | 'paused' | 'offline' | 'steering' | 'approvals' | 'approval-pending' | 'approval-failed' | 'untrusted' | 'one-peer' | 'three-peers' | 'collapsed' | 'narrow' | 'narrow-drawer' | 'long-history' | 'mixed-setup' | 'pending-model' | 'model-error';
+type RoomFixtureState = 'new' | 'home' | 'running' | 'paused' | 'offline' | 'steering' | 'approvals' | 'approval-pending' | 'approval-failed' | 'untrusted' | 'one-peer' | 'three-peers' | 'settings' | 'narrow' | 'long-history' | 'mixed-setup' | 'pending-model' | 'model-error';
 
 function renderRoom(ctx: ComponentFixtureContext, state: RoomFixtureState): void {
-	const width = state === 'narrow' || state === 'narrow-drawer' ? 640 : 1160;
+	const width = state === 'narrow' ? 640 : 1160;
 	ctx.container.style.width = `${width}px`;
 	ctx.container.style.height = state === 'new' ? '1000px' : '780px';
 	ctx.container.style.display = 'flex';
@@ -42,10 +42,7 @@ function renderRoom(ctx: ComponentFixtureContext, state: RoomFixtureState): void
 	const service = new CollaborationFixtureService();
 	const storage = ctx.disposableStore.add(new InMemoryStorageService());
 	const customViews = ctx.disposableStore.add(new CustomViewService(new NullLogService(), storage));
-	const views = ctx.disposableStore.add(new CollaborationRoomViewService(customViews, storage));
-	if (state === 'collapsed') {
-		views.savePanelState({ visible: false, width: 360 });
-	}
+	const views = ctx.disposableStore.add(new CollaborationRoomViewService(customViews));
 	if (state === 'mixed-setup') {
 		views.saveCreationDraft({
 			title: 'Review the implementation', goal: 'Find defects and share evidence in the room', instructions: '',
@@ -151,8 +148,13 @@ function renderRoom(ctx: ComponentFixtureContext, state: RoomFixtureState): void
 	const node = ctx.disposableStore.add(instantiation.createInstance(CustomViewNode, collaborationRoomViewDescriptor));
 	ctx.container.appendChild(node.element);
 	node.layout(width, state === 'new' ? 1000 : 780);
-	if (state === 'narrow-drawer') {
-		ctx.container.querySelector<HTMLButtonElement>('.room-header button[aria-controls]')?.click();
+	if (state === 'settings') {
+		// Settings live in the Agents window side panel, so show them at that width instead of the room.
+		const panel = views.panelContent.get()!;
+		node.element.remove();
+		ctx.container.style.width = '340px';
+		ctx.container.appendChild(panel);
+		views.activeView.get()?.layoutPanel(340, 780);
 	}
 }
 
@@ -165,9 +167,8 @@ export default defineThemedFixtureGroup({ path: 'sessions/collaboration/' }, {
 	MixedModelsBeforeStart: defineComponentFixture({ render: ctx => renderRoom(ctx, 'mixed-setup') }),
 	PendingModelChange: defineComponentFixture({ render: ctx => renderRoom(ctx, 'pending-model') }),
 	ModelChangeError: defineComponentFixture({ render: ctx => renderRoom(ctx, 'model-error') }),
-	PanelCollapsed: defineComponentFixture({ render: ctx => renderRoom(ctx, 'collapsed') }),
 	NarrowConversation: defineComponentFixture({ render: ctx => renderRoom(ctx, 'narrow') }),
-	NarrowSettingsDrawer: defineComponentFixture({ render: ctx => renderRoom(ctx, 'narrow-drawer') }),
+	SidePanelSettings: defineComponentFixture({ render: ctx => renderRoom(ctx, 'settings') }),
 	LongConversation: defineComponentFixture({ render: ctx => renderRoom(ctx, 'long-history') }),
 	Paused: defineComponentFixture({ render: ctx => renderRoom(ctx, 'paused') }),
 	Disconnected: defineComponentFixture({ render: ctx => renderRoom(ctx, 'offline') }),

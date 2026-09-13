@@ -23,6 +23,7 @@ suite('Collaboration accessibility', () => {
 
 	class TestRoomView extends Disposable implements ICollaborationRoomView {
 		readonly element = $('div');
+		layoutPanel(): void { }
 		readonly input = $('textarea');
 		content = 'Room: Startup performance\nCopilot-1: Measuring activation\nYou: Keep the public API unchanged';
 		focusCount = 0;

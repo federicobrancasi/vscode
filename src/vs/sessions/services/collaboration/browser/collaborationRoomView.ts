@@ -8,7 +8,6 @@ import { IObservable, derived, observableValue } from '../../../../base/common/o
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { ICustomViewService } from '../../customView/browser/customViewService.js';
-import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { ModelSelection } from '../../../../platform/agentHost/common/state/sessionState.js';
 import { COLLABORATION_CUSTOM_VIEW_ID } from '../common/collaboration.js';
 
@@ -16,6 +15,8 @@ export { COLLABORATION_CUSTOM_VIEW_ID } from '../common/collaboration.js';
 
 /** The room is a primary conversation surface, not a session-grid slot. */
 export interface ICollaborationRoomView extends IDisposable {
+	/** Size the settings panel to the side panel hosting it. */
+	layoutPanel(width: number, height: number): void;
 	focus(): void;
 	captureFocus(): () => void;
 	getAccessibleContent(): string;
@@ -27,11 +28,6 @@ export interface ICollaborationRoomScrollState {
 	readonly followingLatest: boolean;
 	readonly anchorMessageId?: string;
 	readonly anchorOffset?: number;
-}
-
-export interface ICollaborationRoomPanelState {
-	readonly visible: boolean;
-	readonly width: number;
 }
 
 export interface ICollaborationRoomCreationDraft {
@@ -53,11 +49,12 @@ export interface ICollaborationRoomViewService {
 	readonly activeView: IObservable<ICollaborationRoomView | undefined>;
 	readonly scrollState: IObservable<ICollaborationRoomScrollState | undefined>;
 	readonly creationDraft: IObservable<ICollaborationRoomCreationDraft | undefined>;
-	readonly panelState: IObservable<ICollaborationRoomPanelState>;
+	/** The room's settings DOM, published so the Agents window side panel can host it. */
+	readonly panelContent: IObservable<HTMLElement | undefined>;
 	registerView(view: ICollaborationRoomView): IDisposable;
+	publishPanelContent(content: HTMLElement | undefined): IDisposable;
 	saveScrollState(state: ICollaborationRoomScrollState): void;
 	saveCreationDraft(draft: ICollaborationRoomCreationDraft | undefined): void;
-	savePanelState(state: ICollaborationRoomPanelState): void;
 	open(): void;
 	close(): void;
 }
@@ -70,18 +67,12 @@ export class CollaborationRoomViewService extends Disposable implements ICollabo
 	readonly activeView = derived(reader => this.visible.read(reader) ? this.view.read(reader) : undefined);
 	readonly scrollState = observableValue<ICollaborationRoomScrollState | undefined>(this, undefined);
 	readonly creationDraft = observableValue<ICollaborationRoomCreationDraft | undefined>(this, undefined);
-	readonly panelState;
+	readonly panelContent = observableValue<HTMLElement | undefined>(this, undefined);
 
 	constructor(
 		@ICustomViewService private readonly customViewService: ICustomViewService,
-		@IStorageService private readonly storageService: IStorageService,
 	) {
 		super();
-		const width = storageService.getNumber('collaboration.roomPanel.width', StorageScope.PROFILE, 360);
-		this.panelState = observableValue<ICollaborationRoomPanelState>(this, {
-			visible: storageService.getBoolean('collaboration.roomPanel.visible', StorageScope.PROFILE, true),
-			width: Number.isFinite(width) ? Math.max(300, Math.min(520, width)) : 360,
-		});
 	}
 
 	registerView(view: ICollaborationRoomView): IDisposable {
@@ -93,19 +84,21 @@ export class CollaborationRoomViewService extends Disposable implements ICollabo
 		});
 	}
 
+	publishPanelContent(content: HTMLElement | undefined): IDisposable {
+		this.panelContent.set(content, undefined);
+		return toDisposable(() => {
+			if (this.panelContent.get() === content) {
+				this.panelContent.set(undefined, undefined);
+			}
+		});
+	}
+
 	saveScrollState(state: ICollaborationRoomScrollState): void {
 		this.scrollState.set(state, undefined);
 	}
 
 	saveCreationDraft(draft: ICollaborationRoomCreationDraft | undefined): void {
 		this.creationDraft.set(draft, undefined);
-	}
-
-	savePanelState(state: ICollaborationRoomPanelState): void {
-		const width = Math.max(300, Math.min(520, state.width));
-		this.panelState.set({ visible: state.visible, width }, undefined);
-		this.storageService.store('collaboration.roomPanel.visible', state.visible, StorageScope.PROFILE, StorageTarget.USER);
-		this.storageService.store('collaboration.roomPanel.width', width, StorageScope.PROFILE, StorageTarget.USER);
 	}
 
 	open(): void {

@@ -273,19 +273,23 @@ addressed human request and evidence-linked findings.
 
 ## UI and accessibility
 
-The primary content is the multi-author conversation with a bottom composer.
-A room-owned right panel keeps its run controls and tab strip pinned above an
-independently scrolling body, so the tabs never scroll out of reach. It is
-organised as tabs: one per member, then the shared rules and configuration, then
-approvals. The tab strip is a real tablist with
-roving focus and arrow, Home and End navigation; pending approvals and member
-failures are badged so an inactive tab still reports that it needs attention.
-It carries the shared modern editor-tab classes that the Agents window composite
-bar also adopts, so room tabs match the rest of the window rather than inventing
-their own appearance. The panel is
-resizable, and collapsible, and becomes a drawer at narrow widths. Panel width
-and wide-layout visibility belong to the collaboration view-state service,
-not the selected peer's editor or the workbench's auxiliary bar.
+The room view holds the multi-author conversation with a bottom composer, and
+nothing else. Room settings live in the Agents window side panel, taking the
+place that Changes and Files hold in an ordinary session: opening a room brings
+Room Settings forward, and closing it restores whichever container was showing
+before. Because the workbench hosts the panel, its width, visibility and
+persistence are the auxiliary bar's, not the room's.
+
+The room still owns that DOM and publishes it through the collaboration
+view-state service; the side-panel pane only adopts it while a room is open, and
+hands it back on dispose. Inside, run controls and the tab strip stay pinned
+above an independently scrolling body, so the tabs never scroll out of reach.
+The tabs are one per member, then the shared rules and configuration, then
+approvals. The tab strip is a real tablist with roving focus and arrow, Home and
+End navigation; pending approvals and member failures are badged so an inactive
+tab still reports that it needs attention. It carries the shared modern
+editor-tab classes that the Agents window composite bar also adopts, so room tabs
+match the rest of the window rather than inventing their own appearance.
 
 A member's tab shows its model, state, and actual runtime activity;
 explicit work reports appear in the shared conversation without duplicate
@@ -301,8 +305,9 @@ approval choices remain authoritative, and required managed approvals remain
 one-time. Responses stay pending until the host acknowledges and applies them;
 rejection, disconnection, or timeout is visible and does not report success.
 Changing rooms or ending the turn invalidates stale approval controls.
-Collapsing the room panel does not dispose request cards or their drafts.
-The header's needs-attention action opens and focuses the pending requests.
+Hiding the side panel does not dispose request cards or their drafts.
+Room Settings in the room header, and the needs-attention action, both open the
+side panel and focus the pending request.
 
 Shared posts use the agent chat's own row structure and presentational classes,
 so a room post reads as a chat turn and the author accent identifies the speaker

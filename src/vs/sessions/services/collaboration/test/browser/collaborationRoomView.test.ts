@@ -25,9 +25,8 @@ suite('CollaborationRoomView', () => {
 
 	function setup() {
 		const customViews = disposables.add(new CustomViewService(new NullLogService(), disposables.add(new InMemoryStorageService())));
-		const storage = disposables.add(new InMemoryStorageService());
-		const service = disposables.add(new CollaborationRoomViewService(customViews, storage));
-		return { customViews, service, storage };
+		const service = disposables.add(new CollaborationRoomViewService(customViews));
+		return { customViews, service };
 	}
 
 	test('does not open before the desktop custom view is registered', () => {
@@ -49,6 +48,7 @@ suite('CollaborationRoomView', () => {
 			}
 			creations++;
 			reader.store.add(service.registerView({
+				layoutPanel: () => { },
 				focus: () => { focuses++; },
 				captureFocus: () => () => { focuses++; },
 				getAccessibleContent: () => 'Current room',
@@ -87,6 +87,7 @@ suite('CollaborationRoomView', () => {
 		const state = { roomId: 'room', scrollTop: 240, followingLatest: false };
 		service.saveScrollState(state);
 		const registration = service.registerView({
+			layoutPanel() { },
 			focus() { },
 			captureFocus: () => () => { },
 			getAccessibleContent: () => '',
@@ -111,10 +112,12 @@ suite('CollaborationRoomView', () => {
 		assert.strictEqual(service.creationDraft.get(), undefined);
 	});
 
-	test('room-owned panel preferences survive service recreation independently from other views', () => {
-		const { customViews, service, storage } = setup();
-		service.savePanelState({ visible: false, width: 420 });
-		const restored = disposables.add(new CollaborationRoomViewService(customViews, storage));
-		assert.deepStrictEqual(restored.panelState.get(), { visible: false, width: 420 });
+	test('publishing settings content hands it to the side panel and takes it back on dispose', () => {
+		const { service } = setup();
+		const content = document.createElement('div');
+		const published = service.publishPanelContent(content);
+		assert.strictEqual(service.panelContent.get(), content);
+		published.dispose();
+		assert.strictEqual(service.panelContent.get(), undefined);
 	});
 });

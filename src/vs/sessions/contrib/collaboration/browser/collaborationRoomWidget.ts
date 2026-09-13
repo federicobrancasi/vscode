@@ -27,6 +27,7 @@ import { IMarkdownRendererService } from '../../../../platform/markdown/browser/
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { AccessibilityVerbositySettingId } from '../../../../workbench/contrib/accessibility/browser/accessibilityConfiguration.js';
 import { IEditorService } from '../../../../workbench/services/editor/common/editorService.js';
+import { IViewsService } from '../../../../workbench/services/views/common/viewsService.js';
 import { ISessionsPartService } from '../../../services/sessions/browser/sessionsPartService.js';
 import { ISessionsService } from '../../../services/sessions/browser/sessionsService.js';
 import { isAgentHostProvider, LOCAL_AGENT_HOST_PROVIDER_ID } from '../../../common/agentHostSessionsProvider.js';
@@ -41,6 +42,7 @@ import { CollaborationConfigurationPicker } from './collaborationConfigurationPi
 import { CollaborationConversation } from './collaborationConversation.js';
 import { CollaborationHome } from './collaborationHome.js';
 import { CollaborationTabs } from './collaborationTabs.js';
+import { COLLABORATION_SETTINGS_CONTAINER_ID } from './collaborationSettingsView.js';
 import { CollaborationRoomLayout } from './collaborationRoomLayout.js';
 import { CollaborationModelCatalog, CollaborationModelPicker, getCollaborationMemberModelState } from './collaborationModelPicker.js';
 import { collaborationAuthorAccent } from './collaborationColors.js';
@@ -138,6 +140,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		@ISessionsService private readonly sessionsService: ISessionsService,
 		@ISessionsPartService private readonly sessionsPartService: ISessionsPartService,
 		@IEditorService private readonly editorService: IEditorService,
+		@IViewsService private readonly viewsService: IViewsService,
 		@IOpenerService private readonly openerService: IOpenerService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 	) {
@@ -157,15 +160,12 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.heading = headingContainer.appendChild($('h2'));
 		this.subtitle = headingContainer.appendChild($('.room-subtitle'));
 		this.layoutWidget = this._register(instantiationService.createInstance(CollaborationRoomLayout, this.element,
-			() => this.conversation?.layout(this.feed.clientWidth, this.feed.clientHeight),
-			visible => {
-				this.panelButton?.setAttribute('aria-expanded', String(visible));
-			}, () => this.panelButton.focus()));
+			() => this.conversation?.layout(this.feed.clientWidth, this.feed.clientHeight)));
 		this.runControls = this.layoutWidget.panelHeader.appendChild($('.room-run-controls-host'));
 		this.pauseButton = this.button(this.runControls, localize('room.pause', "Pause"), () => this.collaborationService.pauseRoom());
 		this.stopButton = this.button(this.runControls, localize('room.stop', "Stop All"), () => this.collaborationService.stopRoom());
-		this.attentionButton = this.button(this.runControls, localize('room.attention', "Needs Attention"), () => {
-			this.layoutWidget.focusPanel();
+		this.attentionButton = this.button(this.runControls, localize('room.attention', "Needs Attention"), async () => {
+			await this.revealSettings();
 			const failedMember = this.collaborationService.activeRoom.get()?.members.find(member => member.error || member.modelError || member.state === 'failed');
 			this.tabs.select(this.requestElements.size || !this.trustNotice.hidden || !failedMember ? APPROVALS_TAB : `member:${failedMember.id}`);
 			const target = [...this.requestElements.values()].map(widget => widget.getFocusTarget()).find(target => target);
@@ -184,28 +184,10 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				}
 			}
 		}, this._store, false);
-		this.panelButton = this.button(this.header, localize('room.panelTitle', "Room Settings"), () => {
-			const visible = !this.layoutWidget.panelVisible;
-			this.layoutWidget.setPanelVisible(visible);
-			if (visible) {
-				this.layoutWidget.focusPanel();
-			}
-		}, this._store, false);
+		// Settings live in the Agents window side panel, beside Changes and Files.
+		this.panelButton = this.button(this.header, localize('room.panelTitle', "Room Settings"), () => this.revealSettings(), this._store, false);
 		this.layoutWidget.panel.id = `collaboration-panel-${generateUuid()}`;
 		this.panelButton.setAttribute('aria-controls', this.layoutWidget.panel.id);
-		this.panelButton.setAttribute('aria-expanded', String(this.layoutWidget.panelVisible));
-		this.panelButton.setAttribute('aria-description', localize('room.resizePanelHint', "When the side panel is open, use Left and Right Arrow to resize it."));
-		this._register(addDisposableListener(this.panelButton, EventType.KEY_DOWN, event => {
-			if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || !['ArrowLeft', 'ArrowRight'].includes(event.key)) {
-				return;
-			}
-			const width = this.layoutWidget.resizePanel(event.key === 'ArrowLeft' ? 40 : -40);
-			if (width !== undefined) {
-				event.preventDefault();
-				event.stopPropagation();
-				status(localize('room.panelWidth', "Room settings width: {0} pixels.", width));
-			}
-		}));
 		this.modelCatalog = this._register(instantiationService.createInstance(CollaborationModelCatalog, collaborationService.models, error => {
 			this.localError.set(toErrorMessage(error), undefined);
 		}));
@@ -476,9 +458,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			// has nothing to offer until a room is open.
 			this.panelButton.hidden = !room;
 			this.layoutWidget.element.classList.toggle('room-no-panel', !room);
-			if (!room && this.layoutWidget.panelVisible) {
-				this.layoutWidget.setPanelVisible(false);
-			}
 			this.startButton.textContent = room?.state === 'created' ? localize('room.start', "Start") : localize('room.resume', "Resume");
 			this.startButton.hidden = !room || room.state === 'running' || room.state === 'stopping';
 			const canStart = !!room && ['created', 'idle', 'paused', 'stopped', 'interrupted'].includes(room.state);
@@ -950,6 +929,16 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		} else {
 			this.tabs.focusActive();
 		}
+	}
+
+	/** Brings the side panel forward so the room's settings are on screen and focused. */
+	private async revealSettings(): Promise<void> {
+		await this.viewsService.openViewContainer(COLLABORATION_SETTINGS_CONTAINER_ID, true);
+		this.layoutWidget.focusPanel();
+	}
+
+	layoutPanel(width: number, height: number): void {
+		this.layoutWidget.layoutPanel(width, height);
 	}
 
 	layout(width: number, height: number): void {

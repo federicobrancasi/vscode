@@ -7,7 +7,7 @@ import assert from 'assert';
 import { DeferredPromise, timeout } from '../../../../../base/common/async.js';
 import { Event as BaseEvent } from '../../../../../base/common/event.js';
 import { IMarkdownString } from '../../../../../base/common/htmlContent.js';
-import { toDisposable } from '../../../../../base/common/lifecycle.js';
+import { Disposable, IDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
 import { constObservable, observableValue, transaction } from '../../../../../base/common/observable.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
@@ -26,12 +26,13 @@ import { WorkbenchList } from '../../../../../platform/list/browser/listService.
 import { IMarkdownRendererService } from '../../../../../platform/markdown/browser/markdownRenderer.js';
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IEditorService } from '../../../../../workbench/services/editor/common/editorService.js';
+import { IViewsService } from '../../../../../workbench/services/views/common/viewsService.js';
 import { ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
 import { workbenchInstantiationService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
 import { IAgentHostSessionsProvider, LOCAL_AGENT_HOST_PROVIDER_ID } from '../../../../common/agentHostSessionsProvider.js';
 import { ISessionsPartService } from '../../../../services/sessions/browser/sessionsPartService.js';
 import { ISessionsService } from '../../../../services/sessions/browser/sessionsService.js';
-import { ICollaborationRoomCreationDraft, ICollaborationRoomPanelState, ICollaborationRoomScrollState, ICollaborationRoomViewService } from '../../../../services/collaboration/browser/collaborationRoomView.js';
+import { ICollaborationRoomCreationDraft, ICollaborationRoomScrollState, ICollaborationRoomViewService } from '../../../../services/collaboration/browser/collaborationRoomView.js';
 import { CollaborationRequestResponse, ICollaborationRequest, ICollaborationService, ICollaborationWorkspaceTrust } from '../../../../services/collaboration/common/collaboration.js';
 import { CollaborationDraft } from '../../../../services/collaboration/common/collaborationMentions.js';
 import { ISessionsProvidersService } from '../../../../services/sessions/browser/sessionsProvidersService.js';
@@ -127,10 +128,10 @@ suite('CollaborationRoomWidget', () => {
 			override readonly activeView = constObservable(undefined);
 			override readonly scrollState = observableValue<ICollaborationRoomScrollState | undefined>(this, undefined);
 			override readonly creationDraft = observableValue<ICollaborationRoomCreationDraft | undefined>(this, initialDraft);
-			override readonly panelState = observableValue<ICollaborationRoomPanelState>(this, { visible: true, width: 360 });
+			override readonly panelContent = observableValue<HTMLElement | undefined>(this, undefined);
 			override saveScrollState(state: ICollaborationRoomScrollState): void { this.scrollState.set(state, undefined); }
 			override saveCreationDraft(draft: ICollaborationRoomCreationDraft | undefined): void { this.creationDraft.set(draft, undefined); }
-			override savePanelState(state: ICollaborationRoomPanelState): void { this.panelState.set(state, undefined); }
+			override publishPanelContent(content: HTMLElement | undefined): IDisposable { this.panelContent.set(content, undefined); return Disposable.None; }
 			override close(): void { this.visible.set(false, undefined); }
 		}();
 		const instantiation = workbenchInstantiationService(undefined, disposables);
@@ -182,12 +183,20 @@ suite('CollaborationRoomWidget', () => {
 				}();
 			}
 		}());
+		const openedContainers: string[] = [];
+		instantiation.stub(IViewsService, new class extends mock<IViewsService>() {
+			override async openViewContainer(id: string) { openedContainers.push(id); return null; }
+		}());
 		const container = document.body.appendChild(document.createElement('div'));
 		container.style.width = '1100px';
 		container.style.height = '760px';
 		disposables.add(toDisposable(() => container.remove()));
 		const widget = disposables.add(instantiation.createInstance(CollaborationRoomWidget, container));
 		widget.layout(1100, 760);
+		// Stand in for the Agents window side panel, which adopts the settings the room publishes.
+		const panel = viewService.panelContent.get()!;
+		container.appendChild(panel);
+		widget.layoutPanel(360, 760);
 		const input = container.querySelector<HTMLTextAreaElement>('textarea[role="combobox"]')!;
 		const type = (text: string) => {
 			input.value = text;
@@ -214,7 +223,7 @@ suite('CollaborationRoomWidget', () => {
 			}
 			list.reveal(list.getFocus()[0], key === 'Home' ? 0 : 1);
 		};
-		return { widget, container, input, type, key, historyKey, getMessageList, draft, starts, created, opened, artifactFocused, provider, resolutions, selectedRooms, peerSession, peerChat, viewService, facade, sendModes, getSends: () => sends, getSessionFocuses: () => sessionFocuses };
+		return { widget, container, input, type, key, historyKey, getMessageList, draft, starts, created, opened, artifactFocused, provider, resolutions, selectedRooms, peerSession, peerChat, viewService, facade, sendModes, openedContainers, panel, getSends: () => sends, getSessionFocuses: () => sessionFocuses };
 	}
 
 	test('peer navigation resolves opaque identities through the owning provider', async () => {
@@ -504,7 +513,7 @@ suite('CollaborationRoomWidget', () => {
 	});
 
 	test('long message text wraps and reflows instead of inheriting the list row no-wrap style', () => {
-		const { container, facade, viewService } = setup('running', 1);
+		const { container, facade, widget } = setup('running', 1);
 		const message = facade.messages.get().messages[0];
 		facade.messages.set({
 			messages: [{ ...message, text: 'This is a long paragraph that must remain readable in the conversation. '.repeat(30) }],
@@ -515,10 +524,13 @@ suite('CollaborationRoomWidget', () => {
 		const range = document.createRange();
 		range.selectNodeContents(content);
 		const wrappedLines = range.getClientRects().length;
-		const height = row.offsetHeight;
-		viewService.savePanelState({ visible: false, width: 360 });
+		container.style.width = '520px';
+		widget.layout(520, 760);
+		const narrowHeight = row.offsetHeight;
+		container.style.width = '1100px';
+		widget.layout(1100, 760);
 		assert.ok(wrappedLines > 3, `Expected wrapped text, got ${wrappedLines} line boxes`);
-		assert.ok(row.offsetHeight < height, 'A wider conversation should reduce the wrapped message height');
+		assert.ok(row.offsetHeight < narrowHeight, 'A wider conversation should reduce the wrapped message height');
 	});
 
 	test('prepending scrollback preserves the visible message and its pixel offset', () => {
@@ -532,7 +544,6 @@ suite('CollaborationRoomWidget', () => {
 		const offset = list.scrollTop - list.getElementTop(list.firstVisibleIndex);
 		const earlier = Array.from({ length: 100 }, (_, index) => ({ ...initial[0], id: `message-${index + 1}`, sequence: index + 1 }));
 		facade.messages.set({ messages: [...earlier, ...initial], hasEarlier: false, hasLater: false }, undefined);
-		viewService.savePanelState({ visible: true, width: 420 });
 		assert.deepStrictEqual({
 			anchor: list.element(list.firstVisibleIndex),
 			offset: list.scrollTop - list.getElementTop(list.firstVisibleIndex),
@@ -553,53 +564,42 @@ suite('CollaborationRoomWidget', () => {
 		assert.strictEqual(loads, 1);
 	});
 
-	test('the conversation leads while settings and model menus live in a separate collapsible pane', () => {
-		const { container, viewService } = setup('running', 1);
+	test('the room shows only the conversation and publishes its settings to the side panel', () => {
+		const { container, panel } = setup('running', 1);
 		const main = container.querySelector<HTMLElement>('.room-main')!;
-		const panel = container.querySelector<HTMLElement>('.room-side-panel')!;
-		viewService.savePanelState({ visible: false, width: 380 });
 		assert.deepStrictEqual({
 			mainHasChat: !!main.querySelector('.room-feed'),
 			mainHasComposer: !!main.querySelector('.room-composer'),
 			mainHasRoster: !!main.querySelector('.room-roster'),
+			panelInRoom: container.querySelector('.room-layout')!.contains(panel),
 			panelHasRoster: !!panel.querySelector('.room-roster'),
 			modelPickers: panel.querySelectorAll('.room-roster .room-model-picker').length,
 			oldPaging: [...container.querySelectorAll('button')].some(button => ['Older Posts', 'Newer Posts'].includes(button.textContent ?? '')),
-			expanded: container.querySelector('button[aria-controls]')?.getAttribute('aria-expanded'),
-		}, { mainHasChat: true, mainHasComposer: true, mainHasRoster: false, panelHasRoster: true, modelPickers: 2, oldPaging: false, expanded: 'false' });
+		}, { mainHasChat: true, mainHasComposer: true, mainHasRoster: false, panelInRoom: false, panelHasRoster: true, modelPickers: 2, oldPaging: false });
 	});
 
-	test('a collapsed panel still exposes failed peers through the attention action', () => {
-		const { container, viewService, facade } = setup();
+	test('the attention action opens the side panel and focuses the failed peer', async () => {
+		const { container, panel, facade, openedContainers } = setup();
 		const room = facade.activeRoom.get()!;
 		facade.activeRoom.set({
 			...room, members: room.members.map((member, index) => index === 0 ? { ...member, state: 'failed', error: 'Could not prepare the worktree' } : member),
 		}, undefined);
-		viewService.savePanelState({ visible: false, width: 360 });
-		const attention = [...container.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent === 'Needs Attention (1)')!;
+		const attention = [...panel.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent === 'Needs Attention (1)')!;
 		attention.click();
+		await timeout(0);
 		assert.deepStrictEqual({
-			expanded: viewService.panelState.get().visible,
+			openedContainers,
 			focusedAction: document.activeElement?.getAttribute('aria-label'),
-		}, { expanded: true, focusedAction: 'Retry Copilot-1 within the current run limits' });
-	});
-
-	test('the room settings button provides keyboard resizing without stealing navigation shortcuts', () => {
-		const { container, viewService } = setup();
-		const toggle = container.querySelector<HTMLButtonElement>('button[aria-controls]')!;
-		const resize = new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true });
-		toggle.dispatchEvent(resize);
-		const navigation = new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true });
-		toggle.dispatchEvent(navigation);
-		assert.deepStrictEqual({
-			width: viewService.panelState.get().width,
-			resizeHandled: resize.defaultPrevented,
-			navigationHandled: navigation.defaultPrevented,
-		}, { width: 400, resizeHandled: true, navigationHandled: false });
+			settingsButtonInRoom: !!container.querySelector('.room-header button[aria-controls]'),
+		}, {
+			openedContainers: ['workbench.view.collaborationSettings'],
+			focusedAction: 'Retry Copilot-1 within the current run limits',
+			settingsButtonInRoom: true,
+		});
 	});
 
 	test('pending model failures remain visible and the attention action focuses the model without opening a peer', async () => {
-		const { container, facade, viewService, opened } = setup();
+		const { container, facade, opened } = setup();
 		const room = facade.activeRoom.get()!;
 		facade.activeRoom.set({
 			...room, members: room.members.map((member, index) => index === 0 ? {
@@ -607,8 +607,8 @@ suite('CollaborationRoomWidget', () => {
 			} : member),
 		}, undefined);
 		await timeout(0);
-		viewService.savePanelState({ visible: false, width: 360 });
 		[...container.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent === 'Needs Attention (1)')!.click();
+		await timeout(0);
 		assert.deepStrictEqual({
 			detail: container.querySelector('.room-roster .room-model-detail.error')?.textContent,
 			focus: document.activeElement?.getAttribute('aria-label'),
@@ -768,29 +768,26 @@ suite('CollaborationRoomWidget', () => {
 		}]);
 	});
 
-	test('approval drafts remain mounted when settings collapse and when the narrow drawer closes', () => {
-		const { container, facade, viewService, widget } = setup();
+	test('approval drafts survive resizing the room and Escape returns to the conversation', async () => {
+		const { container, facade, widget, panel } = setup();
 		facade.requests.set([{
 			...approval(), id: 'question',
 			payload: { kind: 'input', request: { id: 'name', questions: [{ id: 'name', kind: ChatInputQuestionKind.Text, message: 'Name', required: true }] } },
 		}], undefined);
 		const field = container.querySelector<HTMLInputElement>('.room-request input')!;
 		field.value = 'Keep my answer';
-		viewService.savePanelState({ visible: false, width: 360 });
-		const attention = [...container.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent?.startsWith('Needs Attention'))!;
-		attention.click();
+		[...panel.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent?.startsWith('Needs Attention'))!.click();
+		await timeout(0);
 		container.style.width = '640px';
 		widget.layout(640, 760);
-		attention.click();
+		widget.layoutPanel(280, 760);
 		field.focus();
 		field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-		const toggle = container.querySelector<HTMLButtonElement>('button[aria-controls]')!;
 		assert.deepStrictEqual({
 			sameField: container.querySelector('.room-request input') === field,
 			value: field.value,
-			expanded: toggle.getAttribute('aria-expanded'),
-			focusedToggle: document.activeElement === toggle,
-		}, { sameField: true, value: 'Keep my answer', expanded: 'false', focusedToggle: true });
+			focusedConversation: document.activeElement === container.querySelector('.room-main'),
+		}, { sameField: true, value: 'Keep my answer', focusedConversation: true });
 	});
 
 	test('inline forms submit typed numeric, boolean, and selected answers', async () => {

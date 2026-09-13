@@ -25,6 +25,12 @@ import { CollaborationAvailableContext, CollaborationEnabledSettingId, Collabora
 import { ICustomViewService } from '../../../services/customView/browser/customViewService.js';
 import { CollaborationArtifactProvider } from './collaborationArtifactProvider.js';
 import { collaborationRoomViewDescriptor } from './collaborationRoomView.js';
+import { COLLABORATION_SETTINGS_CONTAINER_ID, COLLABORATION_SETTINGS_VIEW_ID, CollaborationSettingsViewPane, CollaborationSettingsViewPaneContainer } from './collaborationSettingsView.js';
+import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
+import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
+import { Extensions as ViewContainerExtensions, IViewContainersRegistry, IViewsRegistry, ViewContainerLocation, WindowEnablement } from '../../../../workbench/common/views.js';
+import { IPaneCompositePartService } from '../../../../workbench/services/panecomposite/browser/panecomposite.js';
+import { IViewsService } from '../../../../workbench/services/views/common/viewsService.js';
 
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'chat',
@@ -69,9 +75,75 @@ class CollaborationContribution extends Disposable {
 			}
 		}));
 		this._register(autorun(reader => visible.set(roomViewService.visible.read(reader))));
+		this._register(instantiationService.createInstance(CollaborationSidePanelSwitcher));
 		this._register(autorun(reader => supported.set(collaborationService.supported.read(reader))));
 		this._register(autorun(reader => selected.set(!!collaborationService.activeRoomId.read(reader))));
 		this._register({ dispose: () => { available.reset(); supported.reset(); visible.reset(); selected.reset(); } });
+	}
+}
+
+const collaborationSettingsIcon = registerIcon('collaboration-settings-icon', Codicon.settingsGear, localize('collaborationSettingsIcon', "View icon for the collaboration room settings."));
+
+const collaborationSettingsContainer = Registry.as<IViewContainersRegistry>(ViewContainerExtensions.ViewContainersRegistry).registerViewContainer({
+	id: COLLABORATION_SETTINGS_CONTAINER_ID,
+	title: localize2('room.settingsContainer', "Room Settings"),
+	icon: collaborationSettingsIcon,
+	order: 30,
+	ctorDescriptor: new SyncDescriptor(CollaborationSettingsViewPaneContainer),
+	storageId: COLLABORATION_SETTINGS_CONTAINER_ID,
+	hideIfEmpty: true,
+	windowEnablement: WindowEnablement.Sessions,
+}, ViewContainerLocation.AuxiliaryBar);
+
+Registry.as<IViewsRegistry>(ViewContainerExtensions.ViewsRegistry).registerViews([{
+	id: COLLABORATION_SETTINGS_VIEW_ID,
+	name: localize2('room.settingsContainer', "Room Settings"),
+	ctorDescriptor: new SyncDescriptor(CollaborationSettingsViewPane),
+	canToggleVisibility: false,
+	canMoveView: false,
+	containerIcon: collaborationSettingsIcon,
+	when: CollaborationRoomVisibleContext,
+}], collaborationSettingsContainer);
+
+/**
+ * Keeps the Agents window side panel in step with the room: room settings while a
+ * collaboration room is open, and whatever the user had before (Changes, Files) once
+ * it closes.
+ */
+class CollaborationSidePanelSwitcher extends Disposable {
+	private restoreTo: string | undefined;
+
+	constructor(
+		@ICollaborationRoomViewService roomViewService: ICollaborationRoomViewService,
+		@IViewsService private readonly viewsService: IViewsService,
+		@IPaneCompositePartService private readonly paneCompositeService: IPaneCompositePartService,
+	) {
+		super();
+		this._register(autorun(reader => {
+			if (roomViewService.visible.read(reader)) {
+				this.enterRoom();
+			} else {
+				this.leaveRoom();
+			}
+		}));
+	}
+
+	private enterRoom(): void {
+		const active = this.paneCompositeService.getActivePaneComposite(ViewContainerLocation.AuxiliaryBar)?.getId();
+		if (active === COLLABORATION_SETTINGS_CONTAINER_ID) {
+			return;
+		}
+		this.restoreTo = active;
+		this.viewsService.openViewContainer(COLLABORATION_SETTINGS_CONTAINER_ID, false);
+	}
+
+	private leaveRoom(): void {
+		const restoreTo = this.restoreTo;
+		this.restoreTo = undefined;
+		if (!restoreTo || this.paneCompositeService.getActivePaneComposite(ViewContainerLocation.AuxiliaryBar)?.getId() !== COLLABORATION_SETTINGS_CONTAINER_ID) {
+			return;
+		}
+		this.viewsService.openViewContainer(restoreTo, false);
 	}
 }
 

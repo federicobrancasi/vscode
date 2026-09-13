@@ -57,11 +57,9 @@
 	overflow: hidden;
 }
 
-.collaboration-room .room-side-panel {
+.collaboration-room.room-side-panel {
 	box-sizing: border-box;
-	overflow: hidden;
-	border-left: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
-	background: var(--vscode-sideBar-background);
+	background: var(--vscode-sideBar-background, var(--session-view-background));
 }
 
 .collaboration-room .room-panel-content {
@@ -69,19 +67,6 @@
 	flex-direction: column;
 	gap: var(--vscode-spacing-size200);
 	padding: var(--vscode-spacing-size160);
-}
-
-.collaboration-room .room-layout-narrow > .room-panel-host {
-	position: absolute;
-	top: 0;
-	right: 0;
-	z-index: 10;
-	box-shadow: var(--vscode-shadow-lg);
-}
-
-.hc-black .collaboration-room .room-layout-narrow > .room-panel-host,
-.hc-light .collaboration-room .room-layout-narrow > .room-panel-host {
-	box-shadow: none;
 }
 
 .collaboration-room .room-header,
