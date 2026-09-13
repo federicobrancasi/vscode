@@ -217,26 +217,6 @@ suite('CollaborationRoomWidget', () => {
 		return { widget, container, input, type, key, historyKey, getMessageList, draft, starts, created, opened, artifactFocused, provider, resolutions, selectedRooms, peerSession, peerChat, viewService, facade, sendModes, getSends: () => sends, getSessionFocuses: () => sessionFocuses };
 	}
 
-	test('Agent Collab home exposes recent rooms and creation without transcript rows', () => {
-		const { container, widget, facade, selectedRooms } = setup('created', 0, true);
-		const recent = container.querySelector<HTMLElement>('.room-home-recent-item')!;
-		assert.strictEqual(recent.querySelector('.room-home-recent-title')!.textContent, 'Peer room');
-		assert.strictEqual(container.querySelector<HTMLElement>('.room-home')!.hidden, false);
-		assert.strictEqual(container.querySelectorAll('.room-message').length, 0);
-		assert.ok(widget.getAccessibleContent().includes('Saved room: Peer room.'));
-		recent.click();
-		assert.deepStrictEqual(selectedRooms, ['room']);
-		assert.strictEqual(facade.activeRoomId.get(), 'room');
-	});
-
-	test('recent room status updates do not rebuild the focused room button', () => {
-		const { container, facade } = setup('created', 0, true);
-		const recent = container.querySelector<HTMLElement>('.room-home-recent-item')!;
-		recent.focus();
-		facade.rooms.set(facade.rooms.get().map(room => ({ ...room, state: 'paused' as const })), undefined);
-		assert.strictEqual(container.querySelector<HTMLElement>('.room-home-recent-title')!.textContent, 'Peer room');
-	});
-
 	test('peer navigation resolves opaque identities through the owning provider', async () => {
 		const { container, opened, resolutions, peerSession, peerChat } = setup();
 		container.querySelector<HTMLButtonElement>('.room-member-heading button')!.click();
@@ -284,6 +264,15 @@ suite('CollaborationRoomWidget', () => {
 		assert.strictEqual(second.input.value, '');
 		first.draft.update('A later edit', 'post-1');
 		assert.strictEqual(second.input.value, 'A later edit');
+	});
+
+	test('the home screen shows the creation card without transcript rows', () => {
+		const { container, widget } = setup('created', 0, true);
+		assert.deepStrictEqual({
+			home: container.querySelector<HTMLElement>('.room-home')!.hidden,
+			messages: container.querySelectorAll('.room-message').length,
+			listsSavedRooms: widget.getAccessibleContent().includes('Saved room: Peer room.'),
+		}, { home: false, messages: 0, listsSavedRooms: true });
 	});
 
 	test('returning to a new-room form does not require a saved scroll position', () => {

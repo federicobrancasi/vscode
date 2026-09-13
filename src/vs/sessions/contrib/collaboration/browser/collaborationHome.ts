@@ -7,11 +7,11 @@ import { $ } from '../../../../base/browser/dom.js';
 import { Button } from '../../../../base/browser/ui/button/button.js';
 import { InputBox } from '../../../../base/browser/ui/inputbox/inputBox.js';
 import { SelectBox } from '../../../../base/browser/ui/selectBox/selectBox.js';
-import { Disposable, DisposableMap, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableMap } from '../../../../base/common/lifecycle.js';
 import { autorun, observableValue } from '../../../../base/common/observable.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
-import { IAgentHostRoom, IAgentHostRoomCreateOptions, MAX_ROOM_WORKERS } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoomCreateOptions, MAX_ROOM_WORKERS } from '../../../../platform/agentHost/common/agentHostRooms.js';
 import { ModelSelection } from '../../../../platform/agentHost/common/state/sessionState.js';
 import { IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
@@ -35,7 +35,6 @@ export interface ICollaborationHomeDelegate {
 	browseForFolder(current: URI | undefined): Promise<URI | undefined>;
 	create(options: IAgentHostRoomCreateOptions): Promise<void>;
 	open(roomId: string): Promise<void>;
-	describeState(room: IAgentHostRoom): string;
 	readDraft(): ICollaborationHomeDraft | undefined;
 	saveDraft(draft: ICollaborationHomeDraft | undefined): void;
 }
@@ -56,11 +55,8 @@ export class CollaborationHome extends Disposable {
 	private readonly countSelect: SelectBox;
 	private readonly createButton: Button;
 	private readonly modelsContainer: HTMLElement;
-	private readonly recentSection: HTMLElement;
-	private readonly recentList: HTMLElement;
 	private readonly errorElement: HTMLElement;
 	private readonly pickers = this._register(new DisposableMap<number, CollaborationModelPicker>());
-	private readonly recentStore = this._register(new DisposableStore());
 	private folder: URI | undefined;
 	private memberModels: (ModelSelection | undefined)[] = [];
 
@@ -73,8 +69,7 @@ export class CollaborationHome extends Disposable {
 	) {
 		super();
 		this.element = parent.appendChild($('.room-home'));
-		const columns = this.element.appendChild($('.room-home-columns'));
-		const card = columns.appendChild($('.room-home-card'));
+		const card = this.element.appendChild($('.room-home-card'));
 		card.appendChild($('h1.room-home-title')).textContent = localize('room.homeTitle', "Agent Collab");
 
 		this.goalInput = this._register(new InputBox(this.field(card, localize('room.homeGoal', "Goal")), contextViewService, {
@@ -126,10 +121,6 @@ export class CollaborationHome extends Disposable {
 		this.createButton.label = localize('room.homeCreate', "Create and Start");
 		this._register(this.createButton.onDidClick(() => void this.create()));
 
-		this.recentSection = columns.appendChild($('section.room-home-recent'));
-		this.recentSection.appendChild($('h2')).textContent = localize('room.homeRecent', "Your rooms");
-		this.recentList = this.recentSection.appendChild($('ul'));
-		this.recentList.setAttribute('aria-label', localize('room.homeRecentLabel', "Recent collaboration rooms"));
 
 		for (const input of [this.goalInput, this.instructionsInput, this.baseInput]) {
 			this._register(input.onDidChange(() => this.save()));
@@ -191,25 +182,6 @@ export class CollaborationHome extends Disposable {
 				});
 			picker.state.set({ selection: this.memberModels[index], enabled: true }, undefined);
 			this.pickers.set(index, picker);
-		}
-	}
-
-	setRooms(rooms: readonly IAgentHostRoom[]): void {
-		this.recentStore.clear();
-		this.recentList.textContent = '';
-		this.recentSection.hidden = !rooms.length;
-		this.element.classList.toggle('has-recent', rooms.length > 0);
-		for (const room of rooms) {
-			const item = this.recentList.appendChild($('li'));
-			const open = this.recentStore.add(new Button(item, { ...defaultButtonStyles, secondary: true, title: room.title }));
-			open.element.classList.add('room-home-recent-item');
-			open.element.textContent = '';
-			const text = open.element.appendChild($('.room-home-recent-text'));
-			text.appendChild($('span.room-home-recent-title')).textContent = room.title;
-			text.appendChild($('span.room-home-recent-detail')).textContent = localize(
-				'room.homeRecentDetail', "{0} agents · {1}", room.members.length, this.delegate.describeState(room));
-			open.element.setAttribute('aria-label', localize('room.homeOpenRecent', "Open {0}, {1} agents, {2}", room.title, room.members.length, this.delegate.describeState(room)));
-			this.recentStore.add(open.onDidClick(() => void this.delegate.open(room.id)));
 		}
 	}
 

@@ -279,7 +279,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			browseForFolder: current => this.browseForFolder(current),
 			create: options => this.createRoom(options),
 			open: roomId => this.perform(() => this.collaborationService.selectRoom(roomId)),
-			describeState: room => roomStateLabel(room.state),
 			readDraft: () => {
 				const draft = this.roomViewService.creationDraft.get();
 				return {
@@ -429,7 +428,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				}
 			}
 			this.roomPicker.value = selected ?? '';
-			this.home.setRooms(rooms);
 		}));
 		this._register(autorun(reader => {
 			const id = this.collaborationService.activeRoomId.read(reader);
