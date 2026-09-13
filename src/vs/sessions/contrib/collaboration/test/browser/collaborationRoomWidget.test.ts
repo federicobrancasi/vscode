@@ -673,6 +673,44 @@ suite('CollaborationRoomWidget', () => {
 		}, { repeatedReport: false, distinctAuthors: 2 });
 	});
 
+	test('the panel gives every agent its own tab, plus rules and approvals', () => {
+		const { container, facade } = setup('running', 1);
+		const labels = () => [...container.querySelectorAll<HTMLElement>('.room-tab')].map(tab => tab.textContent);
+		const visibleRoster = () => [...container.querySelectorAll<HTMLElement>('.room-member')].filter(member => !member.hidden).length;
+		const before = { labels: labels(), roster: visibleRoster() };
+		facade.requests.set([approval()], undefined);
+		const approvals = [...container.querySelectorAll<HTMLElement>('.room-tab')].find(tab => tab.textContent?.startsWith('Approvals'))!;
+		approvals.click();
+		assert.deepStrictEqual({
+			before,
+			badged: labels().filter(label => label?.includes('1')).length,
+			selected: approvals.getAttribute('aria-selected'),
+			rosterHiddenOnApprovals: visibleRoster(),
+			approvalsVisible: !container.querySelector<HTMLElement>('.room-attention')!.hidden,
+		}, {
+			before: { labels: ['Copilot-1', 'Copilot-2', 'Rules', 'Approvals'], roster: 1 },
+			badged: 2, selected: 'true', rosterHiddenOnApprovals: 0, approvalsVisible: true,
+		});
+	});
+
+	test('arrow keys move between panel tabs without leaving the tablist', () => {
+		const { container } = setup('running', 1);
+		const tabs = [...container.querySelectorAll<HTMLElement>('.room-tab')];
+		tabs[0].focus();
+		container.querySelector<HTMLElement>('.room-tabs')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+		const afterRight = document.activeElement;
+		container.querySelector<HTMLElement>('.room-tabs')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+		assert.deepStrictEqual({
+			role: container.querySelector('.room-tabs')!.getAttribute('role'),
+			right: afterRight === tabs[1], end: document.activeElement === tabs[tabs.length - 1],
+			roving: tabs[0].tabIndex,
+		}, { role: 'tablist', right: true, end: true, roving: -1 });
+	});
+
+	function selectTab(container: HTMLElement, label: string): void {
+		[...container.querySelectorAll<HTMLElement>('.room-tab')].find(tab => tab.textContent?.startsWith(label))!.click();
+	}
+
 	function approval(): ICollaborationRequest {
 		return {
 			id: 'approval', version: 1, roomId: 'room', memberId: 'member-1', memberName: 'Copilot-1',
@@ -730,6 +768,7 @@ suite('CollaborationRoomWidget', () => {
 			},
 		};
 		facade.requests.set([request], undefined);
+		selectTab(container, 'Approvals');
 		const field = container.querySelector<HTMLInputElement>('.room-request input')!;
 		field.value = 'report.txt';
 		field.focus();

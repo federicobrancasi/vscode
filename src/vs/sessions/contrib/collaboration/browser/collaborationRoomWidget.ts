@@ -40,9 +40,13 @@ import { CollaborationRequestWidget } from './collaborationRequestWidget.js';
 import { CollaborationConfigurationPicker } from './collaborationConfigurationPicker.js';
 import { CollaborationConversation } from './collaborationConversation.js';
 import { CollaborationHome } from './collaborationHome.js';
+import { CollaborationTabs } from './collaborationTabs.js';
 import { CollaborationRoomLayout } from './collaborationRoomLayout.js';
 import { CollaborationModelCatalog, CollaborationModelPicker, getCollaborationMemberModelState } from './collaborationModelPicker.js';
 import { collaborationAuthorAccent } from './collaborationColors.js';
+
+const RULES_TAB = 'rules';
+const APPROVALS_TAB = 'approvals';
 
 const unsupportedMemberModelsMessage = localize('room.memberModelsUnavailable', "Reconnect or update the local agent host to choose a model for each peer.");
 
@@ -92,6 +96,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private readonly cancelReply: HTMLButtonElement;
 	private readonly suggestions: HTMLElement;
 	private readonly home: CollaborationHome;
+	private readonly tabs: CollaborationTabs;
+	private readonly agentsPanel: HTMLElement;
+	private readonly rulesPanel: HTMLElement;
 	private readonly runForm: HTMLFormElement;
 	private readonly turnsInput: HTMLInputElement;
 	private readonly deadlineInput: HTMLInputElement;
@@ -178,6 +185,8 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.stopButton = this.button(this.header, localize('room.stop', "Stop All"), () => this.collaborationService.stopRoom());
 		this.attentionButton = this.button(this.header, localize('room.attention', "Needs Attention"), () => {
 			this.layoutWidget.focusPanel();
+			const failedMember = this.collaborationService.activeRoom.get()?.members.find(member => member.error || member.modelError || member.state === 'failed');
+			this.tabs.select(this.requestElements.size || !this.trustNotice.hidden || !failedMember ? APPROVALS_TAB : `member:${failedMember.id}`);
 			const target = [...this.requestElements.values()].map(widget => widget.getFocusTarget()).find(target => target);
 			if (target) {
 				target.scrollIntoView({ block: 'nearest' });
@@ -219,17 +228,23 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.modelCatalog = this._register(instantiationService.createInstance(CollaborationModelCatalog, collaborationService.models, error => {
 			this.localError.set(toErrorMessage(error), undefined);
 		}));
-		this.roster = this.layoutWidget.panelContent.appendChild($('.room-roster'));
+		this.tabs = this._register(new CollaborationTabs(this.layoutWidget.panelContent, () => this.updateTabPanels()));
+		const tabContent = this.layoutWidget.panelContent.appendChild($('.room-tab-content'));
+		this.agentsPanel = tabContent.appendChild($('.room-tab-panel'));
+		this.roster = this.agentsPanel.appendChild($('.room-roster'));
 		this.roster.setAttribute('role', 'list');
 		this.roster.setAttribute('aria-label', localize('room.participants', "Copilot peers and current activity"));
-		this._register(instantiationService.createInstance(CollaborationConfigurationPicker, this.layoutWidget.panelContent, error => {
+		this.rulesPanel = tabContent.appendChild($('.room-tab-panel'));
+		this._register(instantiationService.createInstance(CollaborationConfigurationPicker, this.rulesPanel, error => {
 			if (!isCancellationError(error)) {
 				this.localError.set(toErrorMessage(error), undefined);
 			}
 		}));
-		this.goalDetails = this.layoutWidget.panelContent.appendChild($('details.room-goal')) as HTMLDetailsElement;
+		this.goalDetails = this.rulesPanel.appendChild($('details.room-goal')) as HTMLDetailsElement;
+		this.goalDetails.open = true;
 		this.goalDetails.appendChild($('summary')).textContent = localize('room.goalAndRules', "Shared goal, rules, and baseline");
 		this.goalContent = this.goalDetails.appendChild($('p'));
+		this.tabs.registerPanel(RULES_TAB, this.rulesPanel);
 
 		this.notice = this.layoutWidget.main.appendChild($('.room-notice'));
 		this.notice.setAttribute('role', 'status');
@@ -243,7 +258,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				await this.collaborationService.refresh();
 			}
 		});
-		this.attention = this.layoutWidget.panelContent.appendChild($('.room-attention'));
+		this.attention = tabContent.appendChild($('.room-tab-panel.room-attention'));
 		this.trustNotice = this.attention.appendChild($('section.room-trust'));
 		this.trustMessage = this.trustNotice.appendChild($('p'));
 		this.trustMessage.setAttribute('role', 'status');
@@ -256,6 +271,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.requestsSection = this.attention.appendChild($('section.room-requests'));
 		this.requestsSection.appendChild($('h3')).textContent = localize('room.requestsHeading', "Approvals and questions");
 		this.requestsList = this.requestsSection.appendChild($('.room-request-list'));
+		this.tabs.registerPanel(APPROVALS_TAB, this.attention);
 
 		this.home = this._register(instantiationService.createInstance(CollaborationHome, this.layoutWidget.main, this.modelCatalog, {
 			isRepository: folderUri => this.collaborationService.isRepository(folderUri),
@@ -278,7 +294,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			}),
 		}));
 
-		this.runForm = this.layoutWidget.panelContent.appendChild($('form.room-run-controls')) as HTMLFormElement;
+		this.runForm = this.rulesPanel.appendChild($('form.room-run-controls')) as HTMLFormElement;
 		const limits = this.runForm.appendChild($('details.room-run-limits'));
 		limits.appendChild($('summary')).textContent = localize('room.optionalLimits', "Optional run limits");
 		this.turnsInput = this.numberField(limits, localize('room.turns', "Maximum total turns for this run"), 10000);
@@ -451,7 +467,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.trustDirectories.textContent = [trust.repositoryUri ?? room?.repositoryUri, ...(trust.worktreeUris ?? room?.members.flatMap(member => member.worktreeUri ? [member.worktreeUri] : []) ?? [])].filter(Boolean).join('\n');
 			this.trustButton.disabled = !available || trust.state === 'checking' || trust.state === 'requesting';
 			this.requestsSection.hidden = !requests.length;
-			this.attention.hidden = this.trustNotice.hidden && this.requestsSection.hidden;
+			this.updateTabs(room, requests);
 			const count = requests.length + (this.trustNotice.hidden ? 0 : 1) + (room?.members.filter(member => member.error || member.modelError || member.state === 'failed').length ?? 0);
 			this.attentionButton.hidden = !count;
 			this.attentionButton.textContent = localize('room.attentionCount', "Needs Attention ({0})", count);
@@ -639,6 +655,34 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		}
 	}
 
+	/** One tab per agent, then the shared rules and anything awaiting a decision. */
+	private updateTabs(room: IAgentHostRoom | undefined, requests: readonly ICollaborationRequest[]): void {
+		if (!room) {
+			this.tabs.element.hidden = true;
+			return;
+		}
+		this.tabs.element.hidden = false;
+		const attention = requests.length + (this.trustNotice.hidden ? 0 : 1);
+		this.tabs.setTabs([
+			...room.members.map(member => ({
+				id: `member:${member.id}`, label: member.name, accent: collaborationAuthorAccent(room, member.id),
+				badge: requests.filter(request => request.memberId === member.id).length || undefined,
+			})),
+			{ id: RULES_TAB, label: localize('room.tabRules', "Rules") },
+			{ id: APPROVALS_TAB, label: localize('room.tabApprovals', "Approvals"), badge: attention || undefined },
+		]);
+		this.updateTabPanels();
+	}
+
+	private updateTabPanels(): void {
+		const active = this.tabs.activeTab;
+		const member = active?.startsWith('member:') ? active.slice('member:'.length) : undefined;
+		this.agentsPanel.hidden = !member;
+		for (const [id, elements] of this.memberElements) {
+			elements.element.hidden = id !== member;
+		}
+	}
+
 	private renderRoster(room: IAgentHostRoom, disabled: boolean, models: readonly SessionModelInfo[]): void {
 		for (const member of room.members) {
 			let elements = this.memberElements.get(member.id);
@@ -688,6 +732,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			elements.retry.disabled = disabled || !['running', 'idle'].includes(room.state);
 			elements.retry.setAttribute('aria-label', localize('room.retryPeerLabel', "Retry {0} within the current run limits", member.name));
 		}
+		this.updateTabPanels();
 	}
 
 	private renderRequests(requests: readonly ICollaborationRequest[], disabled: boolean): void {

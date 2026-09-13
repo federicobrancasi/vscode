@@ -601,3 +601,72 @@
 .collaboration-room .room-header.room-header-empty {
 	padding-bottom: 0;
 }
+
+/* Panel tabs: one per agent, then the shared rules and pending decisions. */
+
+.collaboration-room .room-tabs {
+	display: flex;
+	align-items: stretch;
+	gap: var(--vscode-spacing-size20);
+	overflow-x: auto;
+	overflow-y: hidden;
+	scrollbar-width: none;
+	border-bottom: var(--vscode-strokeThickness) solid var(--vscode-widget-border, transparent);
+	flex-shrink: 0;
+}
+
+.collaboration-room .room-tabs::-webkit-scrollbar {
+	display: none;
+}
+
+.collaboration-room .room-tab {
+	display: flex;
+	align-items: center;
+	gap: var(--vscode-spacing-size60);
+	flex-shrink: 0;
+	padding: var(--vscode-spacing-size80) var(--vscode-spacing-size120);
+	border: none;
+	border-bottom: 2px solid transparent;
+	border-radius: 0;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	font: inherit;
+	white-space: nowrap;
+}
+
+.collaboration-room .room-tab:hover:not(.active) {
+	color: var(--vscode-foreground);
+}
+
+.collaboration-room .room-tab.active {
+	color: var(--vscode-foreground);
+	border-bottom-color: currentColor;
+}
+
+.collaboration-room .room-tab-badge {
+	min-width: 16px;
+	padding: 0 var(--vscode-spacing-size40);
+	border-radius: var(--vscode-cornerRadius-circle);
+	background: var(--vscode-activityBarBadge-background);
+	color: var(--vscode-activityBarBadge-foreground);
+	font-size: var(--vscode-fontSize-label2);
+	text-align: center;
+}
+
+.collaboration-room .room-tab-content {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.collaboration-room .room-tab-panel {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size200);
+	padding-top: var(--vscode-spacing-size160);
+}
+
+.collaboration-room .room-tab-panel[hidden] {
+	display: none;
+}
