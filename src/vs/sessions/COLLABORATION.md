@@ -13,10 +13,19 @@ Copilot agent host and `chat.agentHost.collaboration.enabled`, then open
 **Agents: Open Collaboration Room** is also available from the Command Palette.
 AI features must be enabled and a compatible local host available.
 
-Use **Room Settings** to choose a local Git repository, committed baseline,
-shared goal/rules, and one to ten peers. Each numbered peer has its own model
-menu before creation. Draft model choices stay with their slots when the peer
-count changes or the view closes. **Create** records the room; it does not by itself authorize
+The room's home screen asks for a shared goal, a working folder, and one to ten
+peers with a model menu for each. Shared rules, the committed baseline and
+optional run limits are under **Advanced**; the room title is taken from the
+goal. Draft model choices stay with their slots when the peer count changes or
+the view closes. Existing rooms are listed beside the form, so starting another
+room never requires finding a control inside a panel.
+
+Peers work in Git worktrees, so a room needs a repository. A plain folder is
+accepted: the room offers to prepare it, showing the exact path, and only then
+runs `git init` with a baseline commit. It is never initialized silently, and a
+folder that is already inside a repository resolves to that repository.
+
+**Create** records the room; it does not by itself authorize
 model execution. **Start** runs the team. **Send** requests a response from every
 peer when no `@mentions` are present, or only the mentioned peers otherwise.
 Finished and stopped peers wake for the new message without a separate Resume.
@@ -42,12 +51,16 @@ running model. Model-application failures remain in `modelError`. An omitted
 creation slot retains the legacy/provider fallback; an explicit reset of an
 existing member requires Auto to be available in the current catalog.
 
-Room peers default to **Autopilot** with manual permissions. The **All peers**
+New rooms start in **Autopilot** with assisted approvals, so ordinary tool calls
+are not interrupted while elevated decisions still reach the human. Existing and
+legacy rooms keep whatever level they already had; reopening a room never
+silently escalates it. The **All peers**
 mode and permissions menu changes the whole room; individual peer choices
 remain valid as well. Explicit selections are persisted and retained through
 Stop, Resume, and application restart. Autopilot governs the agent's autonomous
 work loop; Allow all is a separate approval choice, and neither overrides
-mandatory managed approvals or sandbox policy.
+mandatory managed approvals or sandbox policy. A level the provider or policy
+refuses is clamped when resolved, rather than failing the room.
 
 The host resolves and pins the selected branch, tag or commit using its
 sanitized Git environment.
@@ -189,6 +202,18 @@ admission checks. Runs have no implicit turn cap or deadline; optional limits
 must be finite positive values when supplied. An ordinary SDK turn ending
 does not mean the shared goal has been solved.
 
+A **continuous** room keeps admitting turns for an idle member that proposed no
+next step, because an open-ended goal is never finished by the model deciding it
+is. New rooms are continuous; existing and legacy rooms are not, and the setting
+is togglable. Continuous rooms still stop at Pause, Stop, an optional turn cap or
+deadline, and a failed or blocked member is not rewoken. This is a scheduling
+rule, not a promise of useful work.
+
+Peer artifacts are surfaced to a member on a turn interval rather than every
+turn. A shared board that every member reads continuously collapses the
+diversity that having several members is meant to buy; the interval is an
+advisory island model, since the room tools remain available to a running turn.
+
 - **Resume** retries failed or stopped peers in a fresh run without changing
   their sessions or worktrees. Resuming while paused turns are still active
   instead keeps their existing run and limits, and releases held guidance.
@@ -248,15 +273,18 @@ addressed human request and evidence-linked findings.
 ## UI and accessibility
 
 The primary content is the multi-author conversation with a bottom composer.
-A room-owned right panel contains the roster, independent model menus,
-configuration, creation fields, and approvals. It is independently scrollable,
+A room-owned right panel is organised as tabs: one per member, then the shared
+rules and configuration, then approvals. The tab strip is a real tablist with
+roving focus and arrow, Home and End navigation; pending approvals and member
+failures are badged so an inactive tab still reports that it needs attention.
+The panel is independently scrollable,
 resizable, and collapsible, and becomes a drawer at narrow widths. Panel width
 and wide-layout visibility belong to the collaboration view-state service,
 not the selected peer's editor or the workbench's auxiliary bar.
 
-The compact roster shows each member's model, state, and actual runtime activity;
+A member's tab shows its model, state, and actual runtime activity;
 explicit work reports appear in the shared conversation without duplicate
-previews or expanded report blocks in the roster. Author accents are stable
+previews or expanded report blocks. Author accents are stable
 within the room, theme-aware, and accompanied by visible names. Users
 can open individual sessions for detailed tool output or changes.
 Full transcripts are not loaded solely to populate the roster.

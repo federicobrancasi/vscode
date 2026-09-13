@@ -159,13 +159,15 @@ Window:
    authentication, or an unsupported host.
 2. Open **Agent Collab** in the Sessions sidebar, or run
    **Agents: Open Collaboration Room** from the Command Palette.
-3. Open **Room Settings** and enter a title, shared goal, and optional rules.
-4. Select a local Git repository and a committed branch, tag, or revision.
-   The host resolves and pins that baseline. Uncommitted source-folder changes
-   are not silently included, committed, or discarded.
+3. Describe the shared goal. The room title is taken from it.
+4. Choose a folder. Peers work in Git worktrees, so a plain folder is offered a
+   one-time setup (`git init` plus a baseline commit) with its exact path shown;
+   it is never initialized silently. Uncommitted source-folder changes are not
+   silently included, committed, or discarded.
 5. Choose one to ten peers and a model for each numbered slot. Choices stay
    associated with their slots if the peer count changes.
-6. Select **Create Room**. Creation records the room; it does not start paid
+6. Shared rules, the branch/tag/commit, and run limits are under **Advanced**.
+7. Select **Create and Start**. Creation records the room; it does not start paid
    inference.
 7. Review workspace trust when requested. A source-repository decision can cover
    this room's exact peer worktrees, never their shared parent directory.
@@ -269,7 +271,9 @@ configuration controls unless their persistence is supported.
 
 ### Autopilot is separate from approval level
 
-Room peers default to **Autopilot with manual permissions**. The **All peers**
+New rooms start in **Autopilot with assisted approvals**, so routine tool calls
+are not interrupted while elevated decisions still reach you; existing rooms keep
+the level they already had. The **All peers**
 menu changes the team's mode, permissions, and terminal sandbox choices when
 those options are available. Individual choices made through peer sessions
 remain synchronized with the room.
