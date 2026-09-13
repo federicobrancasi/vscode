@@ -45,6 +45,8 @@
 .collaboration-room .room-layout {
 	position: relative;
 	overflow: hidden;
+	display: flex;
+	flex-direction: column;
 	flex: 1;
 	min-height: 0;
 }
@@ -52,6 +54,7 @@
 .collaboration-room .room-main {
 	display: flex;
 	flex-direction: column;
+	flex: 1 1 auto;
 	min-width: 0;
 	min-height: 0;
 	overflow: hidden;
@@ -59,7 +62,23 @@
 
 .collaboration-room.room-side-panel {
 	box-sizing: border-box;
+	width: 100%;
+	height: 100%;
 	background: var(--vscode-sideBar-background, var(--session-view-background));
+}
+
+.collaboration-room.room-side-panel > .room-panel-header-bar {
+	flex: 0 0 auto;
+}
+
+.collaboration-room.room-side-panel > .room-panel-scrollable {
+	flex: 1 1 auto;
+	min-height: 0;
+	width: 100%;
+}
+
+.collaboration-room .room-panel-body {
+	width: 100%;
 }
 
 .collaboration-room .room-panel-content {
@@ -152,6 +171,9 @@
 }
 
 .collaboration-room .room-member-heading > button {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	background: transparent;
 	padding-left: 0;
 	border-color: var(--vscode-contrastBorder, transparent);
@@ -346,11 +368,41 @@
 	border-top: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
 }
 
+/*
+ * The composer borrows the Agents window chat input's container and toolbar, so
+ * its own field has to sit inside that box rather than draw a second one.
+ */
+.collaboration-room .room-composer .new-chat-input-area {
+	max-width: none;
+}
+
 .collaboration-room .room-composer textarea {
 	width: 100%;
 	min-height: 68px;
 	max-height: 200px;
-	resize: vertical;
+	resize: none;
+	border: none;
+	border-radius: 0;
+	background: transparent;
+	color: var(--vscode-agentsChatInput-foreground, var(--vscode-input-foreground));
+	padding: var(--vscode-spacing-size100) var(--vscode-spacing-size120) var(--vscode-spacing-sizeNone);
+}
+
+.collaboration-room .room-composer textarea:focus {
+	outline: none;
+}
+
+.collaboration-room .room-composer textarea::placeholder {
+	color: var(--vscode-agentsChatInput-placeholderForeground, var(--vscode-input-placeholderForeground));
+}
+
+.collaboration-room .room-composer-actions {
+	padding: var(--vscode-spacing-size60) var(--vscode-spacing-size120) var(--vscode-spacing-size100);
+}
+
+.collaboration-room .room-composer-actions > .room-hint {
+	flex: 1;
+	min-width: 0;
 }
 
 .collaboration-room input,

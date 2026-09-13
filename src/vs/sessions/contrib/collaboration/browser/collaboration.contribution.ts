@@ -29,7 +29,9 @@ import { COLLABORATION_SETTINGS_CONTAINER_ID, COLLABORATION_SETTINGS_VIEW_ID, Co
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { Extensions as ViewContainerExtensions, IViewContainersRegistry, IViewsRegistry, ViewContainerLocation, WindowEnablement } from '../../../../workbench/common/views.js';
+import { Parts } from '../../../../workbench/services/layout/browser/layoutService.js';
 import { IPaneCompositePartService } from '../../../../workbench/services/panecomposite/browser/panecomposite.js';
+import { IAgentWorkbenchLayoutService } from '../../../browser/workbench.js';
 import { IViewsService } from '../../../../workbench/services/views/common/viewsService.js';
 
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
@@ -102,7 +104,10 @@ Registry.as<IViewsRegistry>(ViewContainerExtensions.ViewsRegistry).registerViews
 	canToggleVisibility: false,
 	canMoveView: false,
 	containerIcon: collaborationSettingsIcon,
+	weight: 100,
+	order: 1,
 	when: CollaborationRoomVisibleContext,
+	windowEnablement: WindowEnablement.Sessions,
 }], collaborationSettingsContainer);
 
 /**
@@ -111,39 +116,68 @@ Registry.as<IViewsRegistry>(ViewContainerExtensions.ViewsRegistry).registerViews
  * it closes.
  */
 class CollaborationSidePanelSwitcher extends Disposable {
-	private restoreTo: string | undefined;
+	private restore: { readonly container: string | undefined; readonly hidden: boolean } | undefined;
+	private inRoom = false;
 
 	constructor(
 		@ICollaborationRoomViewService roomViewService: ICollaborationRoomViewService,
 		@IViewsService private readonly viewsService: IViewsService,
 		@IPaneCompositePartService private readonly paneCompositeService: IPaneCompositePartService,
+		@IAgentWorkbenchLayoutService private readonly layoutService: IAgentWorkbenchLayoutService,
 	) {
 		super();
 		this._register(autorun(reader => {
-			if (roomViewService.visible.read(reader)) {
+			const visible = roomViewService.visible.read(reader);
+			if (visible === this.inRoom) {
+				return;
+			}
+			this.inRoom = visible;
+			if (visible) {
 				this.enterRoom();
 			} else {
 				this.leaveRoom();
 			}
 		}));
+		// Reopening the side panel during a room should bring back the room's own
+		// settings rather than whichever container an earlier session left behind.
+		this._register(this.layoutService.onDidChangePartVisibility(event => {
+			if (this.inRoom && event.partId === Parts.AUXILIARYBAR_PART && event.visible) {
+				this.showSettings();
+			}
+		}));
 	}
 
 	private enterRoom(): void {
-		const active = this.paneCompositeService.getActivePaneComposite(ViewContainerLocation.AuxiliaryBar)?.getId();
-		if (active === COLLABORATION_SETTINGS_CONTAINER_ID) {
-			return;
-		}
-		this.restoreTo = active;
-		this.viewsService.openViewContainer(COLLABORATION_SETTINGS_CONTAINER_ID, false);
+		this.restore = {
+			container: this.activeContainer(),
+			hidden: !this.layoutService.isVisible(Parts.AUXILIARYBAR_PART),
+		};
+		this.layoutService.setPartHidden(false, Parts.AUXILIARYBAR_PART);
+		this.showSettings();
 	}
 
 	private leaveRoom(): void {
-		const restoreTo = this.restoreTo;
-		this.restoreTo = undefined;
-		if (!restoreTo || this.paneCompositeService.getActivePaneComposite(ViewContainerLocation.AuxiliaryBar)?.getId() !== COLLABORATION_SETTINGS_CONTAINER_ID) {
+		const restore = this.restore;
+		this.restore = undefined;
+		if (!restore) {
 			return;
 		}
-		this.viewsService.openViewContainer(restoreTo, false);
+		if (restore.container && this.activeContainer() === COLLABORATION_SETTINGS_CONTAINER_ID) {
+			this.viewsService.openViewContainer(restore.container, false);
+		}
+		if (restore.hidden) {
+			this.layoutService.setPartHidden(true, Parts.AUXILIARYBAR_PART);
+		}
+	}
+
+	private showSettings(): void {
+		if (this.activeContainer() !== COLLABORATION_SETTINGS_CONTAINER_ID) {
+			this.viewsService.openViewContainer(COLLABORATION_SETTINGS_CONTAINER_ID, false);
+		}
+	}
+
+	private activeContainer(): string | undefined {
+		return this.paneCompositeService.getActivePaneComposite(ViewContainerLocation.AuxiliaryBar)?.getId();
 	}
 }
 

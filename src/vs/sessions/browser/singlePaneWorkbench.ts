@@ -192,7 +192,7 @@ export class SinglePaneWorkbench extends Workbench {
 
 	protected override _topRightSectionChildren(sessionsNode: ISerializedNode, editorNode: ISerializedNode, _auxiliaryBarNode: ISerializedNode, customViewGridNode: ISerializedNode): ISerializedNode[] {
 		// The auxiliary bar is inside the editor part and omitted from the grid.
-		return [sessionsNode, editorNode, customViewGridNode];
+		return [sessionsNode, customViewGridNode, editorNode];
 	}
 
 	protected override _layoutSidePane(): void {

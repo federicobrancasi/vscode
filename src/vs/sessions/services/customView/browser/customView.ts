@@ -28,6 +28,12 @@ export interface ICustomViewDescriptor {
 	readonly ctor: SyncDescriptor<AbstractCustomView>;
 
 	readonly actions?: ICustomViewActions;
+
+	/**
+	 * Keeps the side panel alongside the view instead of replacing it, so the view
+	 * can put its own details there the way a session puts Changes and Files.
+	 */
+	readonly allowsSidePanel?: boolean;
 }
 
 /**

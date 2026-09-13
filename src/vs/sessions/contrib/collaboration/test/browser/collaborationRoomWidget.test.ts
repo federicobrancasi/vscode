@@ -462,8 +462,9 @@ suite('CollaborationRoomWidget', () => {
 		assert.deepStrictEqual({
 			enabled: !send.disabled,
 			wakeUpExplained: send.getAttribute('aria-description')?.includes('Finished or stopped peers receive a new turn'),
-			defaultAudienceExplained: container.querySelector('.room-composer-actions .room-hint')?.textContent?.includes('notify everyone'),
-		}, { enabled: true, wakeUpExplained: true, defaultAudienceExplained: true });
+			defaultAudienceExplained: send.getAttribute('aria-description')?.includes('everyone when none are mentioned'),
+			mentionHint: container.querySelector('.room-composer-actions .room-hint')?.textContent,
+		}, { enabled: true, wakeUpExplained: true, defaultAudienceExplained: true, mentionHint: '@ to mention' });
 	});
 
 	test('Start does not require a turn cap or deadline', () => {

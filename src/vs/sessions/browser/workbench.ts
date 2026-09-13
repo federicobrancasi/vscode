@@ -68,7 +68,7 @@ import { SyncDescriptor } from '../../platform/instantiation/common/descriptors.
 import { TitleService } from './parts/titlebarPart.js';
 import { EDITOR_PART_DEFAULT_WIDTH, EDITOR_PART_MINIMUM_WIDTH } from './parts/editorPartSizing.js';
 import { IContextKey, IContextKeyService } from '../../platform/contextkey/common/contextkey.js';
-import { CustomViewVisibleContext, EditorMaximizedContext, IsPhoneLayoutContext, SinglePaneLayoutEnabledContext } from '../common/contextkeys.js';
+import { CustomViewAllowsSidePanelContext, CustomViewVisibleContext, EditorMaximizedContext, IsPhoneLayoutContext, SinglePaneLayoutEnabledContext } from '../common/contextkeys.js';
 import { SessionsLayoutPolicy } from './layoutPolicy.js';
 import { AGENTS_PART_CARD_CLASS } from './parts/agentsPartCard.js';
 import { MobileNavigationStack } from './mobileNavigationStack.js';
@@ -119,6 +119,7 @@ enum LayoutClasses {
 	EDITOR_PANE_HIDDEN = 'noeditorpane',
 	SESSIONS_HIDDEN = 'nosessionspart',
 	CUSTOM_VIEW_GRID_HIDDEN = 'nocustomviewgrid',
+	CUSTOM_VIEW_SIDE_PANEL = 'customviewsidepanel',
 	STATUSBAR_HIDDEN = 'nostatusbar',
 	SHELL_GRADIENT_BACKGROUND = 'shell-gradient-background',
 	FULLSCREEN = 'fullscreen',
@@ -190,6 +191,13 @@ export interface IAgentWorkbenchLayoutService extends IWorkbenchLayoutService, I
 
 	/** Hides the side pane as one semantic transition. */
 	hideSidePane(): void;
+
+	/**
+	 * Whether a custom view owns the main area while keeping the side panel beside
+	 * it. The editor area is then only a host for the side panel, so its own chrome
+	 * (the tab strip and its stale editors) does not belong on screen.
+	 */
+	isCustomViewSidePanelActive(): boolean;
 
 	readonly onDidChangeEditorMaximized: Event<void>;
 
@@ -440,6 +448,7 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 
 	private _editorMaximized = false;
 	private _customViewVisibleKey!: IContextKey<boolean>;
+	private _customViewAllowsSidePanelKey!: IContextKey<boolean>;
 	/** Guards the grid updates that show/hide the custom view from feeding back into the desired part visibility. */
 	private _applyingCustomViewGridVisibility = false;
 	private _customViewCoveredPartWidths: { editor?: number; auxiliaryBar?: number } | undefined;
@@ -1247,6 +1256,7 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 		// A custom view replaces the sessions grid (and the editor, side panel and
 		// bottom panel) for as long as it is shown.
 		this._customViewVisibleKey = CustomViewVisibleContext.bindTo(accessor.get(IContextKeyService));
+		this._customViewAllowsSidePanelKey = CustomViewAllowsSidePanelContext.bindTo(accessor.get(IContextKeyService));
 		this._register(autorun(reader => {
 			this._applyCustomViewGridVisibility(this.customViewService.activeCustomView.read(reader));
 		}));
@@ -1443,7 +1453,9 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 	}
 
 	protected _topRightSectionChildren(sessionsNode: ISerializedNode, editorNode: ISerializedNode, auxiliaryBarNode: ISerializedNode, customViewGridNode: ISerializedNode): ISerializedNode[] {
-		return [sessionsNode, editorNode, auxiliaryBarNode, customViewGridNode];
+		// The custom view grid takes the sessions grid's place in the row, so it sits
+		// before the editor and side panel rather than trailing them.
+		return [sessionsNode, customViewGridNode, editorNode, auxiliaryBarNode];
 	}
 
 	/** Attach any per-layout controllers once the editor part container exists. */
@@ -1740,8 +1752,8 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 			visible: this._effectiveVisible(Parts.SESSIONS_PART)
 		};
 
-		// Mutually exclusive with the sessions part (and the editor / auxiliary bar /
-		// panel), so it always claims the full row when it is visible.
+		// Replaces the sessions part, and unless the view opts into keeping the side
+		// panel, the editor, auxiliary bar and panel as well.
 		const customViewGridNode: ISerializedLeafNode = {
 			type: 'leaf',
 			data: { type: Parts.CUSTOM_VIEW_GRID_PART },
@@ -1770,7 +1782,7 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 			visible: this._effectiveVisible(Parts.PANEL_PART)
 		};
 
-		// Top right section: Chat Bar | Editor [| Auxiliary Bar] | Custom View Grid (horizontal).
+		// Top right section: Chat Bar | Custom View Grid | Editor [| Auxiliary Bar] (horizontal).
 		// When docked, the auxiliary bar is inside the editor part and
 		// omitted from the grid; otherwise it is its own trailing grid column.
 		const topRightSection: ISerializedNode = {
@@ -1995,6 +2007,7 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 			!this.isEditorPaneVisible() ? LayoutClasses.EDITOR_PANE_HIDDEN : undefined,
 			!this._effectiveVisible(Parts.SESSIONS_PART) ? LayoutClasses.SESSIONS_HIDDEN : undefined,
 			!this.partVisibility.customViewGrid ? LayoutClasses.CUSTOM_VIEW_GRID_HIDDEN : undefined,
+			this._customViewAllowsSidePanel ? LayoutClasses.CUSTOM_VIEW_SIDE_PANEL : undefined,
 			LayoutClasses.STATUSBAR_HIDDEN, // agents window never has a status bar
 			this.mainWindowFullscreen ? LayoutClasses.FULLSCREEN : undefined,
 			this.layoutPolicy.viewportClass.get() === 'phone' ? LayoutClasses.PHONE_LAYOUT : undefined,
@@ -2127,6 +2140,9 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 		Parts.PANEL_PART
 	] as const;
 
+	/** Set while the visible custom view keeps the side panel beside it. */
+	private _customViewAllowsSidePanel = false;
+
 	/** The desired visibility of a part, ignoring any custom view showing over it. */
 	private _desiredVisible(part: Parts): boolean {
 		switch (part) {
@@ -2145,7 +2161,13 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 
 	/** Whether a part is actually rendered right now. */
 	protected _effectiveVisible(part: Parts): boolean {
-		return this._desiredVisible(part) && !this.partVisibility.customViewGrid;
+		if (!this._desiredVisible(part)) {
+			return false;
+		}
+		if (part === Parts.AUXILIARYBAR_PART && this._customViewAllowsSidePanel) {
+			return true;
+		}
+		return !this.partVisibility.customViewGrid;
 	}
 
 	/**
@@ -2280,6 +2302,10 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 		if (this.isSidePaneVisible()) {
 			this.toggleSidePane();
 		}
+	}
+
+	isCustomViewSidePanelActive(): boolean {
+		return this._customViewAllowsSidePanel;
 	}
 
 	private _getSidePaneState(): ISidePaneState {
@@ -2530,13 +2556,32 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 	 */
 	private _applyCustomViewGridVisibility(descriptor: ICustomViewDescriptor | undefined): void {
 		const visible = !!descriptor;
-		if (this.partVisibility.customViewGrid === visible) {
+		const allowsSidePanel = visible && !!descriptor.allowsSidePanel;
+		if (this.partVisibility.customViewGrid === visible && this._customViewAllowsSidePanel === allowsSidePanel) {
 			// Swapping one custom view for another only changes what is rendered.
 			this.customViewGridPartService.setView(descriptor);
 			return;
 		}
 
 		const wasVisible = Workbench._CUSTOM_VIEW_EXCLUSIVE_PARTS.map(part => this._effectiveVisible(part));
+
+		// Swapping between views that disagree about the side panel is a visibility
+		// change for the auxiliary bar even though the grid itself stays up.
+		if (this.partVisibility.customViewGrid === visible) {
+			this._customViewAllowsSidePanel = allowsSidePanel;
+			this._customViewAllowsSidePanelKey.set(allowsSidePanel);
+			this.customViewGridPartService.setView(descriptor);
+			this._runWithEditorResizeSyncSuspended(() => this._applyExclusivePartVisibility());
+			this._updateExclusiveLayoutClasses();
+			this.mainContainer.classList.toggle(LayoutClasses.CUSTOM_VIEW_SIDE_PANEL, allowsSidePanel);
+			Workbench._CUSTOM_VIEW_EXCLUSIVE_PARTS.forEach((part, index) => {
+				const nowVisible = this._effectiveVisible(part);
+				if (nowVisible !== wasVisible[index]) {
+					this._fireDidChangePartVisibility(part, nowVisible);
+				}
+			});
+			return;
+		}
 
 		// A maximized editor owns the row instead of the sessions grid, which would
 		// leave the row without an owner once the custom view goes away.
@@ -2555,7 +2600,9 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 		this.sessionsPartService.setContentVisible(false);
 		this.customViewGridPartService.setView(descriptor);
 		this.partVisibility.customViewGrid = visible;
+		this._customViewAllowsSidePanel = allowsSidePanel;
 		this._customViewVisibleKey.set(visible);
+		this._customViewAllowsSidePanelKey.set(allowsSidePanel);
 
 		if (!this.workbenchGrid) {
 			this.sessionsPartService.setContentVisible(!visible);
@@ -2584,6 +2631,7 @@ export class Workbench extends Disposable implements IAgentWorkbenchLayoutServic
 
 		this._updateExclusiveLayoutClasses();
 		this.mainContainer.classList.toggle(LayoutClasses.CUSTOM_VIEW_GRID_HIDDEN, !visible);
+		this.mainContainer.classList.toggle(LayoutClasses.CUSTOM_VIEW_SIDE_PANEL, allowsSidePanel);
 		this._updateMobileCustomViewNavigation();
 
 		// Mirror the reveal-before-hide order of the grid updates.

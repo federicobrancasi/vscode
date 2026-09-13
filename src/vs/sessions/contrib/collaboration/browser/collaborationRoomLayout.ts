@@ -66,22 +66,21 @@ export class CollaborationRoomLayout extends Disposable {
 		this.panel.focus();
 	}
 
-	layout(width: number, height: number): void {
-		this.element.style.width = `${Math.max(0, width)}px`;
-		this.element.style.height = `${Math.max(0, height)}px`;
-		this.main.style.width = `${Math.max(0, width)}px`;
-		this.main.style.height = `${Math.max(0, height)}px`;
+	/**
+	 * The conversation fills the room through CSS. Writing pixel sizes here would
+	 * fight the flex column it sits in, leaving the composer taller than its parent
+	 * and clipped at the bottom.
+	 */
+	layout(_width: number, _height: number): void {
 		this.onLayout();
 	}
 
-	/** Sizes the settings panel to whatever room the side panel gives it. */
-	layoutPanel(width: number, height: number): void {
-		this.panel.style.width = `${width}px`;
-		this.panel.style.height = `${height}px`;
-		const body = Math.max(0, height - this.panelHeader.clientHeight);
-		this.scrollable.getDomNode().style.width = `${width}px`;
-		this.scrollable.getDomNode().style.height = `${body}px`;
-		this.panelBody.style.width = `${width}px`;
+	/**
+	 * The panel fills whatever the side panel gives it through CSS, so only the
+	 * scrollbar needs telling. Measuring here instead would go stale whenever the
+	 * pane resizes without re-laying out its adopted content.
+	 */
+	layoutPanel(_width: number, _height: number): void {
 		this.scrollable.scanDomNode();
 	}
 }

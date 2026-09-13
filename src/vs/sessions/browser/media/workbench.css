@@ -163,6 +163,15 @@
 	background-color: var(--vscode-agentsPanel-background);
 }
 
+/*
+ * A custom view that keeps the side panel only borrows the editor area to host it,
+ * so the editor's own tab strip and whatever it still holds stay out of the way.
+ */
+.agent-sessions-workbench.customviewsidepanel .part.editor .editor-group-container > .title,
+.agent-sessions-workbench.customviewsidepanel .part.editor .editor-group-container > .editor-container {
+	display: none;
+}
+
 .agent-sessions-workbench .part.panel {
 	margin: var(--vscode-agents-layout-floatingPanelGap) 0 0 0;
 	background: var(--part-background);

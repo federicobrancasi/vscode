@@ -154,7 +154,7 @@ export class SinglePaneMainEditorPart extends MainEditorPart {
 				isAuxiliaryBarVisible: () => layoutService.isVisible(Parts.AUXILIARYBAR_PART),
 				hideAuxiliaryBar: () => layoutService.setAuxiliaryBarHiddenForResize(true),
 				setEditorContentRightInset: (px: number) => this.setContentRightInset(px),
-				getTabsHeight: () => (this.activeGroup as EditorGroupView).titleHeight.offset,
+				getTabsHeight: () => layoutService.isCustomViewSidePanelActive() ? 0 : (this.activeGroup as EditorGroupView).titleHeight.offset,
 			},
 		));
 

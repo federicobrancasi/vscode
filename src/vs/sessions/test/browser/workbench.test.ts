@@ -139,6 +139,13 @@ suite('Sessions - Workbench', () => {
 		setEditorMaximized(maximized: boolean): void;
 	}
 
+	/** Looks a grid node up by the part it hosts, so node order can change freely. */
+	function findPartNode(section: { data: readonly unknown[] }, part: Parts): { size: number; visible: boolean } {
+		const node = section.data.find(child => (child as { data?: { type?: string } }).data?.type === part);
+		assert.ok(node, `Expected the grid to contain ${part}`);
+		return node as { size: number; visible: boolean };
+	}
+
 	interface IGridDescriptorTestHarness extends ITestWorkbench {
 		_savedPartSizes: { sidebar?: number; auxiliaryBar?: number; editor?: number; sessions?: number; panel?: number };
 		layoutPolicy: {
@@ -348,6 +355,7 @@ suite('Sessions - Workbench', () => {
 			},
 			customViewGridPartService: { setView: (descriptor: object | undefined) => { renderedCustomViews.push(descriptor); }, focusActiveView: () => { } },
 			_customViewVisibleKey: { set: () => { } },
+			_customViewAllowsSidePanelKey: { set: () => { } },
 			sessionsPartService: {
 				focusSession: () => { focusedSessions++; },
 				setContentVisible: (visible: boolean) => {
@@ -740,7 +748,7 @@ suite('Sessions - Workbench', () => {
 		const contentSection = descriptor.root.data[1] as { data: readonly unknown[] };
 		const rightSection = contentSection.data[1] as { data: readonly unknown[] };
 		const topRightSection = rightSection.data[0] as { data: readonly unknown[] };
-		const editorNode = topRightSection.data[1] as { size: number; visible: boolean };
+		const editorNode = findPartNode(topRightSection, Parts.EDITOR_PART);
 
 		assert.deepStrictEqual({ size: editorNode.size, visible: editorNode.visible }, { size: 300, visible: true });
 	});
@@ -836,7 +844,7 @@ suite('Sessions - Workbench', () => {
 		const contentSection = descriptor.root.data[1] as { data: readonly unknown[] };
 		const rightSection = contentSection.data[1] as { data: readonly unknown[] };
 		const topRightSection = rightSection.data[0] as { data: readonly unknown[] };
-		const editorNode = topRightSection.data[1] as { size: number; visible: boolean };
+		const editorNode = findPartNode(topRightSection, Parts.EDITOR_PART);
 
 		assert.deepStrictEqual({ size: editorNode.size, visible: editorNode.visible }, { size: 220, visible: true });
 	});
@@ -857,7 +865,7 @@ suite('Sessions - Workbench', () => {
 		const contentSection = descriptor.root.data[1] as { data: readonly unknown[] };
 		const rightSection = contentSection.data[1] as { data: readonly unknown[] };
 		const topRightSection = rightSection.data[0] as { data: readonly unknown[] };
-		const editorNode = topRightSection.data[1] as { size: number; visible: boolean };
+		const editorNode = findPartNode(topRightSection, Parts.EDITOR_PART);
 
 		assert.deepStrictEqual({ size: editorNode.size, visible: editorNode.visible }, { size: 900, visible: true });
 	});
@@ -879,7 +887,7 @@ suite('Sessions - Workbench', () => {
 			const contentSection = descriptor.root.data[1] as { data: readonly unknown[] };
 			const rightSection = contentSection.data[1] as { data: readonly unknown[] };
 			const topRightSection = rightSection.data[0] as { data: readonly unknown[] };
-			return (topRightSection.data[1] as { size: number }).size;
+			return findPartNode(topRightSection, Parts.EDITOR_PART).size;
 		};
 
 		assert.deepStrictEqual({
@@ -2830,6 +2838,47 @@ suite('Sessions - Workbench', () => {
 			],
 			focusedParts: [Parts.CUSTOM_VIEW_GRID_PART],
 		});
+	});
+
+	test('a custom view that keeps the side panel leaves the auxiliary bar beside it', () => {
+		const host = createHost({ partVisibility: { editor: true, auxiliaryBar: true, panel: true, sessions: true } });
+
+		applyCustomViewGridVisibility.call(host, { allowsSidePanel: true });
+
+		assert.deepStrictEqual({
+			customViewGridVisible: isVisible.call(host, Parts.CUSTOM_VIEW_GRID_PART),
+			sessions: isVisible.call(host, Parts.SESSIONS_PART),
+			editor: isVisible.call(host, Parts.EDITOR_PART),
+			auxiliaryBar: isVisible.call(host, Parts.AUXILIARYBAR_PART),
+			panel: isVisible.call(host, Parts.PANEL_PART),
+			events: host.events,
+		}, {
+			customViewGridVisible: true,
+			sessions: false,
+			editor: false,
+			auxiliaryBar: true,
+			panel: false,
+			events: [
+				{ partId: Parts.CUSTOM_VIEW_GRID_PART, visible: true },
+				{ partId: Parts.SESSIONS_PART, visible: false },
+				{ partId: Parts.EDITOR_PART, visible: false },
+				{ partId: Parts.PANEL_PART, visible: false },
+			],
+		});
+	});
+
+	test('swapping to a custom view without a side panel takes the auxiliary bar away again', () => {
+		const host = createHost({ partVisibility: { editor: true, auxiliaryBar: true, panel: true, sessions: true } });
+
+		applyCustomViewGridVisibility.call(host, { allowsSidePanel: true });
+		const withPanel = host.gridVisibility.get(host.auxiliaryBarPartView);
+		applyCustomViewGridVisibility.call(host, {});
+
+		assert.deepStrictEqual({
+			withPanel,
+			withoutPanel: host.gridVisibility.get(host.auxiliaryBarPartView),
+			renderedCustomViews: host.renderedCustomViews.length,
+		}, { withPanel: true, withoutPanel: false, renderedCustomViews: 2 });
 	});
 
 	test('suspends session content throughout the custom view grid swap', () => {

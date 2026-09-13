@@ -280,6 +280,20 @@ Room Settings forward, and closing it restores whichever container was showing
 before. Because the workbench hosts the panel, its width, visibility and
 persistence are the auxiliary bar's, not the room's.
 
+A custom view normally replaces the side panel along with the sessions grid, so
+the room's descriptor sets `allowsSidePanel`. That keeps the auxiliary bar beside
+the view, keeps the side panel toggle live, and stands the single-pane detail
+coordinator down so Changes and Files cannot claim the panel back from a room.
+The editor area is then only a host for the docked panel, so its tab strip stays
+hidden rather than showing the previous session's editors.
+
+The composer borrows the Agents window chat input's container and toolbar
+classes, so it reads as that input rather than a second kind of composer, and
+carries a short mention affordance instead of prose. Neither the room nor the
+panel writes pixel sizes into its own layout: both fill their host through CSS,
+because measuring and writing back left content larger than its container
+whenever the surface resized without a fresh layout pass.
+
 The room still owns that DOM and publishes it through the collaboration
 view-state service; the side-panel pane only adopts it while a room is open, and
 hands it back on dispose. Inside, run controls and the tab strip stay pinned

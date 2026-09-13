@@ -204,6 +204,8 @@ export interface ITestLayoutHarness {
 	editorMaximized: boolean;
 	setEditorMaximizedCalls: boolean[];
 	toggleSidePaneCalls: number;
+	/** True while a custom view holds the side panel, as Agent Collab rooms do. */
+	customViewSidePanelActive: boolean;
 	sidePaneStateBeforeHide: SidePaneComposition | undefined;
 	partVisibility: Map<Parts, boolean>;
 	partSizes: Map<Parts, IDimension>;
@@ -325,6 +327,7 @@ export function createTestHarness(store: DisposableStore, options: ICreateOption
 		editorMaximized: false,
 		setEditorMaximizedCalls: [],
 		toggleSidePaneCalls: 0,
+		customViewSidePanelActive: false,
 		sidePaneStateBeforeHide: undefined,
 		partVisibility: new Map<Parts, boolean>([
 			[Parts.AUXILIARYBAR_PART, true],
@@ -514,6 +517,9 @@ export function createTestHarness(store: DisposableStore, options: ICreateOption
 			if (this.isSidePaneVisible()) {
 				this.toggleSidePane();
 			}
+		}
+		isCustomViewSidePanelActive(): boolean {
+			return harness.customViewSidePanelActive;
 		}
 		toggleSidePane(): boolean {
 			harness.toggleSidePaneCalls++;

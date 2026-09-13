@@ -45,4 +45,5 @@ export const collaborationRoomViewDescriptor: ICustomViewDescriptor = {
 	id: COLLABORATION_CUSTOM_VIEW_ID,
 	ctor: new SyncDescriptor(CollaborationRoomView),
 	actions: { style: 'toolbar', menuId: Menus.CustomViewCollaboration },
+	allowsSidePanel: true,
 };

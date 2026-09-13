@@ -45,7 +45,7 @@ export class SinglePaneDetailPanelCoordinator extends Disposable {
 		super();
 		this._hasDockedDetailsContext = HasDockedDetailsContext.bindTo(contextKeyService);
 		this._register(this._layoutService.onDidChangePartVisibility(event => {
-			if (event.partId === Parts.AUXILIARYBAR_PART && event.visible) {
+			if (event.partId === Parts.AUXILIARYBAR_PART && event.visible && !this._layoutService.isCustomViewSidePanelActive()) {
 				this._queueTarget(this._target);
 			}
 		}));
@@ -73,7 +73,9 @@ export class SinglePaneDetailPanelCoordinator extends Disposable {
 	}
 
 	private async _syncTarget(target: DetailPanelTarget, generation: number): Promise<void> {
-		if (generation !== this._generation || !this._layoutService.isVisible(Parts.AUXILIARYBAR_PART)) {
+		// A custom view holding the side panel owns what it shows; Changes and Files
+		// belong to the session underneath and must not claim it back.
+		if (generation !== this._generation || !this._layoutService.isVisible(Parts.AUXILIARYBAR_PART) || this._layoutService.isCustomViewSidePanelActive()) {
 			return;
 		}
 

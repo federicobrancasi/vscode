@@ -37,7 +37,7 @@ import { IPaneCompositePartService } from '../../../../workbench/services/paneco
 import { IViewsService } from '../../../../workbench/services/views/common/viewsService.js';
 import { IAgentWorkbenchLayoutService } from '../../../browser/workbench.js';
 import { Menus } from '../../../browser/menus.js';
-import { SessionsWelcomeVisibleContext, CustomViewVisibleContext, IsQuickChatSessionContext, SinglePaneLayoutEnabledContext } from '../../../common/contextkeys.js';
+import { SessionsWelcomeVisibleContext, CustomViewAllowsSidePanelContext, CustomViewVisibleContext, IsQuickChatSessionContext, SinglePaneLayoutEnabledContext } from '../../../common/contextkeys.js';
 import { logSidePanelToggle } from '../../../common/sessionsTelemetry.js';
 import { ISessionChangesService } from '../../changes/browser/sessionChangesService.js';
 import { IChangesViewService } from '../../changes/common/changesViewService.js';
@@ -457,7 +457,7 @@ export abstract class BaseLayoutController extends Disposable {
 					f1: true,
 					precondition: ContextKeyExpr.and(
 						ContextKeyExpr.or(IsQuickChatSessionContext.negate(), SinglePaneLayoutEnabledContext),
-						CustomViewVisibleContext.negate()
+						ContextKeyExpr.or(CustomViewVisibleContext.negate(), CustomViewAllowsSidePanelContext)
 					),
 					keybinding: {
 						weight: KeybindingWeight.SessionsContrib,

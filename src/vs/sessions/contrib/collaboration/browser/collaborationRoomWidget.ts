@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import '../../chat/browser/media/chatInput.css';
 import './media/collaborationRoom.css';
 import { $, addDisposableListener, EventType, getActiveElement, getWindow, isAncestor, isHTMLElement, trackFocus } from '../../../../base/browser/dom.js';
 import { status } from '../../../../base/browser/ui/aria/aria.js';
@@ -90,6 +91,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private readonly attentionButton: HTMLButtonElement;
 	private readonly modelCatalog: CollaborationModelCatalog;
 	private readonly composer: HTMLElement;
+	private readonly inputArea: HTMLElement;
 	private readonly input: HTMLTextAreaElement;
 	private readonly send: HTMLButtonElement;
 	private readonly steer: HTMLButtonElement;
@@ -317,7 +319,10 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.updateReply();
 			this.input.focus();
 		});
-		this.input = this.composer.appendChild($('textarea')) as HTMLTextAreaElement;
+		// The composer adopts the Agents window chat input's own container and toolbar
+		// structure, so it reads as that input rather than a second kind of composer.
+		this.inputArea = this.composer.appendChild($('.new-chat-input-area'));
+		this.input = this.inputArea.appendChild($('textarea')) as HTMLTextAreaElement;
 		this.input.placeholder = localize('room.placeholder', "Message all Copilots, or @mention a peer");
 		this.input.setAttribute('role', 'combobox');
 		this.input.setAttribute('aria-multiline', 'true');
@@ -330,8 +335,8 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.suggestions.setAttribute('role', 'listbox');
 		this.suggestions.setAttribute('aria-label', localize('room.mentions', "Mention a Copilot peer"));
 		this.suggestions.hidden = true;
-		const composerActions = this.composer.appendChild($('.room-composer-actions'));
-		composerActions.appendChild($('span.room-hint')).textContent = localize('room.composerHint', "Send wakes finished peers: @mention someone, or notify everyone. Busy peers queue the message; Steer Agents sends live guidance.");
+		const composerActions = this.inputArea.appendChild($('.sessions-chat-toolbar.room-composer-actions'));
+		composerActions.appendChild($('span.room-hint')).textContent = localize('room.mentionHint', "@ to mention");
 		this.send = this.button(composerActions, localize('room.send', "Send"), () => this.sendMessage());
 		this.send.classList.add('primary');
 		this.send.setAttribute('aria-description', localize('room.sendDescription', "Send to mentioned peers, or everyone when none are mentioned. Finished or stopped peers receive a new turn; busy peers receive the message on their next turn. Pause holds delivery."));
@@ -349,7 +354,11 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				this.updateMentions();
 			}
 		}));
-		this._register(addDisposableListener(this.input, EventType.BLUR, () => this.hideMentions()));
+		this._register(addDisposableListener(this.input, EventType.FOCUS, () => this.inputArea.classList.add('focused')));
+		this._register(addDisposableListener(this.input, EventType.BLUR, () => {
+			this.inputArea.classList.remove('focused');
+			this.hideMentions();
+		}));
 		const updateInputLabel = () => {
 			const keybinding = this.keybindingService.lookupKeybinding('editor.action.accessibilityHelp')?.getAriaLabel();
 			const hint = this.configurationService.getValue<boolean>(AccessibilityVerbositySettingId.CollaborationRoom) && keybinding
