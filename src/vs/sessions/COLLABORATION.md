@@ -274,11 +274,15 @@ addressed human request and evidence-linked findings.
 ## UI and accessibility
 
 The primary content is the multi-author conversation with a bottom composer.
-A room-owned right panel is organised as tabs: one per member, then the shared
-rules and configuration, then approvals. The tab strip is a real tablist with
+A room-owned right panel keeps its run controls and tab strip pinned above an
+independently scrolling body, so the tabs never scroll out of reach. It is
+organised as tabs: one per member, then the shared rules and configuration, then
+approvals. The tab strip is a real tablist with
 roving focus and arrow, Home and End navigation; pending approvals and member
 failures are badged so an inactive tab still reports that it needs attention.
-The panel is independently scrollable,
+It carries the shared modern editor-tab classes that the Agents window composite
+bar also adopts, so room tabs match the rest of the window rather than inventing
+their own appearance. The panel is
 resizable, and collapsible, and becomes a drawer at narrow widths. Panel width
 and wide-layout visibility belong to the collaboration view-state service,
 not the selected peer's editor or the workbench's auxiliary bar.
@@ -299,6 +303,12 @@ rejection, disconnection, or timeout is visible and does not report success.
 Changing rooms or ending the turn invalidates stale approval controls.
 Collapsing the room panel does not dispose request cards or their drafts.
 The header's needs-attention action opens and focuses the pending requests.
+
+Shared posts use the agent chat's own row structure and presentational classes,
+so a room post reads as a chat turn and the author accent identifies the speaker
+on the avatar. The chat's renderer is not reusable - it is driven by a chat view
+model the room does not have - but its appearance is, and the room imports that
+stylesheet directly rather than depending on the chat widget being loaded.
 
 Distinguish explicit shared posts, member-reported work and runtime events.
 Do not manufacture chat messages by extracting hidden reasoning or concatenating
