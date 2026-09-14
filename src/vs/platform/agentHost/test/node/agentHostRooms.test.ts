@@ -25,7 +25,7 @@ import { ResolveSessionConfigResult } from '../../common/state/protocol/commands
 import { AgentSession } from '../../common/agentService.js';
 import { AgentHostRooms } from '../../node/agentHostRooms.js';
 import { createAgentHostRoomsChannel } from '../../node/agentHostRoomsChannel.js';
-import { IRoomRecord, IRoomRuntime, IRoomRuntimeEvent, IRoomStorage } from '../../node/agentHostRoomsTypes.js';
+import { IRoomRecord, IRoomRuntime, IRoomRuntimeEvent, IRoomStorage, RoomContentValidator } from '../../node/agentHostRoomsTypes.js';
 import { getRoomMemberModel, validateRoomModelSelection } from '../../node/agentHostRoomsModels.js';
 import { createCopilotRoomTools } from '../../node/copilot/copilotRoomTools.js';
 import { createNoopGitService, createNullSessionDataService } from '../common/sessionTestHelpers.js';
@@ -71,7 +71,7 @@ class MemoryRoomStorage implements IRoomStorage {
 		}
 		this.worktrees.add(member.worktreeUri!);
 	}
-	async publishPatch(_room: IAgentHostRoom, _member: IAgentHostRoomMember, _title: string): Promise<IAgentHostRoomArtifact> { throw new Error('Not used'); }
+	async publishPatch(_room: IAgentHostRoom, _member: IAgentHostRoomMember, _title: string, _validateContent?: RoomContentValidator): Promise<IAgentHostRoomArtifact> { throw new Error('Not used'); }
 	async readArtifact(): Promise<string> { return 'patch'; }
 }
 
@@ -93,6 +93,8 @@ class RoomRuntime extends Disposable implements IRoomRuntime {
 	private readonly _submittedWaiters = new Map<number, DeferredPromise<void>>();
 	blockPrepare = false;
 	blockAbort = false;
+	readonly contentChecks: { sessionUri: string; paths: readonly string[] }[] = [];
+	contentAccessError: Error | undefined;
 	readonly configurations = new Map<string, IAgentHostRoomConfiguration>();
 	models = roomModelCatalog;
 	readonly appliedModels = new Map<string, ModelSelection>();
@@ -102,6 +104,12 @@ class RoomRuntime extends Disposable implements IRoomRuntime {
 	configurationError: Error | undefined;
 	beforeApplyConfiguration: (() => void) | undefined;
 
+	async assertContentAccess(sessionUri: string, paths: readonly string[]): Promise<void> {
+		this.contentChecks.push({ sessionUri, paths: [...paths] });
+		if (this.contentAccessError) {
+			throw this.contentAccessError;
+		}
+	}
 	validateModel(model: ModelSelection): void { validateRoomModelSelection(model, this.models); }
 	getModel(member: IAgentHostRoomMember): ModelSelection | undefined { return this.appliedModels.get(member.sessionUri); }
 	publishModel(): void { }
@@ -1392,6 +1400,48 @@ suite('AgentHostRooms', () => {
 		runtime.finish(room.members[0].sessionUri);
 		await whenRoom(rooms, room.id, room => room.state === 'idle');
 		assert.deepStrictEqual({ mentions: message.mentions, deliveries: message.deliveries, turns: runtime.submitted.length }, { mentions: [], deliveries: [], turns: 1 });
+	});
+
+	test('publishing checks only the sharing member\'s own worktree, which is the session the policy is evaluated in', async () => {
+		const { rooms, runtime, storage, create } = setup(2);
+		const room = await create();
+		await rooms.startRoom(room.id, {});
+		await runtime.whenSubmitted(2);
+		const first = AgentSession.id(room.members[0].sessionUri);
+		await rooms.read(first);
+		await rooms.post(first, { id: 'work', text: 'Implementing the shared form', kind: 'work', mentions: [] });
+		storage.publishPatch = async (current, member, title, validateContent) => {
+			await validateContent?.(['solver.py']);
+			return {
+				id: 'published-patch', memberId: member.id, title, baseRevision: current.baseRevision,
+				sourceRevision: current.baseRevision, createdAt: 1, uri: 'file:///published/patch.diff',
+			};
+		};
+
+		await rooms.sharePatch(first, 'Form patch');
+
+		assert.deepStrictEqual(runtime.contentChecks, [{
+			sessionUri: room.members[0].sessionUri,
+			paths: [URI.joinPath(URI.parse(room.members[0].worktreeUri!), 'solver.py').fsPath],
+		}], 'the source repository is outside the session working directory, so submitting it fails the whole batch closed');
+	});
+
+	test('a content exclusion rejection keeps the patch unpublished', async () => {
+		const { rooms, runtime, storage, create } = setup(2);
+		const room = await create();
+		await rooms.startRoom(room.id, {});
+		await runtime.whenSubmitted(2);
+		const first = AgentSession.id(room.members[0].sessionUri);
+		await rooms.read(first);
+		await rooms.post(first, { id: 'work', text: 'Implementing the shared form', kind: 'work', mentions: [] });
+		storage.publishPatch = async (_current, _member, _title, validateContent) => {
+			await validateContent?.(['secret.env']);
+			throw new Error('unreachable');
+		};
+		runtime.contentAccessError = new Error('Content exclusion policy does not allow sharing');
+
+		await assert.rejects(rooms.sharePatch(first, 'Form patch'), /Content exclusion policy/);
+		assert.deepStrictEqual(storage.records.get(room.id)!.room.artifacts, []);
 	});
 
 	test('peers can inspect published patches and older messages instead of copying private worktrees', async () => {

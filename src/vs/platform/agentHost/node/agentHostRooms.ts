@@ -777,7 +777,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		if (!artifact) {
 			throw new Error(localize('rooms.artifactNotFound', "The room artifact does not exist."));
 		}
-		const contents = await this._storage.readArtifact(record.room, artifact, paths => this._assertContentAccess(record.room, this._member(record, binding.memberId), paths));
+		const contents = await this._storage.readArtifact(record.room, artifact, paths => this._assertContentAccess(this._member(record, binding.memberId), paths));
 		if (offset > contents.length) {
 			throw new Error(localize('rooms.artifactOffsetPastEnd', "The artifact offset is past the end of the published patch."));
 		}
@@ -808,7 +808,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			const record = this._record(binding.roomId);
 			this._assertMemberTurn(record, binding.memberId);
 			const member = this._member(record, binding.memberId);
-			const artifact = await this._storage.publishPatch(record.room, member, title, paths => this._assertContentAccess(record.room, member, paths));
+			const artifact = await this._storage.publishPatch(record.room, member, title, paths => this._assertContentAccess(member, paths));
 			const message: IAgentHostRoomMessage = {
 				id: artifact.id, sequence: record.room.latestMessageSequence + 1, authorId: member.id, authorName: member.name, authorKind: 'agent',
 				kind: 'artifact', text: title, timestamp: this._now(), mentions: [], artifactId: artifact.id, deliveries: [],
@@ -844,17 +844,27 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 	}
 
-	private async _assertContentAccess(room: IAgentHostRoom, member: IAgentHostRoomMember, paths: readonly string[]): Promise<void> {
+	/**
+	 * Content exclusion is evaluated by the member's own session, and the SDK only
+	 * accepts paths inside that session's working directory — which is the member's
+	 * worktree. Submitting the source repository's copy as well made every batch
+	 * unsupported, so the check reported "unavailable" and, failing closed, rejected
+	 * every share. The worktree is a checkout of the same repository, so its copy of
+	 * a path carries the same policy.
+	 */
+	private async _assertContentAccess(member: IAgentHostRoomMember, paths: readonly string[]): Promise<void> {
 		if (!paths.length) {
 			return;
 		}
 		if (!this._runtime.assertContentAccess) {
 			throw new Error(localize('rooms.contentExclusionsUnavailable', "Content exclusion checks are unavailable; the room cannot share this artifact."));
 		}
-		await this._runtime.assertContentAccess(member.sessionUri, paths.flatMap(path => [
-			URI.joinPath(URI.parse(room.repositoryUri), path).fsPath,
-			URI.joinPath(URI.parse(member.worktreeUri!), path).fsPath,
-		]));
+		const worktreeUri = member.worktreeUri;
+		if (!worktreeUri) {
+			throw new Error(localize('rooms.noWorktreeForContentCheck', "The room member has no worktree to check against its content exclusion policy."));
+		}
+		await this._runtime.assertContentAccess(member.sessionUri, paths.map(path =>
+			URI.joinPath(URI.parse(worktreeUri), path).fsPath));
 	}
 
 	private _schedule(roomId: string): void {
