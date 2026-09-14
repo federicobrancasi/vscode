@@ -397,6 +397,34 @@ suite('AgentHostRoomsStorage', function () {
 		assert.deepStrictEqual(await storage.load(), [original]);
 	});
 
+	test('a room may gain a member, but not lose, reorder, or rewrite one', async () => {
+		const original = record();
+		await storage.save(original);
+		const first = original.room.members[0];
+		const joined = {
+			...first, id: 'joined-member', name: 'Copilot-2',
+			sessionUri: 'copilotcli:/joined-session', chatUri: buildDefaultChatUri('copilotcli:/joined-session'),
+			worktreeUri: storage.worktreeUri(original.room.id, 'joined-member'),
+		};
+
+		const grown = {
+			...original,
+			room: { ...original.room, revision: 2, members: [first, joined] },
+			executions: [...original.executions, { memberId: joined.id, initialized: false, needsTurn: true }],
+		};
+		await storage.save(grown);
+		assert.deepStrictEqual((await storage.load())[0].room.members.map(member => member.id), [first.id, joined.id]);
+
+		// Appending is the only permitted shape change.
+		await assert.rejects(storage.save({
+			...grown, room: { ...grown.room, revision: 3, members: [joined, first] },
+		}), /preserved member identities changed/);
+		await assert.rejects(storage.save({
+			...grown, room: { ...grown.room, revision: 3, members: [first] },
+			executions: original.executions,
+		}), /preserved member identities changed/);
+	});
+
 	test('loads legacy selections and unavailable catalog entries without treating them as journal corruption', async () => {
 		const original = record();
 		await storage.save(original);

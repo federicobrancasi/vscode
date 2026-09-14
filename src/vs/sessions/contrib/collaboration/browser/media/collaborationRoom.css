@@ -185,6 +185,24 @@
 	margin-left: auto;
 }
 
+/* Sits under the roster as its trailing affordance, not as another member row. */
+.collaboration-room .room-add-member {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--vscode-spacing-size60);
+	width: 100%;
+	margin-top: var(--vscode-spacing-size120);
+	background: transparent;
+	border-style: dashed;
+	color: var(--vscode-descriptionForeground);
+}
+
+.collaboration-room .room-add-member:hover:not(:disabled) {
+	color: var(--vscode-foreground);
+	border-color: var(--vscode-focusBorder);
+}
+
 .collaboration-room .room-member-model,
 .collaboration-room .room-model-picker {
 	min-width: 0;

@@ -50,8 +50,13 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 			if (previous) {
 				check(snapshot.room.revision >= previous.room.revision, 'room.revision regressed');
 				check(extUriBiasedIgnorePathCase.isEqual(URI.parse(snapshot.room.repositoryUri), URI.parse(previous.room.repositoryUri)) && snapshot.room.baseRevision === previous.room.baseRevision, 'room repository changed');
+				// A room may gain members, but never lose, reorder, or rewrite one: the
+				// existing identities must survive unchanged as a leading prefix, so a
+				// member's session or worktree can never be swapped out from under it.
 				const identities = (room: IAgentHostRoom) => room.members.map(member => [member.id, member.name, member.sessionUri, member.chatUri ?? buildDefaultChatUri(member.sessionUri), member.worktreeUri]);
-				check(equals(identities(previous.room), identities(snapshot.room)), 'preserved member identities changed');
+				const preserved = identities(previous.room);
+				const current = identities(snapshot.room);
+				check(current.length >= preserved.length && equals(preserved, current.slice(0, preserved.length)), 'preserved member identities changed');
 				for (const artifact of previous.room.artifacts) {
 					check(equals(snapshot.room.artifacts.find(value => value.id === artifact.id), artifact), 'published artifact changed');
 				}

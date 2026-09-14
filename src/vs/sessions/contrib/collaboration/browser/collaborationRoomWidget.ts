@@ -105,6 +105,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private lastHeight = 0;
 	private readonly tabs: CollaborationTabs;
 	private readonly agentsPanel: HTMLElement;
+	private readonly addMemberButton: HTMLButtonElement;
 	private readonly runPanel: HTMLElement;
 	private readonly rulesPanel: HTMLElement;
 	private readonly runForm: HTMLFormElement;
@@ -204,6 +205,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.roster = this.agentsPanel.appendChild($('.room-roster'));
 		this.roster.setAttribute('role', 'list');
 		this.roster.setAttribute('aria-label', localize('room.participants', "Copilot peers and current activity"));
+		this.addMemberButton = this.button(this.agentsPanel, localize('room.addMember', "Add Agent"), () => this.collaborationService.addMember());
+		this.addMemberButton.classList.add('room-add-member');
+		this.addMemberButton.setAttribute('aria-description', localize('room.addMemberDescription', "Adds a Copilot peer with its own session and worktree. In a running room it starts working straight away, which consumes model tokens."));
 		this.tabs.registerPanel(AGENTS_TAB, this.agentsPanel);
 		this.rulesPanel = tabContent.appendChild($('.room-tab-panel'));
 		this._register(instantiationService.createInstance(CollaborationConfigurationPicker, this.rulesPanel, error => {
@@ -482,6 +486,14 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.stopButton.hidden = !canStop;
 			this.pauseButton.disabled = busy || !available;
 			this.stopButton.disabled = busy || !available;
+			// A stopped room can still be resumed, so it can still gain a peer; only an
+			// in-flight cancellation withdraws the action. The host caps the roster.
+			const atCapacity = !!room && room.members.length >= MAX_ROOM_WORKERS;
+			this.addMemberButton.hidden = !room || room.state === 'stopping';
+			this.addMemberButton.disabled = busy || !available || atCapacity;
+			this.addMemberButton.title = atCapacity
+				? localize('room.addMemberFull', "A room can hold at most {0} agents.", MAX_ROOM_WORKERS)
+				: '';
 			const sending = this.collaborationService.sending.read(reader);
 			this.send.disabled = !available || sending;
 			this.send.classList.toggle('sending', sending);

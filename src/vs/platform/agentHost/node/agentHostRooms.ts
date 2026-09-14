@@ -687,6 +687,56 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		});
 	}
 
+	/**
+	 * Adds one peer to an existing room. The new member joins with its own session
+	 * and worktree, exactly like a member created with the room, and is scheduled a
+	 * turn straight away when the room is already running.
+	 */
+	async addMember(roomId: string, model?: ModelSelection): Promise<IAgentHostRoom> {
+		await this._ready;
+		this._assertOpen();
+		const selection = model === undefined ? undefined : parseRoomModelSelection(model);
+		if (selection) {
+			this._runtime.validateModel(selection);
+		}
+		const room = await this._queue.queue(roomId, async () => {
+			const record = this._record(roomId);
+			if (record.room.members.length >= MAX_ROOM_WORKERS) {
+				throw new Error(localize('rooms.memberLimit', "A room can hold at most {0} members.", MAX_ROOM_WORKERS));
+			}
+			// A stopped room can still be resumed, so it accepts members; only an
+			// in-flight cancellation is refused. Admission requires a running room, so a
+			// member added to a stopped room waits for Resume rather than starting work.
+			if (record.room.state === 'stopping' || this._stops.has(roomId)) {
+				throw new Error(localize('rooms.cannotAddMember', "Members cannot be added while the room is stopping."));
+			}
+			const memberId = generateUuid();
+			const sessionUri = AgentSession.uri('copilotcli', generateUuid()).toString();
+			// Names identify peers in the shared conversation, so a new member takes the
+			// next unused number rather than one an existing peer already answers to.
+			const taken = new Set(record.room.members.map(member => member.name));
+			let index = record.room.members.length + 1;
+			while (taken.has(`Copilot-${index}`)) {
+				index++;
+			}
+			const member: IAgentHostRoomMember = {
+				id: memberId, name: `Copilot-${index}`, sessionUri, chatUri: buildDefaultChatUri(sessionUri),
+				model: selection?.id, pendingModel: selection, state: 'pending', turns: 0,
+				worktreeUri: this._storage.worktreeUri(roomId, memberId),
+				configuration: { ...newAgentHostRoomConfiguration },
+			};
+			const saved = await this._save({
+				...record,
+				room: { ...record.room, members: [...record.room.members, member] },
+				executions: [...record.executions, { memberId, initialized: false, needsTurn: true }],
+			});
+			this._sessions.set(sessionUri, { roomId, memberId });
+			return saved.room;
+		});
+		this._schedule(roomId);
+		return room;
+	}
+
 	async retryMember(roomId: string, memberId: string): Promise<IAgentHostRoom> {
 		await this._ready;
 		const room = await this._queue.queue(roomId, async () => {

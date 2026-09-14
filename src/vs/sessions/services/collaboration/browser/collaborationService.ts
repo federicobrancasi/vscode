@@ -490,6 +490,20 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		await this.mutate((api, roomId) => api.stopRoom(roomId));
 	}
 
+	/**
+	 * Adds a peer to the open room. The member is added before authorization,
+	 * because trust is granted per worktree and the trust check compares the host's
+	 * member list against the selected room - it can only cover a worktree that
+	 * already exists. A room that has not started yet defers trust to Start.
+	 */
+	async addMember(model?: ModelSelection): Promise<void> {
+		const wasActive = ['running', 'idle'].includes(this.activeRoom.get()?.state ?? '');
+		await this.mutate((api, roomId) => api.addMember(roomId, model));
+		if (wasActive) {
+			await this.ensureExecutionAuthorized();
+		}
+	}
+
 	async stopMember(memberId: string): Promise<void> {
 		await this.mutate((api, roomId) => api.stopMember(roomId, memberId));
 	}

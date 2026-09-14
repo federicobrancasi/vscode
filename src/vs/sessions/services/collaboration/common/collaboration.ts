@@ -104,6 +104,7 @@ export interface ICollaborationService {
 	startRoom(limits: IAgentHostRoomLimits): Promise<void>;
 	pauseRoom(): Promise<void>;
 	stopRoom(): Promise<void>;
+	addMember(model?: ModelSelection): Promise<void>;
 	stopMember(memberId: string): Promise<void>;
 	retryMember(memberId: string): Promise<void>;
 	getArtifact(roomId: string, artifactId: string): Promise<string>;

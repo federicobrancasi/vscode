@@ -209,6 +209,7 @@ export interface IAgentHostRoomsService {
 	startRoom(roomId: string, limits: IAgentHostRoomLimits): Promise<IAgentHostRoom>;
 	pauseRoom(roomId: string): Promise<IAgentHostRoom>;
 	stopRoom(roomId: string): Promise<IAgentHostRoom>;
+	addMember(roomId: string, model?: ModelSelection): Promise<IAgentHostRoom>;
 	stopMember(roomId: string, memberId: string): Promise<IAgentHostRoom>;
 	retryMember(roomId: string, memberId: string): Promise<IAgentHostRoom>;
 	getRoomConfiguration(roomId: string): Promise<ResolveSessionConfigResult>;

@@ -19,7 +19,7 @@ import { NullLogService } from '../../../log/common/log.js';
 import { IProductService } from '../../../product/common/productService.js';
 import { IAgentModelInfo } from '../../common/agent.js';
 import { createAgentHostRoomsClient } from '../../common/agentHostRoomsIpc.js';
-import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomMember, IAgentHostRoomsService, newAgentHostRoomConfiguration } from '../../common/agentHostRooms.js';
+import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomMember, IAgentHostRoomsService, MAX_ROOM_WORKERS, newAgentHostRoomConfiguration } from '../../common/agentHostRooms.js';
 import { AgentHostAutoApprovePolicyRestrictedConfigKey, platformSessionSchema } from '../../common/agentHostSchema.js';
 import { ResolveSessionConfigResult } from '../../common/state/protocol/commands.js';
 import { AgentSession } from '../../common/agentService.js';
@@ -1442,6 +1442,64 @@ suite('AgentHostRooms', () => {
 
 		await assert.rejects(rooms.sharePatch(first, 'Form patch'), /Content exclusion policy/);
 		assert.deepStrictEqual(storage.records.get(room.id)!.room.artifacts, []);
+	});
+
+	test('an added member joins with its own session and worktree and is scheduled a turn', async () => {
+		const { rooms, runtime, create } = setup(2);
+		const room = await create();
+		await rooms.startRoom(room.id, {});
+		await runtime.whenSubmitted(2);
+
+		const added = (await rooms.addMember(room.id)).members[2];
+		await runtime.whenSubmitted(3);
+
+		// The room addMember returns predates scheduling; read it back for the turn.
+		const current = await rooms.getRoom(room.id);
+		const scheduled = current.members[2];
+		assert.deepStrictEqual({
+			count: current.members.length,
+			name: scheduled.name,
+			state: scheduled.state,
+			turns: scheduled.turns,
+			uniqueSessions: new Set(current.members.map(member => member.sessionUri)).size,
+			uniqueWorktrees: new Set(current.members.map(member => member.worktreeUri)).size,
+			submitted: runtime.submitted.some(entry => entry.sessionUri === added.sessionUri),
+		}, { count: 3, name: 'Copilot-3', state: 'starting', turns: 1, uniqueSessions: 3, uniqueWorktrees: 3, submitted: true });
+	});
+
+	test('an added member takes the next unused name and cannot exceed the room limit', async () => {
+		const { rooms, create } = setup(MAX_ROOM_WORKERS);
+		const room = await create();
+
+		await assert.rejects(rooms.addMember(room.id), /at most/);
+		assert.strictEqual((await rooms.getRoom(room.id)).members.length, MAX_ROOM_WORKERS);
+
+		const smaller = setup(1);
+		const second = await smaller.create();
+		const grown = await smaller.rooms.addMember(second.id);
+		assert.deepStrictEqual(grown.members.map(member => member.name), ['Copilot-1', 'Copilot-2']);
+	});
+
+	test('a stopped room gains the member but starts it only on resume', async () => {
+		const { rooms, runtime, create } = setup(2);
+		const room = await create();
+		await rooms.startRoom(room.id, {});
+		await runtime.whenSubmitted(2);
+		await rooms.stopRoom(room.id);
+
+		const grown = await rooms.addMember(room.id);
+		const added = grown.members[2];
+		const submittedWhileStopped = runtime.submitted.some(entry => entry.sessionUri === added.sessionUri);
+
+		// Resume gives all three members a turn, on top of the two from the first run.
+		await rooms.startRoom(room.id, {});
+		await runtime.whenSubmitted(5);
+
+		assert.deepStrictEqual({
+			count: grown.members.length,
+			submittedWhileStopped,
+			submittedAfterResume: runtime.submitted.some(entry => entry.sessionUri === added.sessionUri),
+		}, { count: 3, submittedWhileStopped: false, submittedAfterResume: true });
 	});
 
 	test('peers can inspect published patches and older messages instead of copying private worktrees', async () => {

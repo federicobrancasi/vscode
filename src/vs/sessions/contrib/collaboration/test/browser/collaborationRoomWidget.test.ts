@@ -13,9 +13,9 @@ import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IActionWidgetService } from '../../../../../platform/actionWidget/browser/actionWidget.js';
-import { IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage, MAX_ROOM_WORKERS } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { ChatInputRequestWithPlanReview } from '../../../../../platform/agentHost/common/agentHostPlanReview.js';
-import { ChatInputQuestionKind, ChatInputResponseKind, ConfirmationOptionKind, SessionModelInfo, ToolCallStatus } from '../../../../../platform/agentHost/common/state/protocol/state.js';
+import { ChatInputQuestionKind, ChatInputResponseKind, ConfirmationOptionKind, ModelSelection, SessionModelInfo, ToolCallStatus } from '../../../../../platform/agentHost/common/state/protocol/state.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
@@ -660,6 +660,41 @@ suite('CollaborationRoomWidget', () => {
 			repeatedReport: container.querySelector('.room-roster')?.textContent?.includes('Duplicate report'),
 			distinctAuthors: new Set(accents).size,
 		}, { repeatedReport: false, distinctAuthors: 2 });
+	});
+
+	test('Add Agent grows the roster, survives a stopped room, and withdraws at capacity', async () => {
+		const { facade, panel } = setup('running', 1);
+		const add = panel.querySelector<HTMLButtonElement>('.room-add-member')!;
+		const added: (ModelSelection | undefined)[] = [];
+		facade.addMember = async model => { added.push(model); };
+		const room = facade.activeRoom.get()!;
+
+		add.click();
+		await timeout(0);
+		const whileRunning = { hidden: add.hidden, disabled: add.disabled };
+
+		facade.activeRoom.set({ ...room, members: Array.from({ length: MAX_ROOM_WORKERS }, (_, index) => ({ ...room.members[0], id: `m${index}`, name: `Copilot-${index + 1}` })) }, undefined);
+		const atCapacity = { disabled: add.disabled, explained: add.title.includes(String(MAX_ROOM_WORKERS)) };
+
+		// A stopped room can be resumed, so it can still gain a peer; a cancellation
+		// in flight is the only state that withdraws the action.
+		facade.activeRoom.set({ ...room, state: 'stopped' }, undefined);
+		const whenStopped = { hidden: add.hidden, disabled: add.disabled };
+		facade.activeRoom.set({ ...room, state: 'stopping' }, undefined);
+
+		assert.deepStrictEqual({
+			calls: added.length,
+			whileRunning,
+			atCapacity,
+			whenStopped,
+			hiddenWhileStopping: add.hidden,
+		}, {
+			calls: 1,
+			whileRunning: { hidden: false, disabled: false },
+			atCapacity: { disabled: true, explained: true },
+			whenStopped: { hidden: false, disabled: false },
+			hiddenWhileStopping: true,
+		});
 	});
 
 	test('the run tab offers only the actions the room state allows', () => {

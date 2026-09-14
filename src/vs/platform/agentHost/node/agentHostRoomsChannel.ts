@@ -13,7 +13,7 @@ export function createAgentHostRoomsChannel(rooms: IAgentHostRoomsService, dispo
 	const channel = ProxyChannel.fromService(rooms, disposables);
 	const methods = new Set<string>([
 		'getCapabilities', 'isRepository', 'listRooms', 'getRoom', 'createRoom', 'getMessages', 'postMessage', 'retryMessage',
-		'startRoom', 'pauseRoom', 'stopRoom', 'stopMember', 'retryMember', 'getArtifact',
+		'startRoom', 'pauseRoom', 'stopRoom', 'addMember', 'stopMember', 'retryMember', 'getArtifact',
 		'getRoomConfiguration', 'setRoomConfiguration', 'setMemberModel', 'setContinuous',
 	] satisfies (keyof IAgentHostRoomsService)[]);
 	return {

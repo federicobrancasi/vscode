@@ -166,6 +166,7 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 		startRoom: (roomId, limits) => this._roomsProxy().startRoom(roomId, limits),
 		pauseRoom: roomId => this._roomsProxy().pauseRoom(roomId),
 		stopRoom: roomId => this._roomsProxy().stopRoom(roomId),
+		addMember: (roomId, model) => this._roomsProxy().addMember(roomId, model),
 		stopMember: (roomId, memberId) => this._roomsProxy().stopMember(roomId, memberId),
 		retryMember: (roomId, memberId) => this._roomsProxy().retryMember(roomId, memberId),
 		getRoomConfiguration: roomId => this._roomsProxy().getRoomConfiguration(roomId),
