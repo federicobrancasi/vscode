@@ -34,26 +34,27 @@ specification; this document is the practical guide and overview.
 
 ## Project branch
 
-This project lives on the local branch **`fb/agent-collab`** in the
-[VS Code codebase][vscode].
+This project lives on the branch **`fb/agent-collab`**, published to a fork of
+the [VS Code codebase][vscode] rather than to the upstream repository.
 
 | Reference | Value |
 |-----------|-------|
-| Project branch | `fb/agent-collab` |
-| Committed implementation tip | `2daf8df37086b188fb76d88e65421554c058082b` - Improve Agent Collab controls, models, and follow-ups |
+| Branch | [`fb/agent-collab`][branch] |
+| Fork | [`federicobrancasi/vscode`][fork] |
+| Upstream | [`microsoft/vscode`][vscode] |
 | Foundation commit | `ee704679f22997f5d18a64d83bfa93e76cdd336a` - Add local Copilot collaboration rooms |
-| Publication | Local only; the branch has not been pushed to GitHub |
 
-There is no public GitHub branch URL for this work yet. The GitHub links in
-[Sources](#sources) cite the upstream editor and external inspiration, not a
-published Agent Collab branch. The implementation commit above is the baseline
-for this guide; the documentation itself is maintained in the working tree.
-
-From the local checkout, inspect the project with:
+The branch is not proposed upstream. Clone the fork directly to work on it, or
+add it as a second remote on an existing VS Code checkout:
 
 ```sh
-git log -2 --oneline fb/agent-collab
-git show --stat 2daf8df37086b188fb76d88e65421554c058082b
+# fresh machine
+git clone --branch fb/agent-collab https://github.com/federicobrancasi/vscode.git
+
+# or, on an existing microsoft/vscode checkout
+git remote add federicobrancasi https://github.com/federicobrancasi/vscode.git
+git fetch federicobrancasi fb/agent-collab
+git switch fb/agent-collab
 ```
 
 ## Inspiration and references
@@ -110,16 +111,22 @@ and a native Agents Window interface:
   mentions, delivery status, and published patch references.
 - **Follow-ups after completion:** normal Send wakes finished or stopped peers
   without requiring the user to open each session or press Resume first.
-- **Live steering:** a separate action delivers guidance to a busy peer's
-  current turn instead of queuing it for the next turn.
+- **One Send:** a post reaches a working peer as live guidance during its
+  current turn, and wakes a finished peer with a new one, without asking the
+  human to choose a delivery mechanism for a message they already wrote.
 - **Independent model choices:** compact, searchable menus before creation and
   afterwards, with pending changes and application errors shown honestly.
 - **Persistent configuration:** room-wide and per-peer mode, permissions, and
   sandbox choices no longer snap back to manual settings on the next turn.
 - **Room-level requests:** workspace trust, tool/result approvals, questions,
   and plan reviews can be handled without opening every peer.
-- **Chat-first layout:** a full-height conversation and bottom composer beside
-  a resizable, collapsible settings panel, with a drawer at narrow widths.
+- **Chat-first layout:** the room view is the conversation and its composer;
+  settings move to the Agents window side panel, where four fixed tabs (Run,
+  Agents, Rules, Approvals) take the place Changes and Files hold in an
+  ordinary session.
+- **Patch sharing that works:** peers publish Git patches of their own work and
+  read each other's, so a room can build on a result rather than only hear
+  about it.
 - **Continuous history:** virtualized messages, earlier-history loading, stable
   scroll anchors, author colors, and wrapping for long messages. No duplicate
   "Reported work" cards or Older/Newer Posts controls.
@@ -136,14 +143,25 @@ Copilot agent host, an appropriate Copilot sign-in, and a local Git repository
 with at least one commit. AI features and the required models/tools must be
 permitted by the user's configuration and organizational policy.
 
-This is not a standalone Marketplace extension. For development, follow the
-[VS Code contribution instructions][vscode-development] to prepare the checkout.
-The existing [source launcher](../../../scripts/code.sh) can open the Agents
-Window:
+This is not a standalone Marketplace extension; it has to be run from source.
+On a machine that has never built VS Code, follow the
+[VS Code contribution instructions][vscode-development] for the platform
+toolchain first, then:
 
 ```sh
+git clone --branch fb/agent-collab https://github.com/federicobrancasi/vscode.git
+cd vscode
+npm install          # do not symlink node_modules from another checkout
+npm run compile      # builds the client and the built-in extensions
 ./scripts/code.sh --agents
 ```
+
+`npm run compile` is required rather than `npm run transpile-client`: the
+latter populates `out/` but not `extensions/*/out/`, and the Agents window needs
+the built-in extensions. Use `npm run watch` while iterating.
+
+Sign in to Copilot in the launched build before starting a room. A room that
+cannot reach an authenticated host can be read and stopped, but not started.
 
 ### Create a room
 
@@ -158,7 +176,11 @@ Window:
    The experimental setting does not override disabled AI features, policy,
    authentication, or an unsupported host.
 2. Open **Agent Collab** in the Sessions sidebar, or run
-   **Agents: Open Collaboration Room** from the Command Palette.
+   **Agents: Open Collaboration Room** from the Command Palette. Rooms you have
+   already created are listed underneath it; the row's **New Collaboration**
+   action (or **Agents: New Collaboration**) clears the selection and leaves the
+   creation form ready, so a second room can be started without leaving the one
+   you are in.
 3. Describe the shared goal. The room title is taken from it.
 4. Choose a folder. Peers work in Git worktrees, so a plain folder is offered a
    one-time setup (`git init` plus a baseline commit) with its exact path shown;
@@ -182,11 +204,16 @@ Turn and deadline limits are **optional and unset by default**. Set them under
 That can consume additional model tokens. Merely opening a room, reading its
 history, creating it, or choosing a model does not start a turn.
 
+Sending is one action. When a peer is mid-turn and the host supports steering,
+the post is delivered as live guidance so it lands during that turn; otherwise
+it is an ordinary post, which wakes finished peers with a new turn. Either way
+the message is in the room, so a peer that is busy now reads it when it comes
+free. Control/Command+Enter always steers.
+
 | Action | Recipients | Effect |
 |--------|------------|--------|
 | Send without `@mentions` | Every peer in the room | Wakes finished/stopped peers; queues the message for busy peers |
 | Send with `@Copilot-2` | Only the mentioned peers | The same follow-up behavior, without waking the rest of the room |
-| Steer Agents | Mentioned peers, or everyone without mentions | Delivers guidance into active turns; schedules idle recipients |
 | Reply | Determined by the mentions in the composer | Links the post to an earlier message; check the inserted mention before sending |
 | Retry Delivery | Undelivered recipients of that saved human message | Retries delivery without adding a duplicate post |
 
@@ -202,8 +229,8 @@ Send requests an answer from every peer, including peers that have finished.
 @Copilot-2 Please check the mobile navigation once more.
 ```
 
-Send requests a follow-up only from Copilot-2. For a change that should reach a
-busy agent during its current turn, use **Steer Agents** instead.
+Send requests a follow-up only from Copilot-2, and reaches it during its current
+turn if it is working.
 
 Text follow-ups from an idle peer's individual chat are also shared in the room
 and addressed to that peer. During an active turn, use the room composer rather
@@ -232,6 +259,9 @@ that the model understood the request or completed it correctly. Errors,
 cancellation, and interrupted delivery remain visible.
 
 ### Run controls
+
+These live in the **Run** tab of the side panel, which offers only the actions
+the room's current state allows rather than showing them all and disabling most.
 
 | Control or state | Meaning |
 |------------------|---------|
@@ -305,21 +335,36 @@ to make collaboration more convenient.
 ## Using the room interface
 
 ```text
-Sessions sidebar | Room title/status       Resume  Pause  Stop  Room Settings
-                 |
-                 | Shared conversation              | Room Settings
-                 |                                  | Room selection
-                 | Copilot-1: findings...            | Copilot-1 [model]
-                 | Copilot-2: reply...               | Copilot-2 [model]
-                 | You: guidance...                 | All peers controls
-                 |                                  | Goal and rules
-                 |                  Jump to Latest   | Optional limits
-                 | Message input       Send / Steer | Approvals/questions
+Sessions sidebar | Room title/status      Room Settings | Run | Agents | Rules | Approvals
+                 |                                      |
+                 | Shared conversation                  | Start / Pause / Stop All
+                 |                                      | Needs Attention
+                 | Copilot-1: findings...               | Optional run limits
+                 | Copilot-2: reply...                  |
+                 | You: guidance...                     |
+                 |                       Jump to Latest |
+                 | Message input                      ↑ |
 ```
 
-The conversation owns the main area. Settings scroll independently, so ten
-agent rows or a long approval form do not push the chat off screen. The panel
-can be resized or collapsed; on narrow windows it becomes a room-scoped drawer.
+The room view holds the conversation and nothing else. Its settings live in the
+Agents window **side panel**, taking the place that Changes and Files hold in an
+ordinary session: opening a room brings Room Settings forward, and closing it
+restores whichever container was showing before. Because the workbench hosts the
+panel, its width and visibility are the auxiliary bar's.
+
+The panel has four tabs, whatever the room's size:
+
+| Tab | Holds |
+|-----|-------|
+| Run | The run actions and the optional run limits |
+| Agents | Every peer, with its model, state, and Stop/Retry actions |
+| Rules | The room's goal, rules, folder and pinned base, plus shared configuration |
+| Approvals | Workspace trust and anything awaiting a decision |
+
+Giving each member its own tab made the strip grow with the room until it
+scrolled, so members are a list inside one tab instead. Pending approvals and
+member failures are badged, so an inactive tab still reports that it needs
+attention.
 
 Messages retain visible author names as well as stable accents. Body text uses
 normal theme foreground colors, long paragraphs wrap, and agent-authored
@@ -341,8 +386,8 @@ Keyboard support includes:
 - Tab and Shift+Tab between controls; arrow keys and Page Up/Page Down in history.
 - Enter to send, Shift+Enter for a newline, and Control/Command+Enter to steer.
 - Arrow keys and Enter to choose a mention; Escape to dismiss suggestions.
-- Left/Right Arrow on the focused Room Settings button to resize an open side
-  panel; Escape to close the narrow drawer.
+- Room Settings, and Needs Attention, bring the side panel forward; Escape in
+  the panel returns to the conversation.
 - Accessibility Help and Accessible View for instructions and a plain-text view
   of participants, requests, and loaded messages.
 
@@ -427,26 +472,30 @@ merging, scroll anchors, long-message wrapping, and accessibility.
 With a prepared checkout and fresh build output, focused test entry points are:
 
 ```sh
+# focused: the room host, and the room renderer - 741 and 166 tests
 ./scripts/test.sh --runGlob '**/agentHost/test/**/{agentHostRooms*,copilotAgent,copilotSessionLauncher,chatContributions}.test.js'
 ./scripts/test.sh --runGlob '**/sessions/**/collaboration*.test.js'
+
+# the surrounding suites this work has to keep green - 7676 and 3605 tests
+./scripts/test.sh --runGlob '**/agentHost/**/*.test.js'
+./scripts/test.sh --runGlob '**/sessions/**/*.test.js'
 ```
 
 The [themed fixtures](contrib/collaboration/test/browser/collaborationRoom.fixture.ts)
 cover different peer counts, initial model choices, pending/error states, long
-conversations, approvals, collapsed panels, narrow layouts, and high contrast.
+conversations, approvals, the side-panel settings, narrow layouts, and high
+contrast.
 
-Recorded implementation validation included 729 passing host tests and 163
-passing renderer tests, with one platform-specific host skip. A later
-150-test focused run verified the final Send/reactivation behavior. These runs
-overlap and are not a single combined test count. Type checks, scoped hygiene,
-and module-layer checks also passed during implementation.
+Every command above passes at the tip of this branch. The runs overlap, so the
+counts are not a single combined total. `npm run typecheck-client`,
+`npm run valid-layers-check`, and scoped hygiene also pass.
 
-The updated Code OSS window was exercised with the existing room: all 21
-messages and three worktrees were preserved; the real model catalog was
-reachable from each peer's menu. Controlled tests verify scheduling and
-reactivation. This is **not** a claim that ten paid agents were benchmarked
-simultaneously, that a paid live follow-up was sent for validation, or that the
-Gemma Challenge's results were reproduced.
+The build has been exercised against live rooms, not only fixtures: rooms and
+worktrees survive a restart, the real model catalog is reachable per peer, and a
+four-agent room on a Python optimisation task produced peers that claimed
+separate routines in the shared conversation and reported measured speedups.
+This is **not** a claim that ten paid agents were benchmarked simultaneously or
+that the Gemma Challenge's results were reproduced.
 
 ## Limitations and troubleshooting
 
@@ -456,11 +505,14 @@ Gemma Challenge's results were reproduced.
   not implemented by this work.
 - Worktrees are not security sandboxes. Keep normal trust, content exclusions,
   managed settings, and tool restrictions in effect.
-- Published patches are not automatically merged. Live patch-publication
-  failures observed during development were not claimed fixed by the UI/model
-  redesign; a missing artifact is not evidence of successful sharing.
+- Published patches are not automatically merged; another peer inspects one and
+  decides whether to apply it in its own worktree. The publication failures seen
+  earlier in development are fixed: content exclusion is now checked against the
+  member's own worktree, which is the session the policy is evaluated in, rather
+  than also against the source repository, whose paths are outside that session
+  and made the whole check report "unavailable" and fail closed.
 - No agent is guaranteed to comply, respond usefully, or avoid overlapping
-  ideas. Inspect evidence and use steering when necessary.
+  ideas. Inspect evidence, and send guidance when necessary.
 - Existing messages and worktrees survive room navigation. Process restart
   restores persistent state but does not silently replay ambiguous work or
   automatically resume spending.
@@ -510,4 +562,6 @@ projects and may evolve independently of this checkout.
 [gemma-api]: https://huggingface.co/spaces/gemma-challenge/gemma-bucket-sync/blob/main/DESIGN.md
 [copilot-runtime]: https://github.com/github/copilot-agent-runtime
 [vscode]: https://github.com/microsoft/vscode
+[fork]: https://github.com/federicobrancasi/vscode
+[branch]: https://github.com/federicobrancasi/vscode/tree/fb/agent-collab
 [vscode-development]: https://github.com/microsoft/vscode/wiki/How-to-Contribute
