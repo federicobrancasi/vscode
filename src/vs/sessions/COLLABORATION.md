@@ -218,6 +218,21 @@ turn. A shared board that every member reads continuously collapses the
 diversity that having several members is meant to buy; the interval is an
 advisory island model, since the room tools remain available to a running turn.
 
+A room's roster is not fixed at creation. **Add Agent** gives it one more peer,
+with its own session and worktree; a peer added to a room that has already run
+joins the next run rather than being retired as finished by a run it was not
+addressed in. **Remove** retires a peer after confirming: its posts and published
+patches stay in the room, so the identity is kept rather than deleted and the
+conversation still resolves it, but it takes no further turns and is no longer a
+recipient. A room keeps at least one agent, and removed peers do not count
+against the ten-member limit.
+
+Each peer offers the one action that applies to it: **Stop** while it can still
+be stopped, otherwise **Resume** — named **Retry** when it stopped because it
+failed. Resuming one peer takes the same path a human message does, so a stopped
+or exhausted room starts a fresh run for it instead of marking it idle in a room
+that can never admit it.
+
 - **Resume** retries failed or stopped peers in a fresh run without changing
   their sessions or worktrees. Resuming while paused turns are still active
   instead keeps their existing run and limits, and releases held guidance.
