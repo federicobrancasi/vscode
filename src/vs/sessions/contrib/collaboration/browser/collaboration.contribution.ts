@@ -10,7 +10,7 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { autorun } from '../../../../base/common/observable.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
-import { OpenCollaborationRoomCommandId } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { NewCollaborationRoomCommandId, OpenCollaborationRoomCommandId } from '../../../../platform/agentHost/common/agentHostRooms.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry, ConfigurationScope } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -21,8 +21,9 @@ import { ChatContextKeys } from '../../../../workbench/contrib/chat/common/actio
 import { Menus } from '../../../browser/menus.js';
 import { HasSelectedCollaborationRoomContext } from '../../../common/contextkeys.js';
 import { ICollaborationRoomViewService } from '../../../services/collaboration/browser/collaborationRoomView.js';
-import { CollaborationAvailableContext, CollaborationEnabledSettingId, CollaborationRoomVisibleContext, CollaborationSupportedContext, ICollaborationService } from '../../../services/collaboration/common/collaboration.js';
+import { COLLABORATION_SECTION_ID, CollaborationAvailableContext, CollaborationEnabledSettingId, CollaborationRoomVisibleContext, CollaborationSupportedContext, ICollaborationService } from '../../../services/collaboration/common/collaboration.js';
 import { ICustomViewService } from '../../../services/customView/browser/customViewService.js';
+import { SessionSectionToolbarMenuId, SessionSectionTypeContext } from '../../sessions/browser/views/sessionsList.js';
 import { CollaborationArtifactProvider } from './collaborationArtifactProvider.js';
 import { collaborationRoomViewDescriptor } from './collaborationRoomView.js';
 import { COLLABORATION_SETTINGS_CONTAINER_ID, COLLABORATION_SETTINGS_VIEW_ID, CollaborationSettingsViewPane, CollaborationSettingsViewPaneContainer } from './collaborationSettingsView.js';
@@ -218,6 +219,36 @@ registerAction2(class OpenCollaborationRoomAction extends Action2 {
 				await service.selectRoom(roomId);
 			}
 		}
+	}
+});
+
+registerAction2(class NewCollaborationRoomAction extends Action2 {
+	constructor() {
+		super({
+			id: NewCollaborationRoomCommandId,
+			title: localize2('room.new', "New Collaboration"),
+			category: localize2('room.category', "Agents"),
+			icon: Codicon.plus,
+			f1: true,
+			precondition: roomEnabled,
+			menu: [{
+				id: SessionSectionToolbarMenuId,
+				group: 'navigation',
+				order: 0,
+				when: ContextKeyExpr.and(roomEnabled, ContextKeyExpr.equals(SessionSectionTypeContext.key, COLLABORATION_SECTION_ID)),
+			}],
+		});
+	}
+
+	override async run(accessor: ServicesAccessor): Promise<void> {
+		const service = accessor.get(ICollaborationService);
+		if (service.availability.get() === 'disabled') {
+			return;
+		}
+		// Clearing the selection is what makes this "new": the room view falls back to
+		// its creation form, rather than reopening whichever room was last active.
+		accessor.get(ICollaborationRoomViewService).open();
+		await service.selectRoom(undefined);
 	}
 });
 

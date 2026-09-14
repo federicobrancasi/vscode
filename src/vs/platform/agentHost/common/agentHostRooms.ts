@@ -13,6 +13,7 @@ import type { ModelSelection } from './state/sessionState.js';
 export const AgentHostRoomsChannelName = 'agentHostRooms';
 export const MAX_ROOM_WORKERS = 10;
 export const OpenCollaborationRoomCommandId = 'workbench.action.collaboration.open';
+export const NewCollaborationRoomCommandId = 'workbench.action.collaboration.new';
 
 export type AgentHostRoomState = 'created' | 'running' | 'idle' | 'paused' | 'stopping' | 'stopped' | 'interrupted';
 export type AgentHostRoomMemberState = 'pending' | 'starting' | 'working' | 'idle' | 'blocked' | 'needsInput' | 'stopping' | 'stopped' | 'failed' | 'interrupted';
