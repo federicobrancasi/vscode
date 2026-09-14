@@ -110,6 +110,9 @@ Registry.as<IViewsRegistry>(ViewContainerExtensions.ViewsRegistry).registerViews
 	windowEnablement: WindowEnablement.Sessions,
 }], collaborationSettingsContainer);
 
+/** Enough for the room's four tabs to show their labels. */
+const ROOM_SETTINGS_MINIMUM_WIDTH = 320;
+
 /**
  * Keeps the Agents window side panel in step with the room: room settings while a
  * collaboration room is open, and whatever the user had before (Changes, Files) once
@@ -153,6 +156,11 @@ class CollaborationSidePanelSwitcher extends Disposable {
 			hidden: !this.layoutService.isVisible(Parts.AUXILIARYBAR_PART),
 		};
 		this.layoutService.setPartHidden(false, Parts.AUXILIARYBAR_PART);
+		// A session's Changes and Files read fine in a narrow panel, but the room's
+		// tabbed settings do not, so give them room without shrinking a wider choice.
+		if (this.layoutService.getDockedAuxiliaryBarWidth() < ROOM_SETTINGS_MINIMUM_WIDTH) {
+			this.layoutService.setDockedAuxiliaryBarWidth(ROOM_SETTINGS_MINIMUM_WIDTH);
+		}
 		this.showSettings();
 	}
 

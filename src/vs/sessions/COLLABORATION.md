@@ -315,7 +315,10 @@ roving focus and arrow, Home and End navigation; pending approvals and member
 failures are badged so an inactive tab still reports that it needs attention. It
 carries the shared modern editor-tab classes that the Agents window composite bar
 also adopts, so room tabs match the rest of the window rather than inventing
-their own appearance.
+their own appearance, and each is sized to its label so a word is never clipped
+down the middle. Opening a room also widens the side panel if it sits below the
+width those tabs need: a session's Changes and Files read fine in a narrow panel,
+the room's settings do not.
 
 A member's row shows its model, state, and actual runtime activity;
 explicit work reports appear in the shared conversation without duplicate

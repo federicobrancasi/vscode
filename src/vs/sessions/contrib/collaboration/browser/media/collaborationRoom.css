@@ -669,7 +669,8 @@
 	align-items: center;
 	gap: var(--vscode-spacing-size60);
 	position: relative;
-	flex: 1 1 0;
+	/* Sized to its label, like the workbench's own tabs, so a word is never clipped. */
+	flex: 0 1 auto;
 	min-width: 0;
 	justify-content: center;
 	padding: var(--vscode-spacing-size60) var(--vscode-spacing-size80);
