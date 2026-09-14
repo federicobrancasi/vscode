@@ -503,6 +503,17 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			&& (run.limits.maxTurns === undefined || run.admittedTurns < run.limits.maxTurns);
 	}
 
+	/**
+	 * A peer added to a room that has already run, and not yet admitted a turn. A run
+	 * it was not addressed in must not retire it: it joins instead, so an agent added
+	 * later starts working rather than being swept aside as finished. In a room that
+	 * has never run every member is still pending, and addressing one there must
+	 * start only that one, so this is scoped to rooms that already have a run.
+	 */
+	private _joinedMidRoom(record: IRoomRecord, member: IAgentHostRoomMember): boolean {
+		return !member.removed && record.room.run !== undefined && member.state === 'pending' && member.turns === 0;
+	}
+
 	private _wakeHumanRecipients(record: IRoomRecord, recipients: readonly string[]): IRoomRecord {
 		const targets = new Set(recipients.filter(id => !this._memberStops.has(id)));
 		if (!targets.size || record.room.state === 'paused' || record.room.state === 'stopping' || this._stops.has(record.room.id)) {
@@ -527,11 +538,13 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 						...member, state: member.state === 'working' || member.state === 'starting' || member.state === 'needsInput' ? member.state : 'idle', error: undefined,
 						work: member.work ? { ...member.work, nextStep: undefined } : undefined
 					}
-					: freshRun ? { ...member, state: member.state === 'failed' ? 'failed' : 'stopped' } : member),
+					: freshRun && !this._joinedMidRoom(record, member) ? { ...member, state: member.state === 'failed' ? 'failed' : 'stopped' } : member),
 			},
 			executions: record.executions.map(execution => ({
 				...execution,
-				needsTurn: targets.has(execution.memberId) ? true : freshRun ? false : execution.needsTurn,
+				needsTurn: targets.has(execution.memberId) || this._joinedMidRoom(record, this._member(record, execution.memberId))
+					? true
+					: freshRun ? false : execution.needsTurn,
 			})),
 		};
 	}
@@ -545,7 +558,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			names.push(match.groups!.name);
 		}
 		if (options.mode === 'steer' && names.length === 0) {
-			return record.room.members.map(member => member.id);
+			return record.room.members.filter(member => !member.removed).map(member => member.id);
 		}
 		return [...new Set(names.map(name => {
 			const member = record.room.members.find(member => member.id === name || member.name.toLowerCase() === String(name).toLowerCase());
@@ -701,7 +714,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 		const room = await this._queue.queue(roomId, async () => {
 			const record = this._record(roomId);
-			if (record.room.members.length >= MAX_ROOM_WORKERS) {
+			if (record.room.members.filter(member => !member.removed).length >= MAX_ROOM_WORKERS) {
 				throw new Error(localize('rooms.memberLimit', "A room can hold at most {0} members.", MAX_ROOM_WORKERS));
 			}
 			// A stopped room can still be resumed, so it accepts members; only an
@@ -737,14 +750,60 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		return room;
 	}
 
+	/**
+	 * Retires a peer from the roster. Its messages and published patches remain, so
+	 * the identity is kept rather than deleted; it simply takes no further turns and
+	 * stops being a recipient. Any in-flight turn is cancelled first.
+	 */
+	async removeMember(roomId: string, memberId: string): Promise<IAgentHostRoom> {
+		await this._ready;
+		const record = this._record(roomId);
+		const member = this._member(record, memberId);
+		if (member.removed) {
+			return record.room;
+		}
+		if (record.room.members.filter(candidate => !candidate.removed).length <= 1) {
+			throw new Error(localize('rooms.lastMember', "A room needs at least one agent."));
+		}
+		if (!['stopped', 'failed', 'interrupted', 'pending'].includes(member.state)) {
+			await this.stopMember(roomId, memberId);
+		}
+		const room = await this._queue.queue(roomId, async () => {
+			const current = this._record(roomId);
+			return (await this._save({
+				...current,
+				room: {
+					...current.room,
+					members: current.room.members.map(item => item.id === memberId
+						? { ...item, removed: true, state: 'stopped', activity: undefined, work: undefined } : item),
+				},
+				executions: current.executions.map(execution => execution.memberId === memberId
+					? { ...execution, needsTurn: false, turnId: undefined, runId: undefined } : execution),
+			})).room;
+		});
+		this._schedule(roomId);
+		return room;
+	}
+
 	async retryMember(roomId: string, memberId: string): Promise<IAgentHostRoom> {
 		await this._ready;
 		const room = await this._queue.queue(roomId, async () => {
 			const record = this._record(roomId);
 			const member = this._member(record, memberId);
-			if (this._stops.has(roomId) || this._memberStops.has(memberId) || !['failed', 'stopped', 'interrupted', 'blocked'].includes(member.state)) {
+			if (member.removed || this._stops.has(roomId) || this._memberStops.has(memberId) || !['failed', 'stopped', 'interrupted', 'blocked'].includes(member.state)) {
 				throw new Error(localize('rooms.memberNotRetryable', "This member is not ready to retry."));
 			}
+			// Resuming one peer takes the same path a human message does, so a stopped or
+			// exhausted room starts a fresh run for it instead of leaving the button to
+			// mark the member idle in a room that can never admit it.
+			const woken = this._wakeHumanRecipients({
+				...record,
+				executions: record.executions.map(execution => execution.memberId === memberId ? { ...execution, turnId: undefined, runId: undefined } : execution),
+			}, [memberId]);
+			if (woken !== record) {
+				return (await this._save(woken)).room;
+			}
+			// A paused or still-settling room keeps the peer ready for its next admission.
 			return (await this._save({
 				...record,
 				room: {
@@ -947,7 +1006,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 		const ready = record.room.members.filter(member => {
 			const execution = this._execution(record, member.id);
-			return !this._memberStops.has(member.id) && ['pending', 'idle', 'blocked'].includes(member.state) && !execution.turnId && this._runtime.isIdle(member.sessionUri)
+			return !member.removed && !this._memberStops.has(member.id) && ['pending', 'idle', 'blocked'].includes(member.state) && !execution.turnId && this._runtime.isIdle(member.sessionUri)
 				&& !record.messages.some(message => message.deliveries.some(delivery => delivery.memberId === member.id && delivery.state === 'steering'))
 				&& (execution.needsTurn || record.messages.some(message => message.deliveries.some(delivery => delivery.memberId === member.id && delivery.state === 'pending')));
 		}).slice(0, remaining);

@@ -66,6 +66,7 @@ interface IMemberElements {
 	readonly error: HTMLElement;
 	readonly stop: HTMLButtonElement;
 	readonly retry: HTMLButtonElement;
+	readonly remove: HTMLButtonElement;
 }
 
 export class CollaborationRoomWidget extends Disposable implements ICollaborationRoomView {
@@ -456,7 +457,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			// The home card carries its own title, so the header stays empty until a room is open.
 			this.heading.textContent = room?.title ?? '';
 			this.header.classList.toggle('room-header-empty', !room);
-			this.subtitle.textContent = room ? localize('room.summary', "{0} | {1} peers | Base {2}{3}", roomStateLabel(room.state), room.members.length, room.baseRevision.slice(0, 8),
+			// Removed peers keep their posts but are no longer part of the room's roster.
+			const activeMembers = room?.members.filter(member => !member.removed) ?? [];
+			this.subtitle.textContent = room ? localize('room.summary', "{0} | {1} peers | Base {2}{3}", roomStateLabel(room.state), activeMembers.length, room.baseRevision.slice(0, 8),
 				room.run ? localize('room.runSummary', " | {0} turns{1}{2}", room.run.admittedTurns,
 					room.run.limits.maxTurns === undefined ? '' : localize('room.turnLimit', " / {0} maximum", room.run.limits.maxTurns),
 					room.run.deadline === undefined ? '' : localize('room.runDeadline', " | Deadline {0}", new Date(room.run.deadline).toLocaleTimeString())) : '') : '';
@@ -488,7 +491,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.stopButton.disabled = busy || !available;
 			// A stopped room can still be resumed, so it can still gain a peer; only an
 			// in-flight cancellation withdraws the action. The host caps the roster.
-			const atCapacity = !!room && room.members.length >= MAX_ROOM_WORKERS;
+			const atCapacity = !!room && room.members.filter(member => !member.removed).length >= MAX_ROOM_WORKERS;
 			this.addMemberButton.hidden = !room || room.state === 'stopping';
 			this.addMemberButton.disabled = busy || !available || atCapacity;
 			this.addMemberButton.title = atCapacity
@@ -581,6 +584,26 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			primaryButton: localize('room.initializeFolderConfirm', "Set Up Folder"),
 		});
 		return confirmed;
+	}
+
+	/** Removal cancels live work, so it is confirmed rather than acted on immediately. */
+	private async confirmRemoveMember(memberId: string): Promise<void> {
+		const member = this.collaborationService.activeRoom.get()?.members.find(candidate => candidate.id === memberId);
+		if (!member) {
+			return;
+		}
+		const working = ['working', 'starting', 'needsInput', 'blocked'].includes(member.state);
+		const { confirmed } = await this.dialogService.confirm({
+			type: 'warning',
+			message: localize('room.removePeerConfirm', "Remove {0} from this room?", member.name),
+			detail: working
+				? localize('room.removePeerWorkingDetail', "Its current turn is cancelled. Posts it already made, and any patches it published, stay in the room, but it takes no further turns.")
+				: localize('room.removePeerDetail', "Posts it already made, and any patches it published, stay in the room, but it takes no further turns."),
+			primaryButton: localize('room.removePeerAction', "Remove Agent"),
+		});
+		if (confirmed) {
+			await this.collaborationService.removeMember(memberId);
+		}
 	}
 
 	private async createRoom(options: IAgentHostRoomCreateOptions): Promise<void> {
@@ -693,7 +716,13 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	}
 
 	private renderRoster(room: IAgentHostRoom, disabled: boolean, models: readonly SessionModelInfo[]): void {
-		for (const member of room.members) {
+		for (const [id, elements] of this.memberElements) {
+			if (room.members.some(member => member.id === id && member.removed)) {
+				elements.element.remove();
+				this.memberElements.delete(id);
+			}
+		}
+		for (const member of room.members.filter(member => !member.removed)) {
 			let elements = this.memberElements.get(member.id);
 			if (!elements) {
 				const element = this.roster.appendChild($('.room-member'));
@@ -720,14 +749,21 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				const actions = heading.appendChild($('.room-member-actions'));
 				const stop = this.button(actions, localize('room.stopPeer', "Stop"), () => this.collaborationService.stopMember(member.id), this.memberDisposables);
 				const retry = this.button(actions, localize('room.retryPeer', "Retry"), () => this.collaborationService.retryMember(member.id), this.memberDisposables);
-				elements = { element, open, state, activity, model, error, stop, retry };
+				const remove = this.button(actions, localize('room.removePeer', "Remove"), () => this.confirmRemoveMember(member.id), this.memberDisposables);
+				elements = { element, open, state, activity, model, error, stop, retry, remove };
 				this.memberElements.set(member.id, elements);
 			}
 			elements.element.dataset.state = member.state;
 			elements.open.style.color = collaborationAuthorAccent(room, member.id);
 			elements.open.textContent = member.name;
-			elements.open.setAttribute('aria-label', localize('room.openPeer', "Open {0}'s existing session for detailed activity and changes", member.name));
-			elements.open.title = member.worktreeUri ?? '';
+			// A peer only has a chat once it has taken a turn, so offering to open one
+			// before that leads to a dead end.
+			const hasSession = member.turns > 0;
+			elements.open.disabled = !hasSession;
+			elements.open.setAttribute('aria-label', hasSession
+				? localize('room.openPeer', "Open {0}'s existing session for detailed activity and changes", member.name)
+				: localize('room.openPeerWaiting', "{0} has not started yet, so it has no session to open", member.name));
+			elements.open.title = hasSession ? (member.worktreeUri ?? '') : localize('room.openPeerWaitingHint', "Opens once this peer takes its first turn.");
 			elements.state.textContent = localize('room.memberSummary', "{0} | {1} turns", memberStateLabel(member.state), member.turns);
 			elements.activity.textContent = member.activity ?? '';
 			elements.activity.hidden = !member.activity;
@@ -735,11 +771,29 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			elements.model.state.set(this.collaborationService.canSetMemberModel.get() ? modelState : { ...modelState, detail: unsupportedMemberModelsMessage }, undefined);
 			elements.error.textContent = member.error ?? '';
 			elements.error.hidden = !member.error;
-			elements.stop.disabled = disabled || ['stopped', 'stopping', 'failed', 'pending'].includes(member.state);
+			// A peer offers the one action that applies to it: Stop while it can still be
+			// stopped, otherwise Resume to put it back to work. Retry is the same call,
+			// named for a peer that stopped because it failed.
+			const canResume = ['failed', 'stopped', 'interrupted', 'blocked'].includes(member.state);
+			elements.stop.hidden = canResume;
+			elements.stop.disabled = disabled || ['stopping', 'pending'].includes(member.state);
 			elements.stop.setAttribute('aria-label', localize('room.stopPeerLabel', "Stop {0}", member.name));
-			elements.retry.hidden = !['failed', 'interrupted'].includes(member.state);
-			elements.retry.disabled = disabled || !['running', 'idle'].includes(room.state);
-			elements.retry.setAttribute('aria-label', localize('room.retryPeerLabel', "Retry {0} within the current run limits", member.name));
+			elements.retry.hidden = !canResume;
+			// Resuming a peer starts a run for it, so a stopped room is exactly when the
+			// action is wanted; only an in-flight cancellation withdraws it.
+			elements.retry.disabled = disabled || room.state === 'stopping';
+			const failed = ['failed', 'interrupted'].includes(member.state);
+			elements.retry.textContent = failed ? localize('room.retryPeer', "Retry") : localize('room.resumePeer', "Resume");
+			elements.retry.setAttribute('aria-label', failed
+				? localize('room.retryPeerLabel', "Retry {0} within the current run limits", member.name)
+				: localize('room.resumePeerLabel', "Resume {0} within the current run limits", member.name));
+			elements.retry.title = room.state === 'stopping'
+				? localize('room.resumePeerStopping', "Wait for the room to finish stopping.")
+				: '';
+			// A room keeps at least one agent, and its past posts survive the removal.
+			elements.remove.hidden = room.members.filter(candidate => !candidate.removed).length <= 1;
+			elements.remove.disabled = disabled || room.state === 'stopping';
+			elements.remove.setAttribute('aria-label', localize('room.removePeerLabel', "Remove {0} from the room", member.name));
 		}
 		this.updateTabPanels();
 	}
@@ -792,7 +846,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			return;
 		}
 		if (!target) {
-			throw new Error(localize('room.sessionNotReady', "This peer's session is not yet available in the local session catalog. Try again after provisioning completes."));
+			throw new Error(member.turns > 0
+				? localize('room.sessionNotReady', "This peer's session is not yet available in the local session catalog. Try again after provisioning completes.")
+				: localize('room.sessionNotStarted', "{0} has not taken a turn yet, so it has no session to open. Start the room, or send a message, to give it one.", member.name));
 		}
 		await this.sessionsService.openChat(target.session, target.chat.resource);
 	}

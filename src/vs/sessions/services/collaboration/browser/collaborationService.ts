@@ -504,6 +504,10 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		}
 	}
 
+	async removeMember(memberId: string): Promise<void> {
+		await this.mutate((api, roomId) => api.removeMember(roomId, memberId));
+	}
+
 	async stopMember(memberId: string): Promise<void> {
 		await this.mutate((api, roomId) => api.stopMember(roomId, memberId));
 	}

@@ -105,6 +105,7 @@ export interface ICollaborationService {
 	pauseRoom(): Promise<void>;
 	stopRoom(): Promise<void>;
 	addMember(model?: ModelSelection): Promise<void>;
+	removeMember(memberId: string): Promise<void>;
 	stopMember(memberId: string): Promise<void>;
 	retryMember(memberId: string): Promise<void>;
 	getArtifact(roomId: string, artifactId: string): Promise<string>;

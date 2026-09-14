@@ -330,7 +330,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		const memberIds = new Set<string>();
 		const sessions = new Set<string>();
 		for (const value of members) {
-			const member = object(value, 'member', ['id', 'name', 'sessionUri', 'chatUri', 'model', 'modelSelection', 'pendingModel', 'modelError', 'state', 'worktreeUri', 'activity', 'work', 'error', 'turns', 'configuration']);
+			const member = object(value, 'member', ['id', 'name', 'sessionUri', 'chatUri', 'model', 'modelSelection', 'pendingModel', 'modelError', 'state', 'worktreeUri', 'activity', 'work', 'error', 'turns', 'removed', 'configuration']);
 			identifier(member.id, 'member.id');
 			unique(memberIds, member.id, 'member.id');
 			text(member.name, 'member.name', false);
@@ -360,6 +360,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 			optional(member.activity, text, 'member.activity');
 			optional(member.error, text, 'member.error');
 			count(member.turns, 'member.turns');
+			optional(member.removed, boolean, 'member.removed');
 			if (member.work !== undefined) {
 				const work = object(member.work, 'member.work', ['description', 'nextStep', 'blocked', 'updatedAt']);
 				text(work.description, 'work.description');

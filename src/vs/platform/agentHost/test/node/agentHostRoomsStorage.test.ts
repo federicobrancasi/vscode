@@ -397,6 +397,16 @@ suite('AgentHostRoomsStorage', function () {
 		assert.deepStrictEqual(await storage.load(), [original]);
 	});
 
+	test('a removed member round-trips through the journal', async () => {
+		const original = record();
+		await storage.save(original);
+		const retired = { ...original.room.members[0], removed: true };
+
+		await storage.save({ ...original, room: { ...original.room, revision: 2, members: [retired] } });
+
+		assert.deepStrictEqual((await storage.load())[0].room.members.map(member => member.removed), [true]);
+	});
+
 	test('a room may gain a member, but not lose, reorder, or rewrite one', async () => {
 		const original = record();
 		await storage.save(original);

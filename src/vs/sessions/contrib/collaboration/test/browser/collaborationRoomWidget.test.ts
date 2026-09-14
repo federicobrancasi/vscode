@@ -19,7 +19,7 @@ import { ChatInputQuestionKind, ChatInputResponseKind, ConfirmationOptionKind, M
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
-import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
+import { IConfirmation, IDialogService, IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IKeybindingService } from '../../../../../platform/keybinding/common/keybinding.js';
 import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
 import { WorkbenchList } from '../../../../../platform/list/browser/listService.js';
@@ -176,6 +176,13 @@ suite('CollaborationRoomWidget', () => {
 		instantiation.stub(ISessionsPartService, new class extends mock<ISessionsPartService>() {
 			override focusSession(): void { sessionFocuses++; }
 		}());
+		const confirmations: string[] = [];
+		instantiation.stub(IDialogService, new class extends mock<IDialogService>() {
+			override async confirm(confirmation: IConfirmation) {
+				confirmations.push(confirmation.message);
+				return { confirmed: true };
+			}
+		}());
 		instantiation.stub(IEditorService, new class extends mock<IEditorService>() {
 			override async openEditor() {
 				return new class extends mock<ITextDiffEditorPane>() {
@@ -223,7 +230,7 @@ suite('CollaborationRoomWidget', () => {
 			}
 			list.reveal(list.getFocus()[0], key === 'Home' ? 0 : 1);
 		};
-		return { widget, container, input, type, key, historyKey, getMessageList, draft, starts, created, opened, artifactFocused, provider, resolutions, selectedRooms, peerSession, peerChat, viewService, facade, sendModes, openedContainers, panel, getSends: () => sends, getSessionFocuses: () => sessionFocuses };
+		return { widget, container, instantiation, confirmations, input, type, key, historyKey, getMessageList, draft, starts, created, opened, artifactFocused, provider, resolutions, selectedRooms, peerSession, peerChat, viewService, facade, sendModes, openedContainers, panel, getSends: () => sends, getSessionFocuses: () => sessionFocuses };
 	}
 
 	test('peer navigation resolves opaque identities through the owning provider', async () => {
@@ -694,6 +701,54 @@ suite('CollaborationRoomWidget', () => {
 			atCapacity: { disabled: true, explained: true },
 			whenStopped: { hidden: false, disabled: false },
 			hiddenWhileStopping: true,
+		});
+	});
+
+	test('removing a peer is confirmed, then drops it from the roster while its posts remain', async () => {
+		const { facade, panel, container, confirmations } = setup('running', 1);
+		const room = facade.activeRoom.get()!;
+		const removed: string[] = [];
+		facade.removeMember = async memberId => {
+			removed.push(memberId);
+			facade.activeRoom.set({ ...room, members: room.members.map(member => member.id === room.members[1].id ? { ...member, removed: true } : member) }, undefined);
+		};
+		const target = [...panel.querySelectorAll<HTMLElement>('.room-member')][1];
+		target.querySelector<HTMLButtonElement>('.room-member-actions button:last-child')!.click();
+		await timeout(0);
+
+		assert.deepStrictEqual({
+			confirmations,
+			removed,
+			roster: [...panel.querySelectorAll<HTMLElement>('.room-member')].map(m => (m.querySelector('.room-member-heading button')?.textContent ?? '').trim()),
+			postsRemain: !!container.querySelector('.room-message'),
+			countsActiveOnly: container.querySelector('.room-subtitle')?.textContent?.includes('1 peers'),
+		}, {
+			confirmations: ['Remove Copilot-2 from this room?'],
+			removed: [room.members[1].id],
+			roster: ['Copilot-1'],
+			postsRemain: true,
+			countsActiveOnly: true,
+		});
+	});
+
+	test('a peer offers Stop while it runs, and Resume once it has stopped', () => {
+		const { facade, panel } = setup('running', 1);
+		const room = facade.activeRoom.get()!;
+		const labels = () => [...panel.querySelectorAll<HTMLElement>('.room-member')].map(member => [
+			...member.querySelectorAll<HTMLButtonElement>('.room-member-actions button'),
+		].filter(button => !button.hidden).map(button => (button.textContent ?? '').trim()));
+		const withStates = (...states: string[]) => facade.activeRoom.set({
+			...room, members: room.members.map((member, index) => ({ ...member, state: states[index] as typeof member.state })),
+		}, undefined);
+
+		withStates('working', 'stopped');
+		const running = labels();
+		withStates('failed', 'pending');
+		const failedAndPending = labels();
+
+		assert.deepStrictEqual({ running, failedAndPending }, {
+			running: [['Stop', 'Remove'], ['Resume', 'Remove']],
+			failedAndPending: [['Retry', 'Remove'], ['Stop', 'Remove']],
 		});
 	});
 

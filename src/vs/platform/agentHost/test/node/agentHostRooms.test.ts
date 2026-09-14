@@ -1480,6 +1480,82 @@ suite('AgentHostRooms', () => {
 		assert.deepStrictEqual(grown.members.map(member => member.name), ['Copilot-1', 'Copilot-2']);
 	});
 
+	test('a removed peer keeps its posts but takes no further turns and is no longer a recipient', async () => {
+		const { rooms, runtime, create } = setup(3);
+		const room = await create();
+		await rooms.startRoom(room.id, {});
+		await runtime.whenSubmitted(3);
+		const retired = room.members[2];
+		const first = AgentSession.id(retired.sessionUri);
+		await rooms.read(first);
+		await rooms.post(first, { id: 'work', text: 'Looked at the parser', kind: 'work', mentions: [] });
+
+		await rooms.removeMember(room.id, retired.id);
+		const submittedBefore = runtime.submitted.length;
+		// An unaddressed steering broadcast is the path that derives recipients from the
+		// roster, so it is where a retired peer must stop appearing.
+		const message = await rooms.postMessage(room.id, { id: 'broadcast', text: 'keep going', mentions: [], mode: 'steer' });
+
+		const current = await rooms.getRoom(room.id);
+		assert.deepStrictEqual({
+			removed: current.members[2].removed,
+			state: current.members[2].state,
+			postSurvives: (await rooms.getMessages(room.id)).messages.some(item => item.id === 'work' && item.authorId === retired.id),
+			addressed: message.deliveries.some(delivery => delivery.memberId === retired.id),
+			remainingRecipients: message.deliveries.length,
+			neverResubmitted: runtime.submitted.length === submittedBefore
+				|| !runtime.submitted.slice(submittedBefore).some(entry => entry.sessionUri === retired.sessionUri),
+			resumeRejected: await rooms.retryMember(room.id, retired.id).then(() => false, () => true),
+		}, { removed: true, state: 'stopped', postSurvives: true, addressed: false, remainingRecipients: 2, neverResubmitted: true, resumeRejected: true });
+	});
+
+	test('a room keeps at least one agent', async () => {
+		const { rooms, create } = setup(2);
+		const room = await create();
+		await rooms.removeMember(room.id, room.members[1].id);
+		await assert.rejects(rooms.removeMember(room.id, room.members[0].id), /at least one agent/);
+	});
+
+	test('resuming a peer in a stopped room starts a run for it and leaves the others stopped', async () => {
+		const { rooms, runtime, create } = setup(2);
+		const room = await create();
+		await rooms.startRoom(room.id, {});
+		await runtime.whenSubmitted(2);
+		await rooms.stopRoom(room.id);
+
+		const resumed = await rooms.retryMember(room.id, room.members[1].id);
+		await runtime.whenSubmitted(3);
+
+		const current = await rooms.getRoom(room.id);
+		assert.deepStrictEqual({
+			roomState: resumed.state,
+			states: current.members.map(member => member.state),
+			lastSubmitted: runtime.submitted.at(-1)?.sessionUri === room.members[1].sessionUri,
+		}, { roomState: 'running', states: ['stopped', 'starting'], lastSubmitted: true });
+	});
+
+	test('an agent added to a stopped room joins the run a human message starts, even unaddressed', async () => {
+		const { rooms, runtime, create } = setup(2);
+		const room = await create();
+		await rooms.startRoom(room.id, {});
+		await runtime.whenSubmitted(2);
+		await rooms.stopRoom(room.id);
+
+		const added = (await rooms.addMember(room.id)).members[2];
+		// Addressed to the original peers only; the newcomer has never run, so a fresh
+		// run must take it along rather than retire it as finished.
+		await rooms.postMessage(room.id, { id: 'continue', text: 'continue working', mentions: [room.members[0].id] });
+		// Both the addressed peer and the newcomer get a turn, on top of the first run's two.
+		await runtime.whenSubmitted(4);
+
+		const current = await rooms.getRoom(room.id);
+		const joined = current.members[2];
+		assert.deepStrictEqual({
+			state: joined.state,
+			submitted: runtime.submitted.some(entry => entry.sessionUri === added.sessionUri),
+		}, { state: 'starting', submitted: true });
+	});
+
 	test('a stopped room gains the member but starts it only on resume', async () => {
 		const { rooms, runtime, create } = setup(2);
 		const room = await create();

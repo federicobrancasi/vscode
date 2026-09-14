@@ -23,6 +23,7 @@ export function createNoopRoomsController(): IAgentHostRoomsController {
 		pauseRoom: unavailable,
 		stopRoom: unavailable,
 		addMember: unavailable,
+		removeMember: unavailable,
 		stopMember: unavailable,
 		retryMember: unavailable,
 		getRoomConfiguration: unavailable,

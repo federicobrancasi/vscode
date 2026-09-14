@@ -133,6 +133,16 @@ suite('CollaborationModelPicker', () => {
 		});
 	});
 
+	test('a peer that has already run reports its change as pending, not its model as unconfirmed', () => {
+		const member: IAgentHostRoomMember = {
+			id: 'peer', name: 'Copilot 1', sessionUri: 'copilotcli:/peer', state: 'working', turns: 3,
+			model: 'grok', pendingModel: { id: 'grok' },
+		};
+		assert.deepStrictEqual(
+			getCollaborationMemberModelState(member, [], true),
+			{ selection: { id: 'grok' }, enabled: true, detail: 'Applies on this peer\'s next turn.', error: undefined });
+	});
+
 	test('pending Auto and unconfirmed legacy selections are never shown as provider-acknowledged models', () => {
 		const member: IAgentHostRoomMember = {
 			id: 'peer', name: 'Copilot 1', sessionUri: 'copilotcli:/peer', state: 'pending', turns: 0, model: 'legacy',
@@ -141,8 +151,8 @@ suite('CollaborationModelPicker', () => {
 			getCollaborationMemberModelState({ ...member, pendingModel: null, modelError: 'Auto is unavailable' }, [], true),
 			getCollaborationMemberModelState(member, [], true),
 		], [
-			{ selection: { id: 'auto' }, enabled: true, detail: 'Applies when this peer starts its next turn. Current model is not yet confirmed.', error: 'Auto is unavailable' },
-			{ selection: { id: 'legacy' }, enabled: true, detail: 'Current model is not yet confirmed.', error: undefined },
+			{ selection: { id: 'auto' }, enabled: true, detail: 'Applies when this peer starts.', error: 'Auto is unavailable' },
+			{ selection: { id: 'legacy' }, enabled: true, detail: 'Applies when this peer starts.', error: undefined },
 		]);
 	});
 });

@@ -76,11 +76,17 @@ export function getCollaborationMemberModelState(member: IAgentHostRoomMember, m
 	const selection = member.pendingModel === null ? { id: 'auto' }
 		: member.pendingModel ?? member.modelSelection ?? (member.model ? { id: member.model } : undefined);
 	const current = member.modelSelection ? models.find(model => model.id === member.modelSelection?.id)?.name ?? member.modelSelection.id : undefined;
+	// A peer that has taken a turn is already running on something, so reporting its
+	// model as unconfirmed reads as a fault next to a working peer. Only a peer that
+	// has never run is genuinely waiting for its first model.
+	const started = member.turns > 0;
 	const detail = member.pendingModel !== undefined
 		? current
 			? localize('room.modelNextTurn', "Applies on the next turn. Currently using {0}.", current)
-			: localize('room.modelBeforeStart', "Applies when this peer starts its next turn. Current model is not yet confirmed.")
-		: !current ? localize('room.modelUnconfirmed', "Current model is not yet confirmed.") : undefined;
+			: started
+				? localize('room.modelNextTurnUnknown', "Applies on this peer's next turn.")
+				: localize('room.modelBeforeStart', "Applies when this peer starts.")
+		: !current && !started ? localize('room.modelUnconfirmed', "Applies when this peer starts.") : undefined;
 	return { selection, enabled, detail, error: member.modelError };
 }
 
