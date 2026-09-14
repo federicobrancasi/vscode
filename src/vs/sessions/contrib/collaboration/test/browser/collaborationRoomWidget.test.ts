@@ -379,11 +379,12 @@ suite('CollaborationRoomWidget', () => {
 		assert.strictEqual(viewService.visible.get(), true);
 	});
 
-	test('the steering button sends an explicit steering request without changing normal Send', () => {
-		const { container, type, sendModes } = setup();
+	test('Send steers while a peer is mid-turn so guidance lands during that turn', () => {
+		const { container, facade, type, sendModes } = setup();
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({ ...room, members: room.members.map((member, index) => index === 0 ? { ...member, state: 'working' as const } : member) }, undefined);
 		type('Change direction');
-		const buttons = [...container.querySelectorAll<HTMLButtonElement>('.room-composer button')];
-		buttons.find(button => button.textContent === 'Steer Agents')!.click();
+		container.querySelector<HTMLButtonElement>('.room-composer .room-send')!.click();
 		assert.deepStrictEqual(sendModes, ['steer']);
 	});
 
@@ -395,11 +396,18 @@ suite('CollaborationRoomWidget', () => {
 		assert.deepStrictEqual({ prevented: event.defaultPrevented, sendModes }, { prevented: true, sendModes: ['steer'] });
 	});
 
-	test('steering controls are hidden when the connected host lacks support', () => {
-		const { container, facade } = setup();
+	test('Send posts a message when no peer is mid-turn, or when the host cannot steer', () => {
+		const { container, facade, type, sendModes } = setup();
+		const send = container.querySelector<HTMLButtonElement>('.room-composer .room-send')!;
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({ ...room, members: room.members.map(member => ({ ...member, state: 'idle' as const })) }, undefined);
+		type('Idle room');
+		send.click();
+		facade.activeRoom.set({ ...room, members: room.members.map((member, index) => index === 0 ? { ...member, state: 'working' as const } : member) }, undefined);
 		facade.canSteer.set(false, undefined);
-		const button = [...container.querySelectorAll<HTMLButtonElement>('.room-composer button')].find(button => button.textContent === 'Steer Agents')!;
-		assert.deepStrictEqual({ hidden: button.hidden, disabled: button.disabled }, { hidden: true, disabled: true });
+		type('Host without steering');
+		send.click();
+		assert.deepStrictEqual(sendModes, ['message', 'message']);
 	});
 
 	test('sending while reading older posts resumes following the latest conversation', async () => {
@@ -409,7 +417,7 @@ suite('CollaborationRoomWidget', () => {
 		const acknowledged = new DeferredPromise<void>();
 		facade.sendMessage = () => acknowledged.p;
 		type('Advice from older history');
-		container.querySelector<HTMLButtonElement>('.room-composer button.primary')!.click();
+		container.querySelector<HTMLButtonElement>('.room-composer .room-send')!.click();
 		await acknowledged.complete();
 		await acknowledged.p;
 		assert.deepStrictEqual({
@@ -458,10 +466,10 @@ suite('CollaborationRoomWidget', () => {
 
 	test('Send remains available after Stop and explains that finished peers receive a new turn', () => {
 		const { container } = setup('stopped');
-		const send = container.querySelector<HTMLButtonElement>('.room-composer button.primary')!;
+		const send = container.querySelector<HTMLButtonElement>('.room-composer .room-send')!;
 		assert.deepStrictEqual({
 			enabled: !send.disabled,
-			wakeUpExplained: send.getAttribute('aria-description')?.includes('Finished or stopped peers receive a new turn'),
+			wakeUpExplained: send.getAttribute('aria-description')?.includes('finished or stopped peers receive a new turn'),
 			defaultAudienceExplained: send.getAttribute('aria-description')?.includes('everyone when none are mentioned'),
 			mentionHint: container.querySelector('.room-composer-actions .room-hint')?.textContent,
 		}, { enabled: true, wakeUpExplained: true, defaultAudienceExplained: true, mentionHint: '@ to mention' });
@@ -654,23 +662,37 @@ suite('CollaborationRoomWidget', () => {
 		}, { repeatedReport: false, distinctAuthors: 2 });
 	});
 
-	test('the panel gives every agent its own tab, plus rules and approvals', () => {
-		const { container, facade } = setup('running', 1);
-		const labels = () => [...container.querySelectorAll<HTMLElement>('.room-tab')].map(tab => tab.textContent);
-		const visibleRoster = () => [...container.querySelectorAll<HTMLElement>('.room-member')].filter(member => !member.hidden).length;
-		const before = { labels: labels(), roster: visibleRoster() };
+	test('the run tab offers only the actions the room state allows', () => {
+		const { facade, panel } = setup('running', 1);
+		const labels = () => [...panel.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')]
+			.filter(button => !button.hidden).map(button => (button.textContent ?? '').trim());
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({ ...room, state: 'running' }, undefined);
+		const whileRunning = labels();
+		facade.activeRoom.set({ ...room, state: 'created' }, undefined);
+		assert.deepStrictEqual(
+			{ whileRunning, beforeStarting: labels() },
+			{ whileRunning: ['Pause', 'Stop All'], beforeStarting: ['Start'] });
+	});
+
+	test('the panel keeps four tabs however many agents the room has', () => {
+		const { facade, panel } = setup('running', 1);
+		const labels = () => [...panel.querySelectorAll<HTMLElement>('.room-tab')].map(tab => tab.textContent);
+		const before = labels();
 		facade.requests.set([approval()], undefined);
-		const approvals = [...container.querySelectorAll<HTMLElement>('.room-tab')].find(tab => tab.textContent?.startsWith('Approvals'))!;
+		const approvals = [...panel.querySelectorAll<HTMLElement>('.room-tab')].find(tab => tab.textContent?.startsWith('Approvals'))!;
 		approvals.click();
 		assert.deepStrictEqual({
 			before,
-			badged: labels().filter(label => label?.includes('1')).length,
+			after: labels(),
 			selected: approvals.getAttribute('aria-selected'),
-			rosterHiddenOnApprovals: visibleRoster(),
-			approvalsVisible: !container.querySelector<HTMLElement>('.room-attention')!.hidden,
+			runControlsInRunTab: !!panel.querySelector('.room-tab-panel .room-run-controls-host'),
+			agentsListed: [...panel.querySelectorAll<HTMLElement>('.room-member')].filter(member => !member.hidden).length,
+			approvalsVisible: !panel.querySelector<HTMLElement>('.room-attention')!.hidden,
 		}, {
-			before: { labels: ['Copilot-1', 'Copilot-2', 'Rules', 'Approvals'], roster: 1 },
-			badged: 2, selected: 'true', rosterHiddenOnApprovals: 0, approvalsVisible: true,
+			before: ['Run', 'Agents', 'Rules', 'Approvals'],
+			after: ['Run', 'Agents', 'Rules', 'Approvals1'],
+			selected: 'true', runControlsInRunTab: true, agentsListed: 2, approvalsVisible: true,
 		});
 	});
 

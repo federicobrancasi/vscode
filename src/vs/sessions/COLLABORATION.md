@@ -127,9 +127,11 @@ activation:
 ### Human steering
 
 **Send** notifies mentioned peers, or the whole room when there are no mentions.
-It wakes finished peers and queues messages for busy peers. **Steer Agents**
-(Control/Command+Enter in the composer) uses the same audience but sends guidance
-into an active turn instead of waiting for the next one.
+Sending is one action: when the host advertises steering and a peer is mid-turn,
+the post is delivered as live guidance so it lands during that turn; otherwise it
+is an ordinary post, which wakes finished peers with a new turn. Either way the
+message is in the room, so a peer that is busy now reads it when it comes free.
+Control/Command+Enter steers explicitly.
 
 Steering is persisted before delivery. For an active peer the host injects it
 into the existing SDK turn instead of waiting for that turn to finish or
@@ -144,8 +146,9 @@ or obeyed the message, and cannot stop an external command that has already
 started. At the next normal tool boundary the peer must read newly available
 human guidance. Errors remain visible rather than success-shaped.
 
-The UI only offers live steering when the host advertises support. An older
-host must not silently interpret a steering request as passive discussion.
+Send falls back to an ordinary post when the host does not advertise steering, so
+an older host is never asked to interpret a steering request as passive
+discussion.
 
 Acknowledged room steering also records its SDK message identity alongside the
 original turn boundary. History reconstruction uses that association so a
@@ -288,24 +291,33 @@ The editor area is then only a host for the docked panel, so its tab strip stays
 hidden rather than showing the previous session's editors.
 
 The composer borrows the Agents window chat input's container and toolbar
-classes, so it reads as that input rather than a second kind of composer, and
-carries a short mention affordance instead of prose. Neither the room nor the
+classes, so it reads as that input rather than a second kind of composer: a short
+mention affordance instead of prose, and one round icon Send rather than labelled
+buttons. Neither the room nor the
 panel writes pixel sizes into its own layout: both fill their host through CSS,
 because measuring and writing back left content larger than its container
 whenever the surface resized without a fresh layout pass.
 
 The room still owns that DOM and publishes it through the collaboration
 view-state service; the side-panel pane only adopts it while a room is open, and
-hands it back on dispose. Inside, run controls and the tab strip stay pinned
-above an independently scrolling body, so the tabs never scroll out of reach.
-The tabs are one per member, then the shared rules and configuration, then
-approvals. The tab strip is a real tablist with roving focus and arrow, Home and
-End navigation; pending approvals and member failures are badged so an inactive
-tab still reports that it needs attention. It carries the shared modern
-editor-tab classes that the Agents window composite bar also adopts, so room tabs
-match the rest of the window rather than inventing their own appearance.
+hands it back on dispose. Inside, the tab strip alone is pinned at the top, above
+an independently scrolling body.
 
-A member's tab shows its model, state, and actual runtime activity;
+There are four tabs, whatever the room's size: **Run** holds the run actions and
+the optional run limits, offering only the actions the current state allows —
+Start before a run, Pause and Stop All during one — rather than showing every
+action and disabling most of them; **Agents** lists every peer;
+**Rules** shows the room's brief as labelled fields alongside the shared
+configuration; **Approvals** holds workspace trust and pending decisions. Giving
+each member its own tab made the strip grow with the room until it scrolled, so
+members are a list inside one tab instead. The strip is a real tablist with
+roving focus and arrow, Home and End navigation; pending approvals and member
+failures are badged so an inactive tab still reports that it needs attention. It
+carries the shared modern editor-tab classes that the Agents window composite bar
+also adopts, so room tabs match the rest of the window rather than inventing
+their own appearance.
+
+A member's row shows its model, state, and actual runtime activity;
 explicit work reports appear in the shared conversation without duplicate
 previews or expanded report blocks. Author accents are stable
 within the room, theme-aware, and accompanied by visible names. Users

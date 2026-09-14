@@ -400,6 +400,32 @@
 	padding: var(--vscode-spacing-size60) var(--vscode-spacing-size120) var(--vscode-spacing-size100);
 }
 
+/* Send matches the Agents window chat input: an icon button, not a labelled one. */
+.collaboration-room .room-composer-actions > .room-send {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: var(--vscode-spacing-sizeNone);
+	border: none;
+	border-radius: var(--vscode-cornerRadius-circle);
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.collaboration-room .room-composer-actions > .room-send:hover:not(:disabled) {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.collaboration-room .room-composer-actions > .room-send:disabled {
+	opacity: 0.4;
+}
+
+.collaboration-room .room-composer-actions > .room-send.sending::before {
+	opacity: 0.6;
+}
+
 .collaboration-room .room-composer-actions > .room-hint {
 	flex: 1;
 	min-width: 0;
@@ -460,6 +486,25 @@
 
 .collaboration-room .room-run-limits {
 	flex-basis: 100%;
+}
+
+.collaboration-room .room-goal {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size40);
+	margin: var(--vscode-spacing-sizeNone);
+}
+
+.collaboration-room .room-goal dt {
+	color: var(--vscode-descriptionForeground);
+	font-size: var(--vscode-fontSize-label1);
+}
+
+.collaboration-room .room-goal dd {
+	margin: var(--vscode-spacing-sizeNone);
+	margin-bottom: var(--vscode-spacing-size80);
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
 }
 
 .collaboration-room .room-run-limits summary {
@@ -598,7 +643,7 @@
 	padding-bottom: 0;
 }
 
-/* Panel tabs: one per agent, then the shared rules and pending decisions. */
+/* Panel tabs: the run, its agents, its rules and its pending decisions. */
 
 .collaboration-room .room-panel-header-bar {
 	flex-shrink: 0;
@@ -624,8 +669,10 @@
 	align-items: center;
 	gap: var(--vscode-spacing-size60);
 	position: relative;
-	flex-shrink: 0;
-	padding: var(--vscode-spacing-size60) var(--vscode-spacing-size120);
+	flex: 1 1 0;
+	min-width: 0;
+	justify-content: center;
+	padding: var(--vscode-spacing-size60) var(--vscode-spacing-size80);
 	border: none;
 	border-radius: var(--vscode-cornerRadius-small);
 	background: transparent;
@@ -633,6 +680,7 @@
 	cursor: pointer;
 	font: inherit;
 	white-space: nowrap;
+	overflow: hidden;
 	min-height: 26px;
 }
 
@@ -668,6 +716,17 @@
 	z-index: 1;
 }
 
+/* The label gives way before the badge, so a badged tab never loses its count. */
+.collaboration-room .room-tab > .room-tab-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.collaboration-room .room-tab > .room-tab-badge {
+	flex: 0 0 auto;
+}
+
 .collaboration-room .room-tab-badge {
 	min-width: 16px;
 	padding: 0 var(--vscode-spacing-size40);
@@ -696,11 +755,20 @@
 }
 
 /* Run controls sit with the run, above the panel's tabs. */
+/*
+ * The run actions sit on one row and keep a readable width, so a wide side panel
+ * does not stretch them across the whole pane.
+ */
 .collaboration-room .room-run-controls-host {
 	display: flex;
 	flex-wrap: wrap;
-	gap: var(--vscode-spacing-size60);
-	padding: var(--vscode-spacing-size40) var(--vscode-spacing-size40) var(--vscode-spacing-size80);
+	gap: var(--vscode-spacing-size80);
+	margin-bottom: var(--vscode-spacing-size160);
+}
+
+.collaboration-room .room-run-controls-host > button {
+	justify-content: center;
+	min-width: 96px;
 }
 
 .collaboration-room .room-run-controls-host:empty {

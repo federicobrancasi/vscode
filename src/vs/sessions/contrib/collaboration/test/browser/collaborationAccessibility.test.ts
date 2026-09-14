@@ -107,7 +107,7 @@ suite('Collaboration accessibility', () => {
 			changes: content.includes('Publishing a patch does not apply or merge'),
 			primarySurface: content.includes('primary view, separate from the session grid'),
 			navigationKeybinding: content.includes('<keybinding:workbench.action.collaboration.close>'),
-			liveGuidance: content.includes('Steer Agents instead sends live guidance'),
+			liveGuidance: content.includes('live guidance reaches it during the current one'),
 			sidebarHome: content.includes('Agent Collab in the Sessions sidebar'),
 			memberBusyInput: content.includes('Native Queue and Steer are unavailable'),
 			roomApprovals: content.includes('Approvals and questions appear in the Approvals tab'),
