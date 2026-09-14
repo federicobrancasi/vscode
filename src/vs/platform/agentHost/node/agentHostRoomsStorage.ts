@@ -15,7 +15,7 @@ import { URI } from '../../../base/common/uri.js';
 import { generateUuid, isUUID } from '../../../base/common/uuid.js';
 import { localize } from '../../../nls.js';
 import { ILogService } from '../../log/common/log.js';
-import { IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomMember, MAX_ROOM_WORKERS } from '../common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomMember, IAgentHostRoomMessage, MAX_ROOM_WORKERS } from '../common/agentHostRooms.js';
 import { buildDefaultChatUri } from '../common/state/sessionState.js';
 import { parseRoomConfiguration } from './agentHostRoomsConfiguration.js';
 import { parseRoomModelSelection } from './agentHostRoomsModels.js';
@@ -60,6 +60,14 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 				for (const artifact of previous.room.artifacts) {
 					check(equals(snapshot.room.artifacts.find(value => value.id === artifact.id), artifact), 'published artifact changed');
 				}
+				// The conversation is append-only. Delivery state legitimately advances as a
+				// message reaches its recipients, but everything a reader attributes - the
+				// author, the text, the ordering - must survive unchanged, so a post can
+				// never be rewritten or dropped after the room has shown it.
+				const attributed = ({ deliveries, ...rest }: IAgentHostRoomMessage) => rest;
+				check(snapshot.messages.length >= previous.messages.length
+					&& previous.messages.every((message, index) => equals(attributed(message), attributed(snapshot.messages[index]))),
+					'recorded room messages changed');
 			}
 			this.validateIdentities([...existing.filter(value => value.room.id !== snapshot.room.id), snapshot]);
 			const directory = await this.directory('rooms');

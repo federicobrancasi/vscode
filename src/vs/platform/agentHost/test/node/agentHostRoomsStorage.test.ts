@@ -15,7 +15,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { isUUID } from '../../../../base/common/uuid.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { NullLogService } from '../../../log/common/log.js';
-import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomMember } from '../../common/agentHostRooms.js';
+import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomMember, IAgentHostRoomMessage } from '../../common/agentHostRooms.js';
 import { platformSessionSchema } from '../../common/agentHostSchema.js';
 import { buildDefaultChatUri } from '../../common/state/sessionState.js';
 import { AgentSession } from '../../common/agentService.js';
@@ -395,6 +395,34 @@ suite('AgentHostRoomsStorage', function () {
 			}), /preserved member identities changed/);
 		}
 		assert.deepStrictEqual(await storage.load(), [original]);
+	});
+
+	test('the conversation is append-only: delivery state advances, attributed content cannot change', async () => {
+		const original = record();
+		await storage.save(original);
+		const first = original.messages[0];
+		const revise = (messages: IAgentHostRoomMessage[]) => storage.save({ ...original, room: { ...original.room, revision: 2 }, messages });
+
+		// Delivery state legitimately advances as a message reaches its recipients.
+		await revise(original.messages.map((message, index) => index === 0
+			? { ...message, deliveries: message.deliveries.map(delivery => ({ ...delivery, state: 'completed' as const })) }
+			: message));
+		assert.strictEqual((await storage.load())[0].messages[0].deliveries.every(delivery => delivery.state === 'completed'), true);
+
+		// Rewriting an already-recorded post is refused: same count, same ordering, so
+		// only comparing the attributed content catches it.
+		for (const tampered of [{ text: 'something else' }, { timestamp: 99 }]) {
+			await assert.rejects(revise(original.messages.map((message, index) =>
+				index === 0 ? { ...message, ...tampered } : message)), /recorded room messages changed/);
+		}
+		// Ordering, count, and author identity are already covered by their own
+		// invariants; this check is what pins the content of a recorded post.
+		await assert.rejects(revise(original.messages.slice(1)), /latestMessageSequence does not match/);
+		await assert.rejects(revise([...original.messages].reverse()), /message\.sequence/);
+
+		// The unchanged history is still what a later reader sees.
+		assert.deepStrictEqual((await storage.load())[0].messages.map(message => message.id), original.messages.map(message => message.id));
+		assert.strictEqual((await storage.load())[0].messages[0].text, first.text);
 	});
 
 	test('a removed member round-trips through the journal', async () => {
