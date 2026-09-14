@@ -162,6 +162,7 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 		createRoom: options => this._roomsProxy().createRoom(options),
 		getMessages: (roomId, query) => this._roomsProxy().getMessages(roomId, query),
 		postMessage: (roomId, message) => this._roomsProxy().postMessage(roomId, message),
+		verifyResult: (roomId, verification) => this._roomsProxy().verifyResult(roomId, verification),
 		retryMessage: (roomId, messageId) => this._roomsProxy().retryMessage(roomId, messageId),
 		startRoom: (roomId, limits) => this._roomsProxy().startRoom(roomId, limits),
 		pauseRoom: roomId => this._roomsProxy().pauseRoom(roomId),
@@ -173,7 +174,6 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 		getRoomConfiguration: roomId => this._roomsProxy().getRoomConfiguration(roomId),
 		setRoomConfiguration: (roomId, configuration) => this._roomsProxy().setRoomConfiguration(roomId, configuration),
 		setMemberModel: (roomId, memberId, model) => this._roomsProxy().setMemberModel(roomId, memberId, model),
-		setContinuous: (roomId, continuous) => this._roomsProxy().setContinuous(roomId, continuous),
 		getArtifact: (roomId, artifactId) => this._roomsProxy().getArtifact(roomId, artifactId),
 	};
 	private readonly _ahpLogger: AhpJsonlLogger | undefined;

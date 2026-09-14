@@ -11,7 +11,7 @@ import { URI } from '../../../base/common/uri.js';
 import { generateUuid } from '../../../base/common/uuid.js';
 import { localize } from '../../../nls.js';
 import { ILogService } from '../../log/common/log.js';
-import { AgentHostRoomMessageKind, defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsService, MAX_ROOM_WORKERS, newAgentHostRoomConfiguration } from '../common/agentHostRooms.js';
+import { AgentHostRoomMessageKind, AgentHostRoomVerificationState, defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomPublishResultOptions, IAgentHostRoomsService, IAgentHostRoomVerifyResultOptions, MAX_ROOM_WORKERS, newAgentHostRoomConfiguration } from '../common/agentHostRooms.js';
 import { AgentSession } from '../common/agentService.js';
 import { ResolveSessionConfigResult } from '../common/state/protocol/commands.js';
 import { buildDefaultChatUri, ModelSelection } from '../common/state/sessionState.js';
@@ -21,7 +21,6 @@ import { IRoomMemberExecution, IRoomRecord, IRoomRuntime, IRoomRuntimeEvent, IRo
 
 export interface IRoomAgentPost extends IAgentHostRoomPostOptions {
 	readonly kind?: 'message' | 'work' | 'finding';
-	readonly nextStep?: string;
 	readonly blocked?: boolean;
 }
 
@@ -31,6 +30,8 @@ export interface IRoomSessionTools {
 	read(sessionId: string, query?: IAgentHostRoomMessageQuery): Promise<IRoomContext>;
 	readArtifact(sessionId: string, artifactId: string, offset?: number): Promise<IRoomArtifactContent>;
 	post(sessionId: string, options: IRoomAgentPost): Promise<IAgentHostRoomMessage>;
+	publishResult(sessionId: string, options: IAgentHostRoomPublishResultOptions): Promise<IAgentHostRoomMessage>;
+	reviewResult(sessionId: string, options: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage>;
 	sharePatch(sessionId: string, title: string): Promise<IAgentHostRoomArtifact>;
 	beforeTool(sessionId: string, toolName: string, expectedTurnId?: string): void;
 }
@@ -54,8 +55,41 @@ export interface IRoomArtifactContent {
 	readonly nextOffset?: number;
 }
 
-/** Turn interval on which a member is pointed at peer work, to slow diversity collapse. */
-const PEER_REVIEW_INTERVAL = 3;
+const CONTINUE_ROOM_PROMPT = 'Continue working in the existing collaboration room.';
+const CONTINUE_AFTER_TURN_PROMPT = [
+	'Share meaningful completed work with room_publish_result, including evidence, and publish changed code with room_share_patch. Use room_post for focused questions and conversational replies.',
+	'Call room_read with after set to the latest sequence you saw, review peer ideas and feedback, and independently verify a useful peer result when appropriate. Never verify your own result.',
+	'Ask a focused question in the room if you need help.',
+].join('\n\n');
+
+function buildHumanGuidancePrompt(messages: readonly IAgentHostRoomMessage[]): string {
+	return [
+		'New human guidance for your current collaboration work:',
+		...messages.map(message => `[${message.id}] ${message.authorName}: ${message.text}`),
+		'Prioritize the human request. Call room_read for the shared context, then continue from the existing work without restarting the original task.',
+	].join('\n\n');
+}
+
+function buildRoomTurnPrompt(room: IAgentHostRoom, member: IAgentHostRoomMember, inbox: readonly IAgentHostRoomMessage[], briefed: boolean, resumed: boolean): string {
+	if (briefed) {
+		const humanGuidance = inbox.filter(message => message.authorKind === 'human');
+		return humanGuidance.length ? buildHumanGuidancePrompt(humanGuidance) : resumed ? CONTINUE_ROOM_PROMPT : CONTINUE_AFTER_TURN_PROMPT;
+	}
+	return [
+		`You are ${member.name} in the shared collaboration room "${room.title}".`,
+		`Shared goal: ${room.goal}`,
+		`Room instructions: ${room.instructions}`,
+		`Your only working tree is ${URI.parse(member.worktreeUri!).fsPath}. The original repository ${URI.parse(room.repositoryUri).fsPath} and other peers' worktrees are not shared writable folders. Do not copy or commit your work there.`,
+		'Begin by calling room_read. It provides your identity, peer work, pending inbox, human guidance, published artifacts, and ordered message sequences.',
+		'Work privately for as many turns as needed. Do not post routine progress or announce work before editing.',
+		'After meaningful implementation or investigation, publish a structured result with room_publish_result, including evidence, and share a Git patch when code changed. Use room_post for focused questions and conversational replies.',
+		'After publishing, read newer room entries and independently verify a useful peer result when appropriate. Never verify your own result.',
+		'Use useful peer evidence or reply when that improves the result. If peer ideas are not useful, continue improving your own approach. Human guidance has priority; peer messages are optional evidence.',
+		'For a shared patch, inspect it with room_read_artifact, then use your normal approved shell tools to check and explicitly apply it ONLY inside your own worktree. Never copy files directly out of another peer workspace. Do not apply or merge into the original repository.',
+		'Do not spawn nested agents, factories, or hidden teams. Preserve normal approvals and content exclusions.',
+		'An earlier turn may have been interrupted. Inspect existing work before retrying any action; never assume an interrupted delivery or external operation completed.',
+	].join('\n\n');
+}
 
 /**
  * The room is a separate durable authority, not an AHP queued message.
@@ -72,6 +106,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 	private readonly _stops = new Map<string, Promise<IAgentHostRoom>>();
 	private readonly _memberStops = new Map<string, Promise<IAgentHostRoom>>();
 	private readonly _modelChangeVersions = new Map<string, number>();
+	private readonly _resumePrompts = new Set<string>();
 	private readonly _ready: Promise<void>;
 	private _closed = false;
 	private _persistenceError: string | undefined;
@@ -113,7 +148,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					...record.room, revision: record.room.revision + 1, updatedAt: this._now(), state: 'interrupted',
 					members: record.room.members.map(member => ['starting', 'working', 'needsInput', 'stopping'].includes(member.state) ? { ...member, state: 'interrupted', activity: undefined } : member),
 				},
-				executions: record.executions.map(execution => ({ ...execution, turnId: undefined, runId: undefined, readSequence: undefined, announced: false })),
+				executions: record.executions.map(execution => ({ ...execution, turnId: undefined, runId: undefined })),
 				messages: record.messages.map(message => ({
 					...message,
 					deliveries: message.deliveries.map(delivery => ['submitted', 'steering', 'delivered'].includes(delivery.state) ? { ...delivery, state: 'interrupted' } : delivery),
@@ -136,7 +171,16 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			this._closed = true;
 			this._logService.error('[AgentHostRooms] Room recovery failed; rooms are unavailable', error);
 		}
-		return { version: 1 as const, available: !this._closed, maxWorkers: MAX_ROOM_WORKERS, supportsSteering: true, supportsConfiguration: true, supportsMemberModels: true };
+		return {
+			version: 1 as const,
+			available: !this._closed,
+			maxWorkers: MAX_ROOM_WORKERS,
+			supportsSteering: true,
+			supportsConfiguration: true,
+			supportsMemberModels: true,
+			supportsStructuredResults: true,
+			supportsResultVerification: true,
+		};
 	}
 
 	async listRooms(): Promise<readonly IAgentHostRoom[]> {
@@ -184,23 +228,6 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			}
 			return record.room;
 		});
-	}
-
-	async setContinuous(roomId: string, continuous: boolean): Promise<IAgentHostRoom> {
-		await this._ready;
-		this._assertOpen();
-		if (typeof continuous !== 'boolean') {
-			throw new Error(localize('rooms.invalidContinuous', "Choose whether idle members keep working."));
-		}
-		const room = await this._queue.queue(roomId, async () => {
-			const record = this._record(roomId);
-			if (record.room.continuous === continuous) {
-				return record.room;
-			}
-			return (await this._save({ ...record, room: { ...record.room, continuous } })).room;
-		});
-		this._schedule(roomId);
-		return room;
 	}
 
 	async getMemberModelForChat(session: string, chat: string): Promise<ModelSelection | undefined> {
@@ -365,7 +392,6 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		const room: IAgentHostRoom = {
 			id, title: options.title.trim(), goal: options.goal.trim(), instructions: options.instructions ?? '',
 			...repository, createdAt: now, updatedAt: now, revision: 1, state: 'created',
-			continuous: options.continuous !== false,
 			members, artifacts: [], latestMessageSequence: 0,
 		};
 		const record: IRoomRecord = {
@@ -387,12 +413,24 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		const limit = Math.max(1, Math.min(200, Number.isInteger(query.limit) ? query.limit! : 100));
 		const matching = messages.filter(message => (query.after === undefined || message.sequence > query.after) && (query.before === undefined || message.sequence < query.before));
 		const page = query.after !== undefined ? matching.slice(0, limit) : matching.slice(-limit);
-		return { messages: page, hasEarlier: !!page.length && messages[0].sequence < page[0].sequence, hasLater: !!page.length && messages[messages.length - 1].sequence > page[page.length - 1].sequence };
+		return {
+			messages: page.map(message => message.result ? {
+				...message,
+				result: { ...message.result, verificationState: this._verificationState(messages, message.id) },
+			} : message),
+			hasEarlier: !!page.length && messages[0].sequence < page[0].sequence,
+			hasLater: !!page.length && messages[messages.length - 1].sequence > page[page.length - 1].sequence,
+		};
 	}
 
 	async postMessage(roomId: string, message: IAgentHostRoomPostOptions): Promise<IAgentHostRoomMessage> {
 		await this._ready;
 		return this._post(roomId, undefined, message);
+	}
+
+	async verifyResult(roomId: string, verification: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage> {
+		await this._ready;
+		return this._verifyResult(roomId, undefined, verification);
 	}
 
 	async retryMessage(roomId: string, messageId: string): Promise<IAgentHostRoomMessage> {
@@ -428,10 +466,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		const message = await this._queue.queue(roomId, async () => {
 			this._assertOpen();
 			const record = this._record(roomId);
-			this._text(options.id, 200);
-			if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(options.id)) {
-				throw new Error(localize('rooms.invalidMessageId', "Use a message ID containing only letters, numbers, underscores, and hyphens."));
-			}
+			this._messageId(options.id);
 			this._text(options.text, 32000);
 			const author = memberId ? this._member(record, memberId) : undefined;
 			if (options.mode !== undefined && options.mode !== 'message' && options.mode !== 'steer') {
@@ -456,11 +491,6 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			}
 			if (author) {
 				this._assertMemberTurn(record, author.id);
-				const execution = this._execution(record, author.id);
-				if (options.kind === 'work' && !execution.announced && record.messages.some(message =>
-					message.sequence > (execution.readSequence ?? 0) && message.authorId !== author.id && message.kind === 'work')) {
-					throw new Error(localize('rooms.workChanged', "Another peer announced work since you last read the room. Call room_read again and choose complementary work before announcing your plan."));
-				}
 			}
 			if (options.replyTo && !record.messages.some(message => message.id === options.replyTo)) {
 				throw new Error(localize('rooms.invalidReply', "The replied-to message does not exist."));
@@ -474,9 +504,6 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				...(options.mode === 'steer' ? { mode: 'steer' } : {}),
 				deliveries: mentions.map(memberId => ({ memberId, state: 'pending' })),
 			};
-			if (options.nextStep !== undefined && (typeof options.nextStep !== 'string' || options.nextStep.length > 8000)) {
-				throw new Error(localize('rooms.invalidNextStep', "The next step must be a short, substantive description."));
-			}
 			const isWork = author && (kind === 'work' || kind === 'finding');
 			const updated: IRoomRecord = {
 				...record,
@@ -484,10 +511,9 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					...record.room, latestMessageSequence: message.sequence,
 					state: record.room.state === 'idle' && mentions.length && this._hasRunCapacity(record.room) ? 'running' : record.room.state,
 					members: record.room.members.map(member => isWork && member.id === author.id ? {
-						...member, work: { description: options.text, nextStep: options.nextStep?.trim() || undefined, blocked: options.blocked === true, updatedAt: this._now() },
+						...member, work: { description: options.text, blocked: options.blocked === true, updatedAt: this._now() },
 					} : member),
 				},
-				executions: record.executions.map(execution => author && execution.memberId === author.id && kind === 'work' ? { ...execution, announced: true } : execution),
 				messages: [...record.messages, message],
 			};
 			await this._save(author ? updated : this._wakeHumanRecipients(updated, mentions));
@@ -514,9 +540,11 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		return !member.removed && record.room.run !== undefined && member.state === 'pending' && member.turns === 0;
 	}
 
-	private _wakeHumanRecipients(record: IRoomRecord, recipients: readonly string[]): IRoomRecord {
-		const targets = new Set(recipients.filter(id => !this._memberStops.has(id)));
-		if (!targets.size || record.room.state === 'paused' || record.room.state === 'stopping' || this._stops.has(record.room.id)) {
+	private _wakeHumanRecipients(record: IRoomRecord, recipients: readonly string[], resumeStopped = false): IRoomRecord {
+		const targets = new Set(recipients.filter(id => !this._memberStops.has(id)
+			&& (resumeStopped || !['stopped', 'interrupted'].includes(this._member(record, id).state))));
+		if (!targets.size || record.room.state === 'paused' || record.room.state === 'stopping' || this._stops.has(record.room.id)
+			|| (!resumeStopped && ['stopped', 'interrupted'].includes(record.room.state))) {
 			return record;
 		}
 		const freshRun = !['running', 'idle'].includes(record.room.state) || !this._hasRunCapacity(record.room);
@@ -575,6 +603,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			|| (limits.timeoutMinutes !== undefined && (!Number.isFinite(limits.timeoutMinutes) || limits.timeoutMinutes <= 0 || limits.timeoutMinutes > 1440))) {
 			throw new Error(localize('rooms.invalidLimits', "Leave limits empty for no cap, or choose a turn limit of 1-10000 and a positive deadline of at most 24 hours."));
 		}
+		const resumedMembers: string[] = [];
 		const room = await this._queue.queue(roomId, async () => {
 			this._assertOpen();
 			const record = this._record(roomId);
@@ -584,6 +613,11 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					|| (limits.timeoutMinutes !== undefined && limits.timeoutMinutes !== record.room.run.limits.timeoutMinutes)) {
 					throw new Error(localize('rooms.activeRunLimits', "Resume keeps the current run limits. Stop the room before changing limits."));
 				}
+				for (const execution of record.executions) {
+					if (execution.needsTurn && !execution.turnId) {
+						resumedMembers.push(execution.memberId);
+					}
+				}
 				await this._applyMemberConfigurations(record);
 				return (await this._save({ ...record, room: { ...record.room, state: 'running' } })).room;
 			}
@@ -591,6 +625,9 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				throw new Error(localize('rooms.alreadyRunning', "Wait for the active room turns to finish before starting a new run."));
 			}
 			const now = this._now();
+			for (const execution of record.executions) {
+				resumedMembers.push(execution.memberId);
+			}
 			return (await this._save({
 				...record,
 				room: {
@@ -598,9 +635,12 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					run: { id: generateUuid(), startedAt: now, deadline: limits.timeoutMinutes === undefined ? undefined : now + Math.ceil(limits.timeoutMinutes * 60000), limits: { ...limits }, admittedTurns: 0 },
 					members: record.room.members.map(member => ({ ...member, state: 'idle', error: undefined })),
 				},
-				executions: record.executions.map(execution => ({ ...execution, needsTurn: true, readSequence: undefined, announced: false })),
+				executions: record.executions.map(execution => ({ ...execution, needsTurn: true })),
 			})).room;
 		});
+		for (const memberId of resumedMembers) {
+			this._resumePrompts.add(memberId);
+		}
 		this._clearTimer(roomId);
 		this._schedule(roomId);
 		return room;
@@ -781,6 +821,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					? { ...execution, needsTurn: false, turnId: undefined, runId: undefined } : execution),
 			})).room;
 		});
+		this._resumePrompts.delete(memberId);
 		this._schedule(roomId);
 		return room;
 	}
@@ -793,13 +834,12 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			if (member.removed || this._stops.has(roomId) || this._memberStops.has(memberId) || !['failed', 'stopped', 'interrupted', 'blocked'].includes(member.state)) {
 				throw new Error(localize('rooms.memberNotRetryable', "This member is not ready to retry."));
 			}
-			// Resuming one peer takes the same path a human message does, so a stopped or
-			// exhausted room starts a fresh run for it instead of leaving the button to
-			// mark the member idle in a room that can never admit it.
+			// Resume explicitly reopens admission for a stopped peer. Human messages
+			// alone stay pending while that peer is stopped.
 			const woken = this._wakeHumanRecipients({
 				...record,
 				executions: record.executions.map(execution => execution.memberId === memberId ? { ...execution, turnId: undefined, runId: undefined } : execution),
-			}, [memberId]);
+			}, [memberId], true);
 			if (woken !== record) {
 				return (await this._save(woken)).room;
 			}
@@ -814,6 +854,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				executions: record.executions.map(execution => execution.memberId === memberId ? { ...execution, needsTurn: true, turnId: undefined, runId: undefined } : execution),
 			})).room;
 		});
+		this._resumePrompts.add(memberId);
 		this._schedule(roomId);
 		return room;
 	}
@@ -908,6 +949,152 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		return this._post(binding.roomId, binding.memberId, options);
 	}
 
+	async publishResult(sessionId: string, options: IAgentHostRoomPublishResultOptions): Promise<IAgentHostRoomMessage> {
+		await this._ready;
+		const binding = this._binding(sessionId);
+		this.beforeTool(sessionId, 'room_publish_result');
+		return this._publishResult(binding.roomId, binding.memberId, options);
+	}
+
+	async reviewResult(sessionId: string, options: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage> {
+		await this._ready;
+		const binding = this._binding(sessionId);
+		this.beforeTool(sessionId, 'room_verify_result');
+		return this._verifyResult(binding.roomId, binding.memberId, options);
+	}
+
+	private async _publishResult(roomId: string, memberId: string, options: IAgentHostRoomPublishResultOptions): Promise<IAgentHostRoomMessage> {
+		return this._queue.queue(roomId, async () => {
+			this._assertOpen();
+			const record = this._record(roomId);
+			const member = this._member(record, memberId);
+			this._assertMemberTurn(record, memberId);
+			this._messageId(options.id);
+			this._text(options.title, 200);
+			this._text(options.summary, 8000);
+			if (!['success', 'negative', 'inconclusive', 'blocked'].includes(options.outcome)) {
+				throw new Error(localize('rooms.invalidResultOutcome', "Choose a success, negative, inconclusive, or blocked result outcome."));
+			}
+			const evidence = this._evidence(options.evidence);
+			const artifactIds = this._resultArtifacts(record, member, options.artifactIds);
+			const result = {
+				title: options.title,
+				summary: options.summary,
+				outcome: options.outcome,
+				evidence,
+				artifactIds,
+			} as const;
+			const existing = record.messages.find(message => message.id === options.id);
+			if (existing) {
+				if (existing.authorId !== memberId || existing.kind !== 'result' || !equals(existing.result, result)) {
+					throw new Error(localize('rooms.messageConflict', "This message ID is already used by a different message."));
+				}
+				return { ...existing, result: { ...result, verificationState: this._verificationState(record.messages, existing.id) } };
+			}
+			const message: IAgentHostRoomMessage = {
+				id: options.id,
+				sequence: record.room.latestMessageSequence + 1,
+				authorId: member.id,
+				authorName: member.name,
+				authorKind: 'agent',
+				kind: 'result',
+				text: `${result.title}\n\n${result.summary}`,
+				timestamp: this._now(),
+				mentions: [],
+				result,
+				deliveries: [],
+			};
+			await this._save({
+				...record,
+				room: {
+					...record.room,
+					latestMessageSequence: message.sequence,
+					members: record.room.members.map(candidate => candidate.id === member.id ? {
+						...candidate,
+						work: { description: result.summary, blocked: result.outcome === 'blocked', updatedAt: this._now() },
+					} : candidate),
+				},
+				messages: [...record.messages, message],
+			});
+			return { ...message, result: { ...result, verificationState: 'pending' } };
+		});
+	}
+
+	private async _verifyResult(roomId: string, memberId: string | undefined, options: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage> {
+		return this._queue.queue(roomId, async () => {
+			this._assertOpen();
+			const record = this._record(roomId);
+			this._messageId(options.id);
+			this._messageId(options.resultId);
+			if (options.verdict !== 'verified' && options.verdict !== 'rejected') {
+				throw new Error(localize('rooms.invalidResultVerdict', "Choose verified or rejected for the result review."));
+			}
+			const evidence = this._evidence(options.evidence);
+			const verification = { resultId: options.resultId, verdict: options.verdict, evidence } as const;
+			const author = memberId ? this._member(record, memberId) : undefined;
+			if (author) {
+				this._assertMemberTurn(record, author.id);
+			}
+			const existing = record.messages.find(message => message.id === options.id);
+			if (existing) {
+				if (existing.authorId !== (memberId ?? 'human') || existing.kind !== 'verification' || !equals(existing.verification, verification)) {
+					throw new Error(localize('rooms.messageConflict', "This message ID is already used by a different message."));
+				}
+				return existing;
+			}
+			const resultMessage = record.messages.find(message => message.id === options.resultId && message.kind === 'result' && message.result);
+			if (!resultMessage) {
+				throw new Error(localize('rooms.resultNotFound', "The room result does not exist."));
+			}
+			const result = resultMessage.result;
+			if (!result) {
+				throw new Error(localize('rooms.resultNotFound', "The room result does not exist."));
+			}
+			if (author) {
+				if (resultMessage.authorId === author.id) {
+					throw new Error(localize('rooms.selfResultVerification', "A result must be verified by another agent or by the human."));
+				}
+				if ((this._execution(record, author.id).readSequence ?? 0) < resultMessage.sequence) {
+					throw new Error(localize('rooms.readResultBeforeVerification', "Read the result before verifying it."));
+				}
+			}
+			const text = options.verdict === 'verified'
+				? localize('rooms.resultVerified', "Verified result \"{0}\".\n\n{1}", result.title, evidence.join('\n'))
+				: localize('rooms.resultRejected', "Rejected result \"{0}\".\n\n{1}", result.title, evidence.join('\n'));
+			const message: IAgentHostRoomMessage = {
+				id: options.id,
+				sequence: record.room.latestMessageSequence + 1,
+				authorId: memberId ?? 'human',
+				authorName: author?.name ?? localize('rooms.human', "You"),
+				authorKind: author ? 'agent' : 'human',
+				kind: 'verification',
+				text,
+				timestamp: this._now(),
+				mentions: [],
+				verification,
+				deliveries: [],
+			};
+			await this._save({
+				...record,
+				room: { ...record.room, latestMessageSequence: message.sequence },
+				messages: [...record.messages, message],
+			});
+			return message;
+		});
+	}
+
+	private _verificationState(messages: readonly IAgentHostRoomMessage[], resultId: string): AgentHostRoomVerificationState {
+		const verifications = messages.filter(message => message.verification?.resultId === resultId);
+		const human = verifications.filter(message => message.authorKind === 'human').at(-1);
+		if (human?.verification) {
+			return human.verification.verdict;
+		}
+		if (verifications.some(message => message.verification?.verdict === 'rejected')) {
+			return 'rejected';
+		}
+		return verifications.some(message => message.verification?.verdict === 'verified') ? 'verified' : 'pending';
+	}
+
 	async sharePatch(sessionId: string, title: string): Promise<IAgentHostRoomArtifact> {
 		await this._ready;
 		this._text(title, 200);
@@ -944,8 +1131,8 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			return;
 		}
 		const execution = this._execution(record, binding.memberId);
-		if (execution.readSequence === undefined || !execution.announced) {
-			throw new Error(localize('rooms.announceFirst', "Read the shared room and post a work intention before using tools."));
+		if (execution.readSequence === undefined) {
+			throw new Error(localize('rooms.readBeforeTool', "Read the shared room before using tools."));
 		}
 		if (record.messages.some(message => message.authorKind === 'human' && message.mode === 'steer'
 			&& message.mentions.includes(binding.memberId) && message.sequence > execution.readSequence!)) {
@@ -1006,7 +1193,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 		const ready = record.room.members.filter(member => {
 			const execution = this._execution(record, member.id);
-			return !member.removed && !this._memberStops.has(member.id) && ['pending', 'idle', 'blocked'].includes(member.state) && !execution.turnId && this._runtime.isIdle(member.sessionUri)
+			return !member.removed && !this._memberStops.has(member.id) && ['pending', 'idle'].includes(member.state) && !execution.turnId && this._runtime.isIdle(member.sessionUri)
 				&& !record.messages.some(message => message.deliveries.some(delivery => delivery.memberId === member.id && delivery.state === 'steering'))
 				&& (execution.needsTurn || record.messages.some(message => message.deliveries.some(delivery => delivery.memberId === member.id && delivery.state === 'pending')));
 		}).slice(0, remaining);
@@ -1018,14 +1205,16 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			return;
 		}
 		const turns = new Map(ready.map(member => [member.id, generateUuid()]));
+		const resumed = new Set(ready.filter(member => this._resumePrompts.has(member.id)).map(member => member.id));
 		record = await this._save({
 			...record,
 			room: { ...record.room, run: { ...run, admittedTurns: run.admittedTurns + ready.length }, members: record.room.members.map(member => turns.has(member.id) ? { ...member, turns: member.turns + 1, state: 'starting', work: member.work ? { ...member.work, nextStep: undefined } : undefined } : member) },
-			executions: record.executions.map(execution => turns.has(execution.memberId) ? { ...execution, turnId: turns.get(execution.memberId), runId: run.id, needsTurn: false, readSequence: undefined, announced: false } : execution),
+			executions: record.executions.map(execution => turns.has(execution.memberId) ? { ...execution, turnId: turns.get(execution.memberId), runId: run.id, needsTurn: false } : execution),
 			messages: record.messages.map(message => ({ ...message, deliveries: message.deliveries.map(delivery => turns.has(delivery.memberId) && delivery.state === 'pending' ? { ...delivery, state: 'submitted', turnId: turns.get(delivery.memberId) } : delivery) })),
 		});
 		for (const member of ready) {
-			void this._launch(record, member.id, turns.get(member.id)!, run.id, member.work?.nextStep).catch(error => this._logService.error('[AgentHostRooms] Member launch failed', error));
+			this._resumePrompts.delete(member.id);
+			void this._launch(record, member.id, turns.get(member.id)!, run.id, resumed.has(member.id)).catch(error => this._logService.error('[AgentHostRooms] Member launch failed', error));
 		}
 	}
 
@@ -1066,12 +1255,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		let error: string | undefined;
 		try {
 			if (this._canSubmit(roomId, member.id, turnId, runId)) {
-				accepted = await this._runtime.steer(member.sessionUri, turnId, [
-					'New human guidance for your current collaboration work:',
-					...messages.map(message => `[${message.id}] ${message.authorName}: ${message.text}`),
-					'Read room_read for the shared context. Acknowledge this guidance with room_post replyTo the message ID and adjust the current plan at the next safe tool boundary.',
-					'Address the human request first; do not restart the original broad task or duplicate completed peer work. Keep normal approvals and preserve unfinished changes.',
-				].join('\n\n'));
+				accepted = await this._runtime.steer(member.sessionUri, turnId, buildHumanGuidancePrompt(messages));
 			}
 		} catch (err) {
 			error = String(err);
@@ -1095,7 +1279,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		this._schedule(roomId);
 	}
 
-	private async _launch(reservation: IRoomRecord, memberId: string, turnId: string, runId: string, nextStep?: string): Promise<void> {
+	private async _launch(reservation: IRoomRecord, memberId: string, turnId: string, runId: string, resumed: boolean): Promise<void> {
 		const roomId = reservation.room.id;
 		const member = this._member(reservation, memberId);
 		try {
@@ -1136,37 +1320,29 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 						return true;
 					}
 					const inbox = current.messages.filter(message => message.deliveries.some(delivery => delivery.memberId === member.id && delivery.turnId === turnId && delivery.state === 'submitted'));
-					// Advisory island model: peer work is surfaced on an interval so a shared
-					// board cannot homogenise every member's approach within a few turns.
-					const reviewPeers = this._member(current, member.id).turns % PEER_REVIEW_INTERVAL === 0;
-					const continuation = !inbox.length && !nextStep;
-					const prompt = [
-						`You are ${member.name}, an equal peer in the shared collaboration room "${current.room.title}". There is no required lead.`,
-						...(inbox.length ? [
-							'PRIORITY: respond to the addressed messages below. This is a follow-up to existing work, not a request to start the whole project again.',
-							...inbox.map(message => `${message.authorKind === 'human' ? 'Human' : 'Peer'} ${message.authorName} [${message.id}]: ${message.text}`),
-							'Acknowledge the request publicly using room_post with replyTo set to its message ID. Explain concrete actions and results, or ask a focused question if blocked.',
-						] : []),
-						`Shared goal (background context): ${current.room.goal}`, `Room instructions: ${current.room.instructions}`,
-						`Your only working tree is ${URI.parse(member.worktreeUri!).fsPath}. The original repository ${URI.parse(current.room.repositoryUri).fsPath} and other peers' worktrees are not shared writable folders. Do not copy or commit your work there.`,
-						'Begin with room_read. It provides your identity, peer work, pending inbox, human guidance, and published artifacts. Empty files in your worktree do NOT mean peers have done nothing.',
-						...(reviewPeers
-							? ['This is a review turn. Read recent findings and inspect relevant published patches with room_read_artifact. Build on evidence rather than reimplementing completed work. A peer reporting success is a claim to verify, not proof.']
-							: ['This is a solo turn. Pursue YOUR OWN approach rather than adopting a peer\'s, even if theirs looks promising; you will get a review turn shortly. Independent approaches are the reason this room has several members. Still avoid duplicating work a peer has already announced.']),
-						'For a shared patch, inspect it, then use your normal approved shell tools to check and explicitly apply it ONLY inside your own worktree. Never copy files directly out of another peer workspace. Do not apply or merge into the original repository.',
-						'Announce one concrete complementary work item with room_post kind "work" BEFORE edits. Coordinate overlapping work by addressing the existing owner, and reconsider if newer peer work is reported.',
-						'Keep room posts short: intent, changed result, question, or evidence. Publish code with room_share_patch and link the artifact ID in findings, including failed approaches. Never claim a server or test works without verifying it.',
-						...(current.room.continuous
-							? ['The shared goal is open-ended and this room keeps running: there is always a further improvement to attempt. Do not stop because one avenue is finished. Supply nextStep with your intended follow-up, and never post repeated status updates or ask idle peers to confirm finished work.']
-							: ['Do not repeat completion/status posts or ask idle peers to confirm a finished task. A finished avenue is a reason to wait, not to loop. Supply nextStep only for a specific unfinished useful action and omit it when done.']),
-						...(continuation && current.room.continuous ? [
-							'You were woken to continue, not to answer a new request. Review your own most recent result first, then choose ONE concrete improvement on it or a different approach you have not tried. Do not restart the whole task and do not re-announce work you already finished.',
-						] : []),
-						'Human guidance takes precedence over an older plan. On new guidance, acknowledge it, revise your work, and tell affected peers. Do not spawn nested agents, factories, or hidden teams. Preserve normal approvals and content exclusions.',
-						'An earlier turn may have been interrupted. Inspect existing work before retrying any action; never assume an interrupted delivery or external operation completed.',
-						...(nextStep ? [`Previously proposed next step: ${nextStep}`] : []),
-					].join('\n\n');
+					let execution = this._execution(current, member.id);
+					if (!execution.briefed && execution.briefingTurnId && this._runtime.hasTurn(member.sessionUri, execution.briefingTurnId)) {
+						current = await this._save({
+							...current,
+							executions: current.executions.map(item => item.memberId === member.id ? { ...item, briefed: true, briefingTurnId: undefined } : item),
+						});
+						execution = this._execution(current, member.id);
+					}
+					const briefed = execution.briefed === true;
+					const prompt = buildRoomTurnPrompt(current.room, member, inbox, briefed, resumed);
+					if (!briefed) {
+						current = await this._save({
+							...current,
+							executions: current.executions.map(item => item.memberId === member.id ? { ...item, briefingTurnId: turnId } : item),
+						});
+					}
 					this._runtime.submit(member.sessionUri, turnId, prompt);
+					if (!briefed) {
+						await this._save({
+							...current,
+							executions: current.executions.map(item => item.memberId === member.id ? { ...item, briefed: true, briefingTurnId: undefined } : item),
+						});
+					}
 					return false;
 				});
 			} while (retryModelChange);
@@ -1216,7 +1392,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 						...item, state: event.state === 'idle' && item.work?.blocked ? 'blocked' : event.state, activity: event.activity, error: event.error,
 					} : item),
 				},
-				executions: record.executions.map(item => item.memberId === member.id && finished ? { ...item, turnId: undefined, runId: undefined, needsTurn: event.state === 'idle' && !member.work?.blocked && (!!member.work?.nextStep || record.room.continuous === true) } : item),
+				executions: record.executions.map(item => item.memberId === member.id && finished ? { ...item, turnId: undefined, runId: undefined, needsTurn: event.state === 'idle' && !member.work?.blocked } : item),
 				messages: finished ? record.messages.map(message => ({
 					...message, deliveries: message.deliveries.map(delivery => delivery.memberId === member.id && delivery.turnId === execution.turnId && ['submitted', 'delivered'].includes(delivery.state)
 						? { ...delivery, state: event.state === 'idle' ? 'completed' : event.state === 'stopped' ? 'cancelled' : 'failed', error: event.error } : delivery),
@@ -1293,6 +1469,35 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		if (typeof value !== 'string' || !value.trim() || value.length > limit) {
 			throw new Error(localize('rooms.invalidText', "Provide nonempty text of at most {0} characters.", limit));
 		}
+	}
+
+	private _messageId(value: string): void {
+		if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(value)) {
+			throw new Error(localize('rooms.invalidMessageId', "Use a message ID containing only letters, numbers, underscores, and hyphens."));
+		}
+	}
+
+	private _evidence(value: readonly string[]): readonly string[] {
+		if (!Array.isArray(value) || value.length < 1 || value.length > 20) {
+			throw new Error(localize('rooms.invalidResultEvidence', "Provide between 1 and 20 result evidence entries."));
+		}
+		for (const item of value) {
+			this._text(item, 2000);
+		}
+		return [...value];
+	}
+
+	private _resultArtifacts(record: IRoomRecord, member: IAgentHostRoomMember, value: readonly string[]): readonly string[] {
+		if (!Array.isArray(value) || value.length > 20 || new Set(value).size !== value.length) {
+			throw new Error(localize('rooms.invalidResultArtifacts', "Reference at most 20 unique published patch IDs."));
+		}
+		for (const artifactId of value) {
+			this._messageId(artifactId);
+			if (!record.room.artifacts.some(artifact => artifact.id === artifactId && artifact.memberId === member.id)) {
+				throw new Error(localize('rooms.invalidResultArtifact', "A result can reference only patches published by its author."));
+			}
+		}
+		return [...value];
 	}
 
 	private _assertOpen(): void {

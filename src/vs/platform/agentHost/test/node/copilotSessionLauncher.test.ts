@@ -200,7 +200,7 @@ suite('CopilotSessionLauncher room tools', () => {
 		}, {
 			checked: [{ sessionId: 'sess-1', tool: 'task' }, { sessionId: 'sess-1', tool: 'task' }],
 			configurations: ['create', 'resume'].map(() => ({
-				tools: ['room_read', 'room_read_artifact', 'room_post', 'room_share_patch'], customAgents: [],
+				tools: ['room_read', 'room_read_artifact', 'room_post', 'room_publish_result', 'room_verify_result', 'room_share_patch'], customAgents: [],
 				excludesTask: true, excludesFactory: true, skipPermission: false,
 			})),
 		});

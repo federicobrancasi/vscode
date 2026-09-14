@@ -12,7 +12,7 @@ import { isWeb } from '../../../../../base/common/platform.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsCapabilities, IAgentHostRoomsService } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsCapabilities, IAgentHostRoomsService, IAgentHostRoomVerifyResultOptions } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { GITHUB_COPILOT_PROTECTED_RESOURCE, IAgentHostService } from '../../../../../platform/agentHost/common/agentService.js';
 import { IAgentSubscription } from '../../../../../platform/agentHost/common/state/agentSubscription.js';
 import { PolicyState, RootState } from '../../../../../platform/agentHost/common/state/protocol/state.js';
@@ -45,6 +45,7 @@ suite('CollaborationService', () => {
 
 	function setup(enabled = true, aiDisabled = false) {
 		const starts: { roomId: string; limits: IAgentHostRoomLimits }[] = [];
+		const verifications: { roomId: string; options: IAgentHostRoomVerifyResultOptions }[] = [];
 		const changed = disposables.add(new Emitter<IAgentHostRoom>());
 		const exited = disposables.add(new Emitter<number>());
 		const configuration = new TestConfigurationService({
@@ -54,11 +55,30 @@ suite('CollaborationService', () => {
 		disposables.add(configuration.onDidChangeConfigurationEmitter);
 		const api = new class extends mock<IAgentHostRoomsService>() {
 			override readonly onDidChangeRoom = changed.event;
-			override async getCapabilities(): Promise<IAgentHostRoomsCapabilities> { return { version: 1, available: true, maxWorkers: 10, supportsSteering: true, supportsConfiguration: true, supportsMemberModels: true }; }
+			override async getCapabilities(): Promise<IAgentHostRoomsCapabilities> {
+				return {
+					version: 1,
+					available: true,
+					maxWorkers: 10,
+					supportsSteering: true,
+					supportsConfiguration: true,
+					supportsMemberModels: true,
+					supportsStructuredResults: true,
+					supportsResultVerification: true,
+				};
+			}
 			override async listRooms(): Promise<readonly IAgentHostRoom[]> { return [room('a'), room('b')]; }
 			override async getRoom(id: string): Promise<IAgentHostRoom> { return room(id); }
 			override async getMessages(_roomId: string, _query?: IAgentHostRoomMessageQuery): Promise<IAgentHostRoomMessagePage> { return { messages: [], hasEarlier: false, hasLater: false }; }
 			override async postMessage(_roomId: string, options: IAgentHostRoomPostOptions): Promise<IAgentHostRoomMessage> { return post(options.id, options.text); }
+			override async verifyResult(roomId: string, options: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage> {
+				verifications.push({ roomId, options });
+				return {
+					id: options.id, sequence: 1, authorId: 'human', authorName: 'You', authorKind: 'human',
+					kind: 'verification', text: 'Reviewed result', timestamp: 0, mentions: [], deliveries: [],
+					verification: { resultId: options.resultId, verdict: options.verdict, evidence: options.evidence },
+				};
+			}
 			override async getArtifact(roomId: string, artifactId: string): Promise<string> { return `${roomId}/${artifactId}`; }
 			override async startRoom(roomId: string, limits: IAgentHostRoomLimits): Promise<IAgentHostRoom> {
 				starts.push({ roomId, limits });
@@ -124,7 +144,7 @@ suite('CollaborationService', () => {
 			override readonly activeView = observableValue<ICollaborationRoomView | undefined>(this, new class extends mock<ICollaborationRoomView>() { }());
 		}();
 		const service = disposables.add(new CollaborationService(host, configuration, authenticationService, new NullLogService(), trustManagement, trustRequest, views));
-		return { service, api, changed, exited, authenticationService, authenticationPending, host, starts, trusted, trustPrompts, trustGrants, trustManagement, trustRequest, views };
+		return { service, api, changed, exited, authenticationService, authenticationPending, host, starts, verifications, trusted, trustPrompts, trustGrants, trustManagement, trustRequest, views };
 	}
 
 	function setupSignedIn() {
@@ -460,7 +480,7 @@ suite('CollaborationService', () => {
 		await waitForState(service.availability, state => state === 'available');
 		await service.selectRoom('a');
 		authenticationPending.set(true, undefined);
-		await assert.rejects(service.startRoom({ maxTurns: 2, timeoutMinutes: 1 }), /signing in/);
+		await assert.rejects(service.startRoom(), /signing in/);
 		assert.deepStrictEqual(starts, []);
 	});
 
@@ -468,7 +488,7 @@ suite('CollaborationService', () => {
 		const { service, starts } = setup();
 		await waitForState(service.availability, state => state === 'available');
 		await service.selectRoom('a');
-		await assert.rejects(service.startRoom({ maxTurns: 2, timeoutMinutes: 1 }), /Sign in through the Accounts menu/);
+		await assert.rejects(service.startRoom(), /Sign in through the Accounts menu/);
 		assert.deepStrictEqual(starts, []);
 		await service.stopRoom();
 		assert.strictEqual(service.activeRoom.get()?.state, 'stopped');
@@ -558,6 +578,42 @@ suite('CollaborationService', () => {
 		assert.deepStrictEqual({ canSteer: service.canSteer.get(), draft: service.getDraft('a').text }, { canSteer: false, draft: 'New guidance' });
 	});
 
+	desktopTest('human result verification does not request execution authorization', async () => {
+		const { service, api, authenticationService, verifications, trustPrompts } = setup();
+		await waitForState(service.availability, state => state === 'available');
+		await service.selectRoom('a');
+		let authenticationRequests = 0;
+		authenticationService.getSessions = async () => {
+			authenticationRequests++;
+			return [];
+		};
+		await service.verifyResult('result-one', 'verified', '  Repeated the focused test.  ');
+		assert.deepStrictEqual({
+			canVerifyResults: service.canVerifyResults.get(),
+			verifications: verifications.map(({ roomId, options }) => ({
+				roomId,
+				resultId: options.resultId,
+				verdict: options.verdict,
+				evidence: options.evidence,
+			})),
+			authenticationRequests,
+			trustPrompts,
+		}, {
+			canVerifyResults: true,
+			verifications: [{
+				roomId: 'a',
+				resultId: 'result-one',
+				verdict: 'verified',
+				evidence: ['Repeated the focused test.'],
+			}],
+			authenticationRequests: 0,
+			trustPrompts: [],
+		});
+		api.getCapabilities = async () => ({ version: 1, available: true, maxWorkers: 10 });
+		await service.refresh();
+		await assert.rejects(service.verifyResult('result-one', 'rejected', 'Evidence'), /does not support structured result verification/);
+	});
+
 	desktopTest('broadcast steering cannot wake peers before authentication', async () => {
 		const { service, api } = setup();
 		await waitForState(service.availability, state => state === 'available');
@@ -591,11 +647,11 @@ suite('CollaborationService', () => {
 		await service.selectRoom('a');
 		authenticationService.getSessions = async () => [authenticationSession];
 		host.authenticate = async () => ({ authenticated: false });
-		await assert.rejects(service.startRoom({ maxTurns: 2, timeoutMinutes: 1 }), /did not accept/);
+		await assert.rejects(service.startRoom(), /did not accept/);
 		assert.deepStrictEqual(starts, []);
 		host.authenticate = async () => ({ authenticated: true });
-		await service.startRoom({ maxTurns: 2, timeoutMinutes: 1 });
-		assert.deepStrictEqual(starts, [{ roomId: 'a', limits: { maxTurns: 2, timeoutMinutes: 1 } }]);
+		await service.startRoom();
+		assert.deepStrictEqual(starts, [{ roomId: 'a', limits: {} }]);
 	});
 
 	desktopTest('navigation during authentication cannot start a run in a different room', async () => {
@@ -604,7 +660,7 @@ suite('CollaborationService', () => {
 		await service.selectRoom('a');
 		const sessions = new DeferredPromise<readonly AuthenticationSession[]>();
 		authenticationService.getSessions = () => sessions.p;
-		const starting = service.startRoom({ maxTurns: 2, timeoutMinutes: 1 });
+		const starting = service.startRoom();
 		const rejected = assert.rejects(starting, isCancellationError);
 		await service.selectRoom('b');
 		await sessions.complete([authenticationSession]);
@@ -638,7 +694,7 @@ suite('CollaborationService', () => {
 		api.retryMessage = async () => { calls.push('retryMessage'); return message; };
 		api.postMessage = async (_id, options) => { calls.push(options.mode ?? 'message'); return { ...post(options.id, options.text), sequence: message.sequence + 1 }; };
 
-		await assert.rejects(service.startRoom({}), /trust was not granted/);
+		await assert.rejects(service.startRoom(), /trust was not granted/);
 		await assert.rejects(service.retryMember('member-1'), /trust was not granted/);
 		await assert.rejects(service.retryMessage('pending'), /trust was not granted/);
 		service.getDraft('a').update('@Copilot-1 Please work', undefined);
@@ -665,9 +721,9 @@ suite('CollaborationService', () => {
 		const second = service.requestWorkspaceTrust();
 		assert.strictEqual(first, second);
 		await Promise.all([first, second]);
-		await service.startRoom({});
+		await service.startRoom();
 		await service.selectRoom('a');
-		await service.startRoom({});
+		await service.startRoom();
 		assert.deepStrictEqual({
 			prompts: trustPrompts.map(prompt => prompt.uri.toString()),
 			separateWorktreesExplained: trustPrompts[0]?.message?.includes('Every peer uses a separate local worktree'),
@@ -687,7 +743,7 @@ suite('CollaborationService', () => {
 		api.getRoom = async id => withPeers(id);
 		await service.selectRoom('a');
 		authenticationService.getSessions = async () => [authenticationSession];
-		await service.startRoom({});
+		await service.startRoom();
 		assert.deepStrictEqual({ trustPrompts, trustGrants }, {
 			trustPrompts: [], trustGrants: [['file:///rooms/a/member-1', 'file:///rooms/a/member-2']],
 		});
@@ -703,7 +759,7 @@ suite('CollaborationService', () => {
 		const consent = new DeferredPromise<boolean>();
 		const prompted = new DeferredPromise<void>();
 		trustRequest.requestResourcesTrust = () => { void prompted.complete(); return consent.p; };
-		const starting = service.startRoom({});
+		const starting = service.startRoom();
 		const rejected = assert.rejects(starting, isCancellationError);
 		await prompted.p;
 		await service.selectRoom('b');

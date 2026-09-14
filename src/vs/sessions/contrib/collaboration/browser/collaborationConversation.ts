@@ -21,11 +21,12 @@ import { defaultButtonStyles } from '../../../../platform/theme/browser/defaultS
 import { getChatMarkdownRenderOptions } from '../../../../workbench/contrib/chat/browser/widget/chatContentMarkdownRenderer.js';
 import { ICollaborationRoomScrollState } from '../../../services/collaboration/browser/collaborationRoomView.js';
 import { collaborationAuthorAccent } from './collaborationColors.js';
-import { deliveryStateLabel, messageKindLabel } from './collaborationRoomLabels.js';
+import { deliveryStateLabel, messageKindLabel, resultOutcomeLabel, verificationStateLabel, verificationVerdictLabel } from './collaborationRoomLabels.js';
 
 interface IConversationActions {
 	reply(message: IAgentHostRoomMessage): void;
 	openArtifact(artifactId: string): void;
+	reviewResult(message: IAgentHostRoomMessage): void;
 	retry(messageId: string): void;
 }
 
@@ -41,6 +42,7 @@ interface IMessageTemplate {
 	readonly markdown: MutableDisposable<IRenderedMarkdown>;
 	message?: IAgentHostRoomMessage;
 	roomState?: IAgentHostRoom['state'];
+	canVerifyResults?: boolean;
 }
 
 /** A virtualized, variable-height shared transcript, independent from all peer chat models. */
@@ -53,6 +55,7 @@ export class CollaborationConversation extends Disposable {
 	private readonly templates = new Set<IMessageTemplate>();
 	private messages: readonly IAgentHostRoomMessage[] = [];
 	private room: IAgentHostRoom | undefined;
+	private canVerifyResults = false;
 	private following = true;
 	private updating = false;
 	private pendingAnchor: ICollaborationRoomScrollState | undefined;
@@ -91,7 +94,7 @@ export class CollaborationConversation extends Disposable {
 				getWidgetAriaLabel: () => localize('room.feed', "Shared conversation"),
 				getWidgetRole: () => 'list',
 				getRole: () => 'listitem',
-				getAriaLabel: message => localize('room.messageAria', "{0}, {1}: {2}", message.authorName, messageKindLabel(message.kind), message.text),
+				getAriaLabel: message => localize('room.messageAria', "{0}, {1}: {2}", message.authorName, messageKindLabel(message.kind), accessibleMessageText(message)),
 			},
 			keyboardNavigationLabelProvider: { getKeyboardNavigationLabel: message => `${message.authorName} ${message.text}` },
 			supportDynamicHeights: true,
@@ -150,7 +153,7 @@ export class CollaborationConversation extends Disposable {
 	}
 
 	private renderMessage(message: IAgentHostRoomMessage, template: IMessageTemplate): void {
-		const changed = !equals(template.message, message) || template.roomState !== this.room?.state;
+		const changed = !equals(template.message, message) || template.roomState !== this.room?.state || template.canVerifyResults !== this.canVerifyResults;
 		const accent = collaborationAuthorAccent(this.room, message.authorId);
 		// The chat identifies a speaker by avatar and name; ten agents still need telling apart.
 		template.avatar.style.background = accent;
@@ -163,6 +166,7 @@ export class CollaborationConversation extends Disposable {
 		const contentChanged = template.message?.text !== message.text;
 		template.message = message;
 		template.roomState = this.room?.state;
+		template.canVerifyResults = this.canVerifyResults;
 		template.element.dataset.messageId = message.id;
 		template.author.textContent = message.authorName;
 		template.avatar.textContent = message.authorName.replace(/[^0-9]/g, '') || message.authorName.slice(0, 1).toUpperCase();
@@ -175,7 +179,13 @@ export class CollaborationConversation extends Disposable {
 		const kind = message.mode === 'steer' ? localize('room.guidance', "Human guidance") : messageKindLabel(message.kind);
 		const reply = message.replyTo ? localize('room.replyMetadata', "Reply to {0}", this.messages.find(item => item.id === message.replyTo)?.authorName ?? message.replyTo) : '';
 		template.metadata.textContent = [kind, new Date(message.timestamp).toLocaleString(), reply, ...delivery].filter(Boolean).join(' | ');
-		if (contentChanged || !template.markdown.value) {
+		if (message.result) {
+			template.markdown.clear();
+			this.renderResult(message, template.body);
+		} else if (message.verification) {
+			template.markdown.clear();
+			this.renderVerification(message, template.body);
+		} else if (contentChanged || !template.markdown.value) {
 			template.markdown.value = this.markdownRenderer.render(new MarkdownString(message.text, { isTrusted: false, supportHtml: false }), getChatMarkdownRenderOptions({
 				asyncRenderCallback: () => this.scheduleMeasurements(),
 			}));
@@ -193,6 +203,13 @@ export class CollaborationConversation extends Disposable {
 		if (message.artifactId) {
 			addButton(localize('room.reviewArtifact', "Review Published Artifact"), () => this.actions.openArtifact(message.artifactId!));
 		}
+		for (const artifactId of message.result?.artifactIds ?? []) {
+			const title = this.room?.artifacts.find(artifact => artifact.id === artifactId)?.title ?? artifactId;
+			addButton(localize('room.reviewResultArtifact', "Review Patch: {0}", title), () => this.actions.openArtifact(artifactId));
+		}
+		if (message.result && this.canVerifyResults) {
+			addButton(localize('room.reviewResult', "Review Result"), () => this.actions.reviewResult(message));
+		}
 		if (message.authorKind === 'human' && message.deliveries.some(delivery => ['pending', 'cancelled', 'failed'].includes(delivery.state))) {
 			addButton(localize('room.retryDelivery', "Retry Delivery"), () => this.actions.retry(message.id)).enabled = this.room?.state !== 'paused' && this.room?.state !== 'stopping';
 		}
@@ -205,11 +222,44 @@ export class CollaborationConversation extends Disposable {
 		this.scheduleMeasurements();
 	}
 
-	setMessages(messages: readonly IAgentHostRoomMessage[], room: IAgentHostRoom | undefined): void {
+	private renderResult(message: IAgentHostRoomMessage, container: HTMLElement): void {
+		const result = message.result!;
+		const element = $('.room-result');
+		element.dataset.outcome = result.outcome;
+		element.dataset.verificationState = result.verificationState ?? 'pending';
+		const heading = element.appendChild($('.room-result-heading'));
+		heading.appendChild($('strong.room-result-title')).textContent = result.title;
+		heading.appendChild($('span.room-result-outcome')).textContent = resultOutcomeLabel(result.outcome);
+		heading.appendChild($('span.room-result-verification')).textContent = verificationStateLabel(result.verificationState ?? 'pending');
+		element.appendChild($('p.room-result-summary')).textContent = result.summary;
+		const evidenceHeading = element.appendChild($('div.room-result-evidence-heading'));
+		evidenceHeading.textContent = localize('room.resultEvidence', "Evidence");
+		const evidence = element.appendChild($('ul.room-result-evidence'));
+		for (const item of result.evidence) {
+			evidence.appendChild($('li')).textContent = item;
+		}
+		container.replaceChildren(element);
+	}
+
+	private renderVerification(message: IAgentHostRoomMessage, container: HTMLElement): void {
+		const verification = message.verification!;
+		const element = $('.room-verification');
+		element.dataset.verdict = verification.verdict;
+		element.appendChild($('strong.room-verification-verdict')).textContent = verificationVerdictLabel(verification.verdict);
+		element.appendChild($('span.room-verification-result')).textContent = localize('room.verificationFor', "Result: {0}", verification.resultId);
+		const evidence = element.appendChild($('ul.room-result-evidence'));
+		for (const item of verification.evidence) {
+			evidence.appendChild($('li')).textContent = item;
+		}
+		container.replaceChildren(element);
+	}
+
+	setMessages(messages: readonly IAgentHostRoomMessage[], room: IAgentHostRoom | undefined, canVerifyResults = false): void {
 		const anchor = this.captureScrollState(room?.id ?? '');
 		this.updating = true;
 		try {
 			this.room = room;
+			this.canVerifyResults = canVerifyResults;
 			let prefix = 0;
 			while (prefix < messages.length && prefix < this.messages.length && equals(messages[prefix], this.messages[prefix])) {
 				prefix++;
@@ -315,4 +365,17 @@ export class CollaborationConversation extends Disposable {
 	}
 
 	focus(): void { this.list.domFocus(); }
+}
+
+function accessibleMessageText(message: IAgentHostRoomMessage): string {
+	if (message.result) {
+		return localize('room.resultAria', "{0}. Outcome: {1}. Verification: {2}. {3}. Evidence: {4}",
+			message.result.title, resultOutcomeLabel(message.result.outcome), verificationStateLabel(message.result.verificationState ?? 'pending'),
+			message.result.summary, message.result.evidence.join('; '));
+	}
+	if (message.verification) {
+		return localize('room.verificationAria', "{0} result {1}. Evidence: {2}",
+			verificationVerdictLabel(message.verification.verdict), message.verification.resultId, message.verification.evidence.join('; '));
+	}
+	return message.text;
 }

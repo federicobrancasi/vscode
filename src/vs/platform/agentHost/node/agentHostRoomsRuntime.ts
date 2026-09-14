@@ -279,6 +279,11 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 		return !this._stateManager.getActiveTurnId(buildDefaultChatUri(sessionUri));
 	}
 
+	hasTurn(sessionUri: string, turnId: string): boolean {
+		const chat = this._stateManager.getChatState(buildDefaultChatUri(sessionUri));
+		return chat?.activeTurn?.id === turnId || chat?.turns.some(turn => turn.id === turnId) === true;
+	}
+
 	submit(sessionUri: string, turnId: string, prompt: string): void {
 		const chat = buildDefaultChatUri(sessionUri);
 		if (!this._sessionsByChat.has(chat) || !this.isIdle(sessionUri)) {

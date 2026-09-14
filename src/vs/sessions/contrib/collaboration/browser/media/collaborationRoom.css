@@ -319,6 +319,48 @@
 	background: transparent;
 }
 
+.collaboration-room .room-result,
+.collaboration-room .room-verification {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size80);
+	padding: var(--vscode-spacing-size120);
+	border: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+	border-radius: var(--vscode-cornerRadius-medium);
+	background: var(--vscode-textBlockQuote-background, transparent);
+}
+
+.collaboration-room .room-result-heading {
+	display: flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-result-title,
+.collaboration-room .room-verification-verdict,
+.collaboration-room .room-result-evidence-heading {
+	font-weight: var(--vscode-fontWeight-semiBold);
+}
+
+.collaboration-room .room-result-outcome,
+.collaboration-room .room-result-verification,
+.collaboration-room .room-verification-result {
+	color: var(--vscode-descriptionForeground);
+	font-size: var(--vscode-fontSize-label1);
+}
+
+.collaboration-room .room-result-summary,
+.collaboration-room .room-result-evidence {
+	margin: var(--vscode-spacing-sizeNone);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.collaboration-room .room-result-evidence {
+	padding-left: var(--vscode-spacing-size200);
+}
+
 .collaboration-room .room-message {
 	box-sizing: border-box;
 	width: 100%;

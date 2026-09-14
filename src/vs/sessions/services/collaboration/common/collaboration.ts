@@ -5,7 +5,7 @@
 
 import { ContextKeyExpr, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 import { IObservable } from '../../../../base/common/observable.js';
-import { AgentHostRoomMessageMode, IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessagePage } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { AgentHostRoomMessageMode, AgentHostRoomVerificationVerdict, IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomMessagePage } from '../../../../platform/agentHost/common/agentHostRooms.js';
 import { ResolveSessionConfigResult } from '../../../../platform/agentHost/common/state/protocol/commands.js';
 import { ChatInputAnswer, ChatInputRequest, ChatInputResponseKind, ModelSelection, SessionModelInfo, ToolCallConfirmationState } from '../../../../platform/agentHost/common/state/protocol/state.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
@@ -81,6 +81,7 @@ export interface ICollaborationService {
 	readonly canSteer: IObservable<boolean>;
 	readonly canConfigure: IObservable<boolean>;
 	readonly canSetMemberModel: IObservable<boolean>;
+	readonly canVerifyResults: IObservable<boolean>;
 	readonly error: IObservable<string | undefined>;
 	readonly workspaceTrust: IObservable<ICollaborationWorkspaceTrust>;
 	readonly requests: IObservable<readonly ICollaborationRequest[]>;
@@ -100,8 +101,9 @@ export interface ICollaborationService {
 	loadEarlierMessages(): Promise<void>;
 	getDraft(roomId: string): CollaborationDraft;
 	sendMessage(mode?: AgentHostRoomMessageMode): Promise<void>;
+	verifyResult(resultId: string, verdict: AgentHostRoomVerificationVerdict, evidence: string): Promise<void>;
 	retryMessage(messageId: string): Promise<void>;
-	startRoom(limits: IAgentHostRoomLimits): Promise<void>;
+	startRoom(): Promise<void>;
 	pauseRoom(): Promise<void>;
 	stopRoom(): Promise<void>;
 	addMember(model?: ModelSelection): Promise<void>;

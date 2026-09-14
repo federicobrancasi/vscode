@@ -4,16 +4,39 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { localize } from '../../../../nls.js';
-import { AgentHostRoomDeliveryState, AgentHostRoomMemberState, AgentHostRoomMessageKind, AgentHostRoomState } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { AgentHostRoomDeliveryState, AgentHostRoomMemberState, AgentHostRoomMessageKind, AgentHostRoomResultOutcome, AgentHostRoomState, AgentHostRoomVerificationState, AgentHostRoomVerificationVerdict } from '../../../../platform/agentHost/common/agentHostRooms.js';
 
 export function messageKindLabel(kind: AgentHostRoomMessageKind): string {
 	switch (kind) {
 		case 'message': return localize('post.message', "Message");
 		case 'work': return localize('post.work', "Work update");
 		case 'finding': return localize('post.finding', "Finding");
+		case 'result': return localize('post.result', "Structured result");
+		case 'verification': return localize('post.verification', "Result verification");
 		case 'artifact': return localize('post.artifact', "Published artifact");
 		case 'system': return localize('post.system', "Room event");
 	}
+}
+
+export function resultOutcomeLabel(outcome: AgentHostRoomResultOutcome): string {
+	switch (outcome) {
+		case 'success': return localize('result.success', "Success");
+		case 'negative': return localize('result.negative', "Negative result");
+		case 'inconclusive': return localize('result.inconclusive', "Inconclusive");
+		case 'blocked': return localize('result.blocked', "Blocked");
+	}
+}
+
+export function verificationStateLabel(state: AgentHostRoomVerificationState): string {
+	switch (state) {
+		case 'pending': return localize('verification.pending', "Pending verification");
+		case 'verified': return localize('verification.verified', "Verified");
+		case 'rejected': return localize('verification.rejected', "Rejected");
+	}
+}
+
+export function verificationVerdictLabel(verdict: AgentHostRoomVerificationVerdict): string {
+	return verdict === 'verified' ? localize('verification.verdictVerified', "Verified") : localize('verification.verdictRejected', "Rejected");
 }
 
 export function roomStateLabel(state: AgentHostRoomState): string {

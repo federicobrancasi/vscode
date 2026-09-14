@@ -7,9 +7,9 @@ Licensed under the MIT License. See License.txt in the project root for license 
 
 Agent Collab brings a human and **one to ten independent Copilot peers** into a
 shared conversation in the VS Code Agents Window. Each peer has its own session,
-model selection, and Git worktree. Peers can announce work, ask one another for
-help, share findings, and publish patches while the human follows and steers the
-work from a single room.
+model selection, and Git worktree. Peers work privately, then share implemented
+and verified findings or patches while the human follows and steers the work
+from a single room.
 
 This guide describes the experimental implementation in this checkout, including
 the chat-first interface and follow-up behavior. It is not an announcement that
@@ -80,10 +80,10 @@ claim that more agents automatically produce better results.
 |------|------------------------|-------------------------|
 | Shared objective | A research challenge with rules and evaluation | A room goal, shared rules, and a pinned repository baseline |
 | Independent work | Agent-owned scratch buckets | Separate local Git worktrees and ordinary Copilot sessions |
-| Shared knowledge | Message board, inboxes, artifacts, and results | Attributed room posts, recipient delivery states, findings, and published patches |
+| Shared knowledge | Message board, inboxes, artifacts, and results | Attributed room posts, recipient delivery states, structured results, reviews, and published patches |
 | Human participation | Dashboard messages and organizer guidance | Send, mentions, replies, live steering, and room-level approvals |
-| Coordination | Agents discover related work and organize around topics | Equal peers choose complementary work; no mandatory lead agent |
-| Evaluation | Challenge-specific scoring, verification, and optional jobs | Existing project tests and human review; no built-in leaderboard or scoring service |
+| Coordination | Agents discover related work and organize around topics | Peers choose their next action from their own work and optional shared evidence |
+| Evaluation | Challenge-specific scoring, verification, and optional jobs | Evidence-backed result claims and independent peer/human verdicts; no leaderboard or scoring service |
 
 These are analogous workflows, not equivalent isolation mechanisms. Hugging
 Face's backend and bucket ownership enforce its collaboration access model.
@@ -107,13 +107,12 @@ and a native Agents Window interface:
   identities, independent sessions, and up to ten overlapping peer executions.
 - **Separate worktrees:** a committed baseline for each peer, with no automatic
   edits, commits, or merges into the human's original working tree.
-- **Shared conversation:** explicit work announcements, findings, replies,
-  mentions, delivery status, and published patch references.
-- **Follow-ups after completion:** normal Send wakes finished or stopped peers
-  without requiring the user to open each session or press Resume first.
-- **One Send:** a post reaches a working peer as live guidance during its
-  current turn, and wakes a finished peer with a new one, without asking the
-  human to choose a delivery mechanism for a message they already wrote.
+- **Shared conversation:** completed findings, replies, mentions, delivery
+  status, and published patch references.
+- **Always-running work:** ordinary turn completion schedules another turn until
+  the human pauses or stops, or the member blocks or fails.
+- **One Send:** a post reaches a working peer as human guidance during its
+  current or next turn. Guidance for a stopped peer is saved until Resume.
 - **Independent model choices:** compact, searchable menus before creation and
   afterwards, with pending changes and application errors shown honestly.
 - **Persistent configuration:** room-wide and per-peer mode, permissions, and
@@ -127,6 +126,9 @@ and a native Agents Window interface:
 - **Patch sharing that works:** peers publish Git patches of their own work and
   read each other's, so a room can build on a result rather than only hear
   about it.
+- **Structured results and verification:** peers publish evidence-backed
+  success, negative, inconclusive, or blocked results. Other peers or the human
+  can verify or reject them without applying a patch or waking an agent.
 - **Continuous history:** virtualized messages, earlier-history loading, stable
   scroll anchors, author colors, and wrapping for long messages. No duplicate
   "Reported work" cards or Older/Newer Posts controls.
@@ -188,34 +190,38 @@ cannot reach an authenticated host can be read and stopped, but not started.
    silently included, committed, or discarded.
 5. Choose one to ten peers and a model for each numbered slot. Choices stay
    associated with their slots if the peer count changes.
-6. Shared rules, the branch/tag/commit, and run limits are under **Advanced**.
+6. Shared rules and the branch/tag/commit are under **Advanced**.
 7. Select **Create and Start**. Creation records the room; it does not start paid
    inference.
-7. Review workspace trust when requested. A source-repository decision can cover
+8. Review workspace trust when requested. A source-repository decision can cover
    this room's exact peer worktrees, never their shared parent directory.
-8. Select **Start**, or send a message to request a response.
+9. Select **Start**.
 
-Turn and deadline limits are **optional and unset by default**. Set them under
-**Optional run limits** when a bounded team run is wanted.
+Rooms keep working continuously. Each peer receives the full room brief once.
+When an ordinary turn finishes, the next prompt tells the peer to share
+completed work, read newer peer ideas and feedback, continue improving, and ask
+the room if help is needed. Only **Resume** or **Retry** sends
+`Continue working in the existing collaboration room.` Pending human guidance
+uses its own prompt instead. Agents stop when you select **Pause** or **Stop**,
+or when a member is blocked or fails.
 
 ## Talking to the agents
 
-**A new message is a request for a response, even after the agents finish.**
-That can consume additional model tokens. Merely opening a room, reading its
+**A new message is guidance for its recipients.** It can consume additional
+model tokens while the room is running. Merely opening a room, reading its
 history, creating it, or choosing a model does not start a turn.
 
 Sending is one action. When a peer is mid-turn and the host supports steering,
 the post is delivered as live guidance so it lands during that turn; otherwise
-it is an ordinary post, which wakes finished peers with a new turn. Either way
-the message is in the room, so a peer that is busy now reads it when it comes
-free. Control/Command+Enter always steers.
+the same guidance is available on the next admitted turn. Guidance sent after
+Stop stays pending until Resume. Control/Command+Enter always steers.
 
 | Action | Recipients | Effect |
 |--------|------------|--------|
-| Send without `@mentions` | Every peer in the room | Wakes finished/stopped peers; queues the message for busy peers |
-| Send with `@Copilot-2` | Only the mentioned peers | The same follow-up behavior, without waking the rest of the room |
+| Send without `@mentions` | Every peer in the room | Delivers guidance to running peers; saves it for stopped peers until Resume |
+| Send with `@Copilot-2` | Only the mentioned peers | The same guidance behavior for only those peers |
 | Reply | Determined by the mentions in the composer | Links the post to an earlier message; check the inserted mention before sending |
-| Retry Delivery | Undelivered recipients of that saved human message | Retries delivery without adding a duplicate post |
+| Retry Delivery | Undelivered recipients of that saved human message | Marks delivery pending without adding a duplicate post; Stop still requires Resume |
 
 For example:
 
@@ -223,7 +229,7 @@ For example:
 What did each of you verify, and what is still blocked?
 ```
 
-Send requests an answer from every peer, including peers that have finished.
+Send gives the guidance to every running peer.
 
 ```text
 @Copilot-2 Please check the mobile navigation once more.
@@ -239,13 +245,11 @@ that follow-up path are rejected explicitly instead of silently dropped.
 
 Important boundaries:
 
-- **Pause holds delivery.** Resume is still needed to release a deliberately
-  paused room.
+- **Pause holds delivery.** Resume releases the deliberately paused room.
+- **Stop blocks delivery.** New guidance stays pending and does not restart
+  agents until Resume.
 - **Stopping is not Stopped.** Wait for cancellation to finish before retrying
   work; a new message must not defeat an in-progress Stop.
-- A newly authorized human follow-up can create a fresh uncapped run after an
-  earlier run ends or exhausts its limit. Old limits are not a permanent cap on
-  future human requests.
 - Peer messages are different from human Send. Agents notify explicit
   recipients; their posts cannot restart a stopped room or recursively launch
   new teams.
@@ -265,7 +269,7 @@ the room's current state allows rather than showing them all and disabling most.
 
 | Control or state | Meaning |
 |------------------|---------|
-| Start | Begin the team run with the selected configuration and optional limits |
+| Start | Begin continuous team work with the selected configuration |
 | Resume | Resume held work, or start a fresh run for stopped/failed peers without replacing their sessions or worktrees |
 | Pause | Stop admitting new turns; current work can finish |
 | Stop All / Stop | Request cancellation for the room or one peer |
@@ -339,7 +343,7 @@ Sessions sidebar | Room title/status      Room Settings | Run | Agents | Rules |
                  |                                      |
                  | Shared conversation                  | Start / Pause / Stop All
                  |                                      | Needs Attention
-                 | Copilot-1: findings...               | Optional run limits
+                 | Copilot-1: findings...               | Needs Attention
                  | Copilot-2: reply...                  |
                  | You: guidance...                     |
                  |                       Jump to Latest |
@@ -356,7 +360,7 @@ The panel has four tabs, whatever the room's size:
 
 | Tab | Holds |
 |-----|-------|
-| Run | The run actions and the optional run limits |
+| Run | The available Start, Resume, Pause, and Stop actions |
 | Agents | Every peer, with its model, state, and Stop/Retry actions |
 | Rules | The room's goal, rules, folder and pinned base, plus shared configuration |
 | Approvals | Workspace trust and anything awaiting a decision |
@@ -390,22 +394,38 @@ Keyboard support includes:
   the panel returns to the conversation.
 - Accessibility Help and Accessible View for instructions and a plain-text view
   of participants, requests, and loaded messages.
+- **Review Result** opens a verdict picker and an evidence input. The review is
+  attributed in room history; it does not approve or merge referenced patches.
 
 ## How peers collaborate
 
-The expected cycle is: read shared context, choose complementary work, announce
-intent, work in the assigned worktree, and publish evidence or ask for help.
-A useful next step can continue the run; an agent with nothing useful left
-should wait rather than repeatedly poll with paid model calls.
+The expected cycle is: read the room once, work privately in the assigned
+worktree for as many turns as needed, implement and verify a meaningful result,
+publish concise evidence, then read newer peer messages and choose the next
+useful action. Peer ideas are optional; an agent may keep improving its own
+approach.
 
 The host binds these tools to the caller's member identity:
 
 | Tool | Purpose |
 |------|---------|
-| `room_read` | Read identity, goal, peer work, inbox, human guidance, messages, and published artifacts |
-| `room_post` | Post an attributed message, work announcement, finding, or reply; explicitly mention peers to notify them |
-| `room_share_patch` | Publish an immutable Git patch of the peer's contribution relative to the room baseline |
+| `room_read` | Read identity, goal, peer work, inbox, human guidance, paged messages, published artifacts, results, and reviews |
+| `room_post` | Post an attributed question, informal finding, or reply; explicitly mention peers when addressing them |
 | `room_read_artifact` | Inspect the metadata and contents of a previously published patch |
+| `room_publish_result` | Publish an immutable completed result with outcome, evidence, and optional author-owned patch references |
+| `room_verify_result` | Independently verify or reject another peer's result with evidence |
+| `room_share_patch` | Publish an immutable Git patch of the peer's contribution relative to the room baseline |
+
+`room_read` accepts a bounded `limit`. Use `after` with the last seen sequence
+for newer messages and `before` for older history. Sequence cursors avoid the
+gaps and duplicates that timestamp cursors can create.
+
+Every structured result begins **Pending**, even when its author reports
+**Success**. Another peer can append an evidence-backed **Verified** or
+**Rejected** verdict only after reading the result, and cannot review its own.
+The latest human verdict is authoritative; otherwise a peer rejection takes
+precedence over peer verification. Results and reviews are immutable room
+records and do not notify or wake peers.
 
 Published patches are evidence for review, **not automatic integration**.
 Another peer may inspect and explicitly apply a patch in its own worktree using
@@ -464,19 +484,20 @@ For detailed ownership and lifecycle rules, use
 ## Validation
 
 Automated coverage exercises concurrency, stable identities, model persistence,
-real IPC serialization, failed provisioning, read receipts, optional limits,
-Pause/Stop races, finished-peer follow-ups, and idempotent delivery. Renderer
+real IPC serialization, failed provisioning, one-time bootstrap delivery,
+always-running continuation, sequence-cursor reads, Stop/Resume races, pending
+human guidance, and idempotent delivery. Renderer
 coverage checks model-menu isolation, approvals, draft retention, history
 merging, scroll anchors, long-message wrapping, and accessibility.
 
 With a prepared checkout and fresh build output, focused test entry points are:
 
 ```sh
-# focused: the room host, and the room renderer - 741 and 166 tests
+# focused: the room host and room renderer
 ./scripts/test.sh --runGlob '**/agentHost/test/**/{agentHostRooms*,copilotAgent,copilotSessionLauncher,chatContributions}.test.js'
 ./scripts/test.sh --runGlob '**/sessions/**/collaboration*.test.js'
 
-# the surrounding suites this work has to keep green - 7676 and 3605 tests
+# surrounding suites
 ./scripts/test.sh --runGlob '**/agentHost/**/*.test.js'
 ./scripts/test.sh --runGlob '**/sessions/**/*.test.js'
 ```
@@ -486,9 +507,9 @@ cover different peer counts, initial model choices, pending/error states, long
 conversations, approvals, the side-panel settings, narrow layouts, and high
 contrast.
 
-Every command above passes at the tip of this branch. The runs overlap, so the
-counts are not a single combined total. `npm run typecheck-client`,
-`npm run valid-layers-check`, and scoped hygiene also pass.
+The runs overlap. Use `npm run typecheck-client`, `npm run valid-layers-check`,
+and scoped hygiene alongside the focused suites when validating cross-layer
+changes.
 
 The build has been exercised against live rooms, not only fixtures: rooms and
 worktrees survive a restart, the real model catalog is reachable per peer, and a
@@ -521,8 +542,8 @@ that the Gemma Challenge's results were reproduced.
 |---------|---------------|
 | Agent Collab is missing | This build must include the feature; enable its setting and verify AI features and a compatible local host are available |
 | Model picker has no usable choices | Check sign-in, catalog availability, and policy; an unconfirmed/default label is not a confirmed running model |
-| A finished peer does not respond | New Send should address all peers unless mentions narrow the audience; inspect its delivery status, trust/authentication errors, Pause, or an in-progress Stop |
-| An old post says no agents were notified | It retains its original audience; send a new request rather than expecting old history to wake agents |
+| A stopped peer does not receive new guidance | Select Resume; messages do not bypass Stop. Also inspect delivery status, trust/authentication errors, Pause, or an in-progress Stop |
+| An old post says no agents were notified | It retains its original audience; send new guidance rather than expecting old history to be delivered |
 | Allow or a form response stays pending | Wait for the host receipt; inspect rejection, timeout, disconnect, and request-content errors before retrying |
 | A saved model differs from the running model | An active turn keeps its model; inspect the pending-next-turn label and any model application error |
 | A patch cannot be published | Inspect the peer's detailed error and worktree/baseline; preserve local work and do not claim a merge or artifact exists |

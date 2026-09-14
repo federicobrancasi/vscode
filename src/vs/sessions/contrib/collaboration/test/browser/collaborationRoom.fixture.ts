@@ -16,8 +16,10 @@ import { ContextViewService } from '../../../../../platform/contextview/browser/
 import { ILayoutService } from '../../../../../platform/layout/browser/layoutService.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { IMarkdownRendererService, MarkdownRendererService } from '../../../../../platform/markdown/browser/markdownRenderer.js';
+import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
 import { InMemoryStorageService } from '../../../../../platform/storage/common/storage.js';
 import { IEditorService } from '../../../../../workbench/services/editor/common/editorService.js';
+import { IViewsService } from '../../../../../workbench/services/views/common/viewsService.js';
 import { ComponentFixtureContext, createEditorServices, defineComponentFixture, defineThemedFixtureGroup, registerWorkbenchServices } from '../../../../../workbench/test/browser/componentFixtures/fixtureUtils.js';
 import { CustomViewNode } from '../../../../browser/parts/customViewNode.js';
 import { ISessionsPartService } from '../../../../services/sessions/browser/sessionsPartService.js';
@@ -140,6 +142,8 @@ function renderRoom(ctx: ComponentFixtureContext, state: RoomFixtureState): void
 			reg.defineInstance(ISessionsProvidersService, new class extends mock<ISessionsProvidersService>() { });
 			reg.defineInstance(ISessionsPartService, new class extends mock<ISessionsPartService>() { });
 			reg.defineInstance(IEditorService, new class extends mock<IEditorService>() { });
+			reg.defineInstance(IViewsService, new class extends mock<IViewsService>() { });
+			reg.defineInstance(IQuickInputService, new class extends mock<IQuickInputService>() { });
 		},
 	});
 	stubCollaborationTestServices(instantiation, ctx.disposableStore);

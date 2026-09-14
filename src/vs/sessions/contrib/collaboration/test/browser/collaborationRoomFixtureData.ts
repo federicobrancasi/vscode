@@ -38,7 +38,7 @@ export function createCollaborationFixtureRoom(): IAgentHostRoom {
 		createdAt: timestamp,
 		updatedAt: timestamp + 60000,
 		state: 'running',
-		latestMessageSequence: 4,
+		latestMessageSequence: 6,
 		run: {
 			id: 'run-fixture',
 			startedAt: timestamp,
@@ -93,6 +93,27 @@ export function createCollaborationFixtureMessages(): IAgentHostRoomMessagePage 
 			id: 'message-4', sequence: 4, authorId: 'member-2', authorName: 'Copilot-2', authorKind: 'agent', kind: 'artifact',
 			text: 'The cache experiment is ready for review. Publishing this patch has not changed your working branch.',
 			timestamp: timestamp + 40000, mentions: [], artifactId: 'patch-1', deliveries: [],
+		}, {
+			id: 'result-cache', sequence: 5, authorId: 'member-2', authorName: 'Copilot-2', authorKind: 'agent', kind: 'result',
+			text: 'Cache configuration reads\n\nThe focused benchmark shows fewer repeated reads without changing the public API.',
+			timestamp: timestamp + 50000, mentions: [], deliveries: [],
+			result: {
+				title: 'Cache configuration reads',
+				summary: 'The focused benchmark shows fewer repeated reads without changing the public API.',
+				outcome: 'success',
+				evidence: ['Configuration cache tests passed.', 'Median startup time improved from 820 ms to 760 ms.'],
+				artifactIds: ['patch-1'],
+				verificationState: 'verified',
+			},
+		}, {
+			id: 'verification-cache', sequence: 6, authorId: 'member-7', authorName: 'Copilot-7', authorKind: 'agent', kind: 'verification',
+			text: 'Verified result "Cache configuration reads".',
+			timestamp: timestamp + 60000, mentions: [], deliveries: [],
+			verification: {
+				resultId: 'result-cache',
+				verdict: 'verified',
+				evidence: ['Re-ran the focused tests and benchmark in an independent worktree.'],
+			},
 		}],
 	};
 }
@@ -148,6 +169,7 @@ export class CollaborationFixtureService extends mock<ICollaborationService>() {
 	override readonly canSteer = observableValue(this, true);
 	override readonly canConfigure = observableValue(this, true);
 	override readonly canSetMemberModel = observableValue(this, true);
+	override readonly canVerifyResults = observableValue(this, true);
 	override readonly error = observableValue<string | undefined>(this, undefined);
 	override readonly workspaceTrust = observableValue<ICollaborationWorkspaceTrust>(this, { state: 'trusted' });
 	override readonly requests = observableValue<readonly ICollaborationRequest[]>(this, []);

@@ -17,9 +17,12 @@ export const NewCollaborationRoomCommandId = 'workbench.action.collaboration.new
 
 export type AgentHostRoomState = 'created' | 'running' | 'idle' | 'paused' | 'stopping' | 'stopped' | 'interrupted';
 export type AgentHostRoomMemberState = 'pending' | 'starting' | 'working' | 'idle' | 'blocked' | 'needsInput' | 'stopping' | 'stopped' | 'failed' | 'interrupted';
-export type AgentHostRoomMessageKind = 'message' | 'work' | 'finding' | 'artifact' | 'system';
+export type AgentHostRoomMessageKind = 'message' | 'work' | 'finding' | 'result' | 'verification' | 'artifact' | 'system';
 export type AgentHostRoomMessageMode = 'message' | 'steer';
 export type AgentHostRoomDeliveryState = 'pending' | 'submitted' | 'steering' | 'delivered' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+export type AgentHostRoomResultOutcome = 'success' | 'negative' | 'inconclusive' | 'blocked';
+export type AgentHostRoomVerificationVerdict = 'verified' | 'rejected';
+export type AgentHostRoomVerificationState = 'pending' | AgentHostRoomVerificationVerdict;
 export type IAgentHostRoomModelSelection = ModelSelection;
 
 export interface IAgentHostRoomConfiguration {
@@ -126,6 +129,22 @@ export interface IAgentHostRoomDelivery {
 	readonly error?: string;
 }
 
+export interface IAgentHostRoomResult {
+	readonly title: string;
+	readonly summary: string;
+	readonly outcome: AgentHostRoomResultOutcome;
+	readonly evidence: readonly string[];
+	readonly artifactIds: readonly string[];
+	/** Derived by the host from verification messages; absent in persisted and legacy records. */
+	readonly verificationState?: AgentHostRoomVerificationState;
+}
+
+export interface IAgentHostRoomVerification {
+	readonly resultId: string;
+	readonly verdict: AgentHostRoomVerificationVerdict;
+	readonly evidence: readonly string[];
+}
+
 export interface IAgentHostRoomMessage {
 	readonly id: string;
 	readonly sequence: number;
@@ -140,6 +159,8 @@ export interface IAgentHostRoomMessage {
 	readonly mentions: readonly string[];
 	readonly replyTo?: string;
 	readonly artifactId?: string;
+	readonly result?: IAgentHostRoomResult;
+	readonly verification?: IAgentHostRoomVerification;
 	readonly deliveries: readonly IAgentHostRoomDelivery[];
 }
 
@@ -183,6 +204,22 @@ export interface IAgentHostRoomPostOptions {
 	readonly mode?: AgentHostRoomMessageMode;
 }
 
+export interface IAgentHostRoomPublishResultOptions {
+	readonly id: string;
+	readonly title: string;
+	readonly summary: string;
+	readonly outcome: AgentHostRoomResultOutcome;
+	readonly evidence: readonly string[];
+	readonly artifactIds: readonly string[];
+}
+
+export interface IAgentHostRoomVerifyResultOptions {
+	readonly id: string;
+	readonly resultId: string;
+	readonly verdict: AgentHostRoomVerificationVerdict;
+	readonly evidence: readonly string[];
+}
+
 export interface IAgentHostRoomsCapabilities {
 	readonly version: 1;
 	readonly available: boolean;
@@ -190,6 +227,8 @@ export interface IAgentHostRoomsCapabilities {
 	readonly supportsSteering?: boolean;
 	readonly supportsConfiguration?: boolean;
 	readonly supportsMemberModels?: boolean;
+	readonly supportsStructuredResults?: boolean;
+	readonly supportsResultVerification?: boolean;
 }
 
 export const IAgentHostRoomsService = createDecorator<IAgentHostRoomsService>('agentHostRoomsService');
@@ -210,6 +249,7 @@ export interface IAgentHostRoomsService {
 	createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom>;
 	getMessages(roomId: string, query?: IAgentHostRoomMessageQuery): Promise<IAgentHostRoomMessagePage>;
 	postMessage(roomId: string, message: IAgentHostRoomPostOptions): Promise<IAgentHostRoomMessage>;
+	verifyResult(roomId: string, verification: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage>;
 	/** Explicitly retry undelivered recipients of a saved human message without duplicating the post. */
 	retryMessage(roomId: string, messageId: string): Promise<IAgentHostRoomMessage>;
 	startRoom(roomId: string, limits: IAgentHostRoomLimits): Promise<IAgentHostRoom>;
@@ -223,8 +263,6 @@ export interface IAgentHostRoomsService {
 	setRoomConfiguration(roomId: string, configuration: Partial<IAgentHostRoomConfiguration>): Promise<IAgentHostRoom>;
 	/** Undefined selects the catalog's explicit Auto model; rejects when Auto is unavailable. */
 	setMemberModel(roomId: string, memberId: string, model: ModelSelection | undefined): Promise<IAgentHostRoom>;
-	/** Toggle whether idle members keep working without an explicit next step. */
-	setContinuous(roomId: string, continuous: boolean): Promise<IAgentHostRoom>;
 	/** Return immutable patch text; the separately published artifact.uri identifies its file. */
 	getArtifact(roomId: string, artifactId: string): Promise<string>;
 }

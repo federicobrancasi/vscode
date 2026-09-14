@@ -100,8 +100,8 @@ suite('Collaboration accessibility', () => {
 		assert.deepStrictEqual({
 			type: provider.options.type,
 			verbosity: provider.verbositySettingKey,
-			peers: content.includes('no required lead'),
-			mentions: content.includes('Mention a participant with @'),
+			peers: content.includes('Agents keep working until you pause or stop them'),
+			mentions: content.includes('participants mentioned with @'),
 			keyboard: content.includes('Shift+Enter'),
 			pause: content.includes('Pause prevents new turns'),
 			changes: content.includes('Publishing a patch does not apply or merge'),
@@ -114,6 +114,7 @@ suite('Collaboration accessibility', () => {
 			trust: content.includes('exact local worktree of each peer'),
 			autopilot: content.includes('Autopilot is separate from Allow all'),
 			configuration: content.includes('All peers controls') && content.includes('Choices are saved across Stop and Resume'),
+			structuredResults: content.includes('Structured results show their outcome') && content.includes('Review Result'),
 		}, {
 			type: AccessibleViewType.Help,
 			verbosity: AccessibilityVerbositySettingId.CollaborationRoom,
@@ -131,6 +132,7 @@ suite('Collaboration accessibility', () => {
 			trust: true,
 			autopilot: true,
 			configuration: true,
+			structuredResults: true,
 		});
 	});
 

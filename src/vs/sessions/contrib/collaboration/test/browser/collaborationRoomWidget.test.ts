@@ -13,7 +13,7 @@ import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IActionWidgetService } from '../../../../../platform/actionWidget/browser/actionWidget.js';
-import { IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage, MAX_ROOM_WORKERS } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomMessage, IAgentHostRoomMessagePage, MAX_ROOM_WORKERS } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { ChatInputRequestWithPlanReview } from '../../../../../platform/agentHost/common/agentHostPlanReview.js';
 import { ChatInputQuestionKind, ChatInputResponseKind, ConfirmationOptionKind, ModelSelection, SessionModelInfo, ToolCallStatus } from '../../../../../platform/agentHost/common/state/protocol/state.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
@@ -25,6 +25,7 @@ import { MockContextKeyService } from '../../../../../platform/keybinding/test/c
 import { WorkbenchList } from '../../../../../platform/list/browser/listService.js';
 import { IMarkdownRendererService } from '../../../../../platform/markdown/browser/markdownRenderer.js';
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
+import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
 import { IEditorService } from '../../../../../workbench/services/editor/common/editorService.js';
 import { IViewsService } from '../../../../../workbench/services/views/common/viewsService.js';
 import { ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
@@ -60,7 +61,7 @@ suite('CollaborationRoomWidget', () => {
 			authorKind: 'agent', kind: 'message', text: `Shared post ${index}`, timestamp: 0,
 			mentions: [], deliveries: [],
 		}));
-		const starts: IAgentHostRoomLimits[] = [];
+		const starts: undefined[] = [];
 		const sendModes: string[] = [];
 		const created = new DeferredPromise<IAgentHostRoomCreateOptions>();
 		const opened = new DeferredPromise<{ session: ISession; chat: URI }>();
@@ -101,6 +102,7 @@ suite('CollaborationRoomWidget', () => {
 			override readonly canSteer = observableValue(this, true);
 			override readonly canConfigure = observableValue(this, false);
 			override readonly canSetMemberModel = observableValue(this, true);
+			override readonly canVerifyResults = observableValue(this, true);
 			override readonly error = constObservable(undefined);
 			override readonly workspaceTrust = observableValue<ICollaborationWorkspaceTrust>(this, { state: 'trusted' });
 			override readonly requests = observableValue<readonly ICollaborationRequest[]>(this, []);
@@ -116,7 +118,7 @@ suite('CollaborationRoomWidget', () => {
 			override async loadMessages(): Promise<void> { }
 			override async loadEarlierMessages(): Promise<void> { }
 			override async sendMessage(mode = 'message'): Promise<void> { sends++; sendModes.push(mode); }
-			override async startRoom(limits: IAgentHostRoomLimits): Promise<void> { starts.push(limits); }
+			override async startRoom(): Promise<void> { starts.push(undefined); }
 			override async isRepository(): Promise<boolean> { return true; }
 			override async createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom> {
 				await created.complete(options);
@@ -163,6 +165,7 @@ suite('CollaborationRoomWidget', () => {
 		instantiation.stub(IOpenerService, new class extends mock<IOpenerService>() {
 			override async open() { return true; }
 		}());
+		instantiation.stub(IQuickInputService, new class extends mock<IQuickInputService>() { }());
 		const providers = new Map<string, ISessionsProvider>([[provider.id, provider]]);
 		instantiation.stub(ISessionsProvidersService, new class extends mock<ISessionsProvidersService>() {
 			override getProvider<T extends ISessionsProvider>(id: string): T | undefined { return providers.get(id) as T | undefined; }
@@ -455,6 +458,53 @@ suite('CollaborationRoomWidget', () => {
 		}, { reportLoaded: true, firstPostVisible: true, anchorUnchanged: true, jumpAvailable: true });
 	});
 
+	test('structured results and independent verification render in the conversation and accessible view', () => {
+		const { container, facade, widget } = setup();
+		facade.activeRoom.set({
+			...facade.activeRoom.get()!,
+			artifacts: [{ id: 'patch-one', memberId: 'member-1', title: 'Parser patch', createdAt: 0, baseRevision: 'base', sourceRevision: 'source', uri: 'file:///patch' }],
+		}, undefined);
+		facade.messages.set({
+			hasEarlier: false,
+			hasLater: false,
+			messages: [{
+				id: 'result-one', sequence: 1, authorId: 'member-1', authorName: 'Copilot-1', authorKind: 'agent',
+				kind: 'result', text: 'Parser result', timestamp: 0, mentions: [], deliveries: [],
+				result: {
+					title: 'Parser result',
+					summary: 'The parser accepts the intended syntax.',
+					outcome: 'success',
+					evidence: ['Focused parser tests passed.'],
+					artifactIds: ['patch-one'],
+					verificationState: 'verified',
+				},
+			}, {
+				id: 'review-one', sequence: 2, authorId: 'member-2', authorName: 'Copilot-2', authorKind: 'agent',
+				kind: 'verification', text: 'Verified Parser result', timestamp: 1, mentions: [], deliveries: [],
+				verification: { resultId: 'result-one', verdict: 'verified', evidence: ['Repeated the focused test.'] },
+			}],
+		}, undefined);
+		const buttons = [...container.querySelectorAll<HTMLElement>('.room-message-actions [role="button"]')]
+			.map(button => button.textContent)
+			.filter(label => label !== 'Reply');
+		const accessible = widget.getAccessibleContent();
+		assert.deepStrictEqual({
+			result: container.querySelector('.room-result')?.textContent,
+			verification: container.querySelector('.room-verification')?.textContent,
+			buttons,
+			accessible: [
+				accessible.includes('Parser result'),
+				accessible.includes('Focused parser tests passed.'),
+				accessible.includes('Repeated the focused test.'),
+			],
+		}, {
+			result: 'Parser resultSuccessVerifiedThe parser accepts the intended syntax.EvidenceFocused parser tests passed.',
+			verification: 'VerifiedResult: result-oneRepeated the focused test.',
+			buttons: ['Review Patch: Parser patch', 'Review Result'],
+			accessible: [true, true, true],
+		});
+	});
+
 	test('legacy context-only human posts retain their original undelivered status', () => {
 		const { container, facade, widget } = setup();
 		facade.messages.set({
@@ -471,12 +521,12 @@ suite('CollaborationRoomWidget', () => {
 		}, { visible: true, accessible: true });
 	});
 
-	test('Send remains available after Stop and explains that finished peers receive a new turn', () => {
+	test('Send remains available after Stop and explains that guidance waits for Resume', () => {
 		const { container } = setup('stopped');
 		const send = container.querySelector<HTMLButtonElement>('.room-composer .room-send')!;
 		assert.deepStrictEqual({
 			enabled: !send.disabled,
-			wakeUpExplained: send.getAttribute('aria-description')?.includes('finished or stopped peers receive a new turn'),
+			wakeUpExplained: send.getAttribute('aria-description')?.includes('Stopped peers receive saved guidance after Resume'),
 			defaultAudienceExplained: send.getAttribute('aria-description')?.includes('everyone when none are mentioned'),
 			mentionHint: container.querySelector('.room-composer-actions .room-hint')?.textContent,
 		}, { enabled: true, wakeUpExplained: true, defaultAudienceExplained: true, mentionHint: '@ to mention' });
@@ -485,40 +535,26 @@ suite('CollaborationRoomWidget', () => {
 	test('Start does not require a turn cap or deadline', () => {
 		const { container, starts } = setup('created');
 		container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!.click();
-		assert.deepStrictEqual(starts, [{}]);
+		assert.strictEqual(starts.length, 1);
 	});
 
-	test('Start passes the explicitly entered run limits', () => {
-		const { container, starts } = setup('created');
-		const limits = container.querySelectorAll<HTMLInputElement>('form.room-run-controls input');
-		limits[0].value = '12';
-		limits[1].value = '5';
-		container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!.click();
-		assert.deepStrictEqual(starts, [{ maxTurns: 12, timeoutMinutes: 5 }]);
+	test('run settings contain actions without limit fields', () => {
+		const { container } = setup('created');
+		assert.deepStrictEqual({
+			start: container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')?.textContent,
+			limitFields: container.querySelectorAll('form.room-run-controls input').length,
+		}, { start: 'Start', limitFields: 0 });
 	});
 
-	test('turn caps and deadlines can be chosen independently', () => {
-		const first = setup('created');
-		first.container.querySelectorAll<HTMLInputElement>('form.room-run-controls input')[0].value = '12';
-		first.container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!.click();
-		const second = setup('created');
-		second.container.querySelectorAll<HTMLInputElement>('form.room-run-controls input')[1].value = '5';
-		second.container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!.click();
-		assert.deepStrictEqual([first.starts, second.starts], [[{ maxTurns: 12 }], [{ timeoutMinutes: 5 }]]);
-	});
-
-	test('an idle room supports both an explicit bounded Resume and Pause', () => {
+	test('an idle room supports both Resume and Pause', () => {
 		const { container, starts } = setup('idle');
 		const resume = container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!;
 		const pause = [...container.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent === 'Pause')!;
 		assert.strictEqual(resume.textContent, 'Resume');
 		assert.strictEqual(resume.disabled, false);
 		assert.strictEqual(pause.disabled, false);
-		const limits = container.querySelectorAll<HTMLInputElement>('form.room-run-controls input');
-		limits[0].value = '6';
-		limits[1].value = '3';
 		resume.click();
-		assert.deepStrictEqual(starts, [{ maxTurns: 6, timeoutMinutes: 3 }]);
+		assert.strictEqual(starts.length, 1);
 	});
 
 	test('history has bounded DOM without discarding loaded accessible messages', () => {
@@ -609,7 +645,7 @@ suite('CollaborationRoomWidget', () => {
 			settingsButtonInRoom: !!container.querySelector('.room-header button[aria-controls]'),
 		}, {
 			openedContainers: ['workbench.view.collaborationSettings'],
-			focusedAction: 'Retry Copilot-1 within the current run limits',
+			focusedAction: 'Retry Copilot-1',
 			settingsButtonInRoom: true,
 		});
 	});

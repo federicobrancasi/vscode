@@ -16,11 +16,12 @@ export type RoomContentValidator = (relativePaths: readonly string[]) => Promise
 export interface IRoomMemberExecution {
 	readonly memberId: string;
 	readonly initialized: boolean;
+	readonly briefed?: boolean;
+	readonly briefingTurnId?: string;
 	readonly needsTurn: boolean;
 	readonly turnId?: string;
 	readonly runId?: string;
 	readonly readSequence?: number;
-	readonly announced?: boolean;
 }
 
 export interface IRoomRecord {
@@ -59,6 +60,7 @@ export interface IRoomRuntime extends IDisposable {
 	applyConfiguration(member: IAgentHostRoomMember, requested?: Partial<IAgentHostRoomConfiguration>): Promise<void>;
 	prepare(room: IAgentHostRoom, member: IAgentHostRoomMember, initialized: boolean): Promise<void>;
 	isIdle(sessionUri: string): boolean;
+	hasTurn(sessionUri: string, turnId: string): boolean;
 	submit(sessionUri: string, turnId: string, prompt: string): void;
 	/** Send guidance to the current turn; false means it is no longer accepting steering. */
 	steer(sessionUri: string, turnId: string, prompt: string): Promise<boolean>;

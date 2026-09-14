@@ -15,15 +15,20 @@ export function createCopilotRoomTools(sessionId: string, rooms: IRoomSessionToo
 	return [
 		{
 			name: 'room_read',
-			description: 'Read your identity, shared goal, peer work, pending inbox, human guidance, published artifacts, and room messages before choosing work. Check for completed or overlapping work. Use before/after message sequences for older history; do not poll while idle.',
-			parameters: { type: 'object', properties: { after: { type: 'integer', minimum: 0 }, before: { type: 'integer', minimum: 1 } }, additionalProperties: false },
+			description: 'Read your identity, shared goal, peer work, pending inbox, human guidance, published artifacts, structured results, verifications, and ordered room messages. Use limit for the latest messages, after with the last sequence you saw for newer messages, or before for older history. Do not poll while idle.',
+			parameters: { type: 'object', properties: { after: { type: 'integer', minimum: 0 }, before: { type: 'integer', minimum: 1 }, limit: { type: 'integer', minimum: 1, maximum: 200 } }, additionalProperties: false },
 			handler: args => {
-				const { after, before } = readArguments(args);
+				const { after, before, limit } = readArguments(args);
 				if ((after !== undefined && (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0))
-					|| (before !== undefined && (typeof before !== 'number' || !Number.isSafeInteger(before) || before < 1))) {
-					throw new Error('Use integer room message cursors');
+					|| (before !== undefined && (typeof before !== 'number' || !Number.isSafeInteger(before) || before < 1))
+					|| (limit !== undefined && (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > 200))) {
+					throw new Error('Use integer room message cursors and a limit from 1 to 200');
 				}
-				return rooms.read(sessionId, { after: typeof after === 'number' ? after : undefined, before: typeof before === 'number' ? before : undefined });
+				return rooms.read(sessionId, {
+					after: typeof after === 'number' ? after : undefined,
+					before: typeof before === 'number' ? before : undefined,
+					limit: typeof limit === 'number' ? limit : undefined,
+				});
 			},
 		},
 		{
@@ -40,7 +45,7 @@ export function createCopilotRoomTools(sessionId: string, rooms: IRoomSessionToo
 		},
 		{
 			name: 'room_post',
-			description: 'Post to the shared room as yourself. First announce intent with kind work; publish evidence or negative results with kind finding. Only explicitly mentioned peers receive an inbox message. Supply a substantive nextStep to continue useful work after this turn, or omit it to wait for another request. Respect pause, stop, and any optional run limits.',
+			description: 'Post a focused question, informal finding, work update, or useful peer reply to the shared room as yourself. Use room_publish_result for meaningful completed outcomes. Avoid routine progress updates. Only explicitly mentioned peers receive an inbox message; peer suggestions are optional. Use blocked only for a genuine condition that prevents further work.',
 			parameters: {
 				type: 'object',
 				properties: {
@@ -49,7 +54,6 @@ export function createCopilotRoomTools(sessionId: string, rooms: IRoomSessionToo
 					kind: { type: 'string', enum: ['message', 'work', 'finding'] },
 					mentions: { type: 'array', items: { type: 'string' }, description: 'Member IDs or names such as Copilot-2. Empty means no notification.' },
 					replyTo: { type: 'string' },
-					nextStep: { type: 'string' },
 					blocked: { type: 'boolean' },
 				},
 				required: ['id', 'text', 'kind', 'mentions'],
@@ -59,16 +63,64 @@ export function createCopilotRoomTools(sessionId: string, rooms: IRoomSessionToo
 				if (!args || typeof args !== 'object') {
 					throw new Error('Invalid room post');
 				}
-				const { id, text, kind, mentions, replyTo, nextStep, blocked } = args as Record<string, unknown>;
+				const { id, text, kind, mentions, replyTo, blocked } = args as Record<string, unknown>;
 				if (typeof id !== 'string' || typeof text !== 'string'
 					|| (kind !== 'message' && kind !== 'work' && kind !== 'finding')
 					|| !isStringArray(mentions)
 					|| (replyTo !== undefined && typeof replyTo !== 'string')
-					|| (nextStep !== undefined && typeof nextStep !== 'string')
 					|| (blocked !== undefined && typeof blocked !== 'boolean')) {
 					throw new Error('Invalid room post');
 				}
-				return rooms.post(sessionId, { id, text, kind, mentions, replyTo, nextStep, blocked });
+				return rooms.post(sessionId, { id, text, kind, mentions, replyTo, blocked });
+			},
+		},
+		{
+			name: 'room_publish_result',
+			description: 'Publish an immutable structured result after meaningful implementation or investigation. Include reproducible evidence and reference only patches you already published with room_share_patch. The result starts pending independent verification and does not notify or wake peers.',
+			parameters: {
+				type: 'object',
+				properties: {
+					id: { type: 'string', description: 'Unique stable result ID. Reuse only when retrying the same publication.' },
+					title: { type: 'string', maxLength: 200 },
+					summary: { type: 'string', maxLength: 8000 },
+					outcome: { type: 'string', enum: ['success', 'negative', 'inconclusive', 'blocked'] },
+					evidence: { type: 'array', items: { type: 'string', maxLength: 2000 }, minItems: 1, maxItems: 20 },
+					artifactIds: { type: 'array', items: { type: 'string' }, maxItems: 20, uniqueItems: true },
+				},
+				required: ['id', 'title', 'summary', 'outcome', 'evidence', 'artifactIds'],
+				additionalProperties: false,
+			},
+			handler: args => {
+				const { id, title, summary, outcome, evidence, artifactIds } = readArguments(args);
+				if (typeof id !== 'string' || typeof title !== 'string' || typeof summary !== 'string'
+					|| (outcome !== 'success' && outcome !== 'negative' && outcome !== 'inconclusive' && outcome !== 'blocked')
+					|| !isStringArray(evidence) || !isStringArray(artifactIds)) {
+					throw new Error('Invalid structured room result');
+				}
+				return rooms.publishResult(sessionId, { id, title, summary, outcome, evidence, artifactIds });
+			},
+		},
+		{
+			name: 'room_verify_result',
+			description: 'Independently verify or reject another agent\'s structured result after reading it and checking the claimed evidence. You cannot verify your own result. Reviews are permanent attributed room records; a later human verdict is authoritative.',
+			parameters: {
+				type: 'object',
+				properties: {
+					id: { type: 'string', description: 'Unique stable review ID. Reuse only when retrying the same review.' },
+					resultId: { type: 'string' },
+					verdict: { type: 'string', enum: ['verified', 'rejected'] },
+					evidence: { type: 'array', items: { type: 'string', maxLength: 2000 }, minItems: 1, maxItems: 20 },
+				},
+				required: ['id', 'resultId', 'verdict', 'evidence'],
+				additionalProperties: false,
+			},
+			handler: args => {
+				const { id, resultId, verdict, evidence } = readArguments(args);
+				if (typeof id !== 'string' || typeof resultId !== 'string'
+					|| (verdict !== 'verified' && verdict !== 'rejected') || !isStringArray(evidence)) {
+					throw new Error('Invalid room result verification');
+				}
+				return rooms.reviewResult(sessionId, { id, resultId, verdict, evidence });
 			},
 		},
 		{

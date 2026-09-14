@@ -57,6 +57,9 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 				const preserved = identities(previous.room);
 				const current = identities(snapshot.room);
 				check(current.length >= preserved.length && equals(preserved, current.slice(0, preserved.length)), 'preserved member identities changed');
+				for (const execution of previous.executions) {
+					check(execution.briefed !== true || snapshot.executions.find(value => value.memberId === execution.memberId)?.briefed === true, 'execution brief regressed');
+				}
 				for (const artifact of previous.room.artifacts) {
 					check(equals(snapshot.room.artifacts.find(value => value.id === artifact.id), artifact), 'published artifact changed');
 				}
@@ -247,11 +250,13 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		const room = record.room;
 		const memberIds = new Set(room.members.map(member => member.id));
 		const artifactIds = new Set(room.artifacts.map(artifact => artifact.id));
+		const publishedArtifactIds = new Set<string>();
 		const messages = array(record.messages, 'messages');
 		check(messages.length === room.latestMessageSequence, 'latestMessageSequence does not match messages');
 		const messageIds = new Set<string>();
+		const resultAuthors = new Map<string, string>();
 		for (const [index, value] of messages.entries()) {
-			const message = object(value, 'message', ['id', 'sequence', 'authorId', 'authorName', 'authorKind', 'kind', 'mode', 'text', 'timestamp', 'mentions', 'replyTo', 'artifactId', 'deliveries']);
+			const message = object(value, 'message', ['id', 'sequence', 'authorId', 'authorName', 'authorKind', 'kind', 'mode', 'text', 'timestamp', 'mentions', 'replyTo', 'artifactId', 'result', 'verification', 'deliveries']);
 			identifier(message.id, 'message.id');
 			check(message.sequence === index + 1, 'message.sequence');
 			identifier(message.authorId, 'message.authorId');
@@ -263,7 +268,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 			} else {
 				check(message.authorId === message.authorKind, 'message author identity');
 			}
-			enumValue(message.kind, ['message', 'work', 'finding', 'artifact', 'system'], 'message.kind');
+			enumValue(message.kind, ['message', 'work', 'finding', 'result', 'verification', 'artifact', 'system'], 'message.kind');
 			if (message.mode !== undefined) {
 				enumValue(message.mode, ['message', 'steer'], 'message.mode');
 				check(message.mode !== 'steer' || message.authorKind === 'human', 'only human messages may steer');
@@ -281,6 +286,48 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 				check(artifactIds.has(message.artifactId), 'message artifact does not exist');
 			}
 			check(message.kind !== 'artifact' || message.artifactId !== undefined, 'artifact message has no artifact');
+			if (message.kind === 'artifact') {
+				publishedArtifactIds.add(String(message.artifactId));
+			}
+			if (message.result !== undefined) {
+				const result = object(message.result, 'message.result', ['title', 'summary', 'outcome', 'evidence', 'artifactIds', 'verificationState']);
+				text(result.title, 'message.result.title', false, 200);
+				text(result.summary, 'message.result.summary', false, 8000);
+				enumValue(result.outcome, ['success', 'negative', 'inconclusive', 'blocked'], 'message.result.outcome');
+				evidence(result.evidence, 'message.result.evidence');
+				const resultArtifactIds = array(result.artifactIds, 'message.result.artifactIds');
+				check(resultArtifactIds.length <= 20, 'message.result.artifactIds');
+				const uniqueArtifacts = new Set<string>();
+				for (const artifactId of resultArtifactIds) {
+					identifier(artifactId, 'message.result.artifactId');
+					unique(uniqueArtifacts, artifactId, 'message.result.artifactId');
+					check(publishedArtifactIds.has(artifactId), 'result artifact was not published earlier');
+					check(room.artifacts.find(artifact => artifact.id === artifactId)?.memberId === message.authorId, 'result artifact has a different author');
+				}
+				check(result.verificationState === undefined, 'persisted result has derived verification state');
+				check(message.kind === 'result' && message.authorKind === 'agent', 'result payload requires an agent result message');
+				resultAuthors.set(String(message.id), String(message.authorId));
+			}
+			check(message.kind !== 'result' || message.result !== undefined, 'result message has no result');
+			if (message.verification !== undefined) {
+				const verification = object(message.verification, 'message.verification', ['resultId', 'verdict', 'evidence']);
+				identifier(verification.resultId, 'message.verification.resultId');
+				enumValue(verification.verdict, ['verified', 'rejected'], 'message.verification.verdict');
+				evidence(verification.evidence, 'message.verification.evidence');
+				const resultAuthor = resultAuthors.get(String(verification.resultId));
+				check(resultAuthor !== undefined, 'verification result was not published earlier');
+				check(message.authorKind === 'human' || message.authorKind === 'agent', 'verification author');
+				check(message.authorKind !== 'agent' || message.authorId !== resultAuthor, 'result author verified its own result');
+				check(message.kind === 'verification', 'verification payload requires a verification message');
+			}
+			check(message.kind !== 'verification' || message.verification !== undefined, 'verification message has no verification');
+			check(message.kind === 'result' || message.result === undefined, 'result payload on another message kind');
+			check(message.kind === 'verification' || message.verification === undefined, 'verification payload on another message kind');
+			if (message.kind === 'result' || message.kind === 'verification') {
+				check(array(message.mentions, 'message.mentions').length === 0, 'structured room record has mentions');
+				check(array(message.deliveries, 'message.deliveries').length === 0, 'structured room record has deliveries');
+				check(message.mode === undefined, 'structured room record has a delivery mode');
+			}
 			const delivered = new Set<string>();
 			for (const value of array(message.deliveries, 'message.deliveries')) {
 				const delivery = object(value, 'delivery', ['memberId', 'state', 'turnId', 'error']);
@@ -299,11 +346,14 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		check(executions.length === room.members.length, 'execution count does not match members');
 		const executionIds = new Set<string>();
 		for (const value of executions) {
-			const execution = object(value, 'execution', ['memberId', 'initialized', 'needsTurn', 'turnId', 'runId', 'readSequence', 'announced']);
+			const execution = object(value, 'execution', ['memberId', 'initialized', 'briefed', 'briefingTurnId', 'needsTurn', 'turnId', 'runId', 'readSequence', 'announced']);
 			identifier(execution.memberId, 'execution.memberId');
 			check(memberIds.has(execution.memberId), 'execution member does not exist');
 			unique(executionIds, execution.memberId, 'execution.memberId');
 			boolean(execution.initialized, 'execution.initialized');
+			optional(execution.briefed, boolean, 'execution.briefed');
+			optional(execution.briefingTurnId, identifier, 'execution.briefingTurnId');
+			check(execution.briefed !== true || execution.briefingTurnId === undefined, 'briefed execution still has a pending brief');
 			boolean(execution.needsTurn, 'execution.needsTurn');
 			optional(execution.turnId, identifier, 'execution.turnId');
 			optional(execution.runId, identifier, 'execution.runId');
@@ -581,8 +631,8 @@ function array(value: unknown, field: string): readonly unknown[] {
 	return value;
 }
 
-function text(value: unknown, field: string, empty = true): asserts value is string {
-	check(typeof value === 'string' && (empty || value.trim().length > 0), field);
+function text(value: unknown, field: string, empty = true, limit = Number.POSITIVE_INFINITY): asserts value is string {
+	check(typeof value === 'string' && value.length <= limit && (empty || value.trim().length > 0), field);
 }
 
 function identifier(value: unknown, field: string): asserts value is string {
@@ -612,6 +662,14 @@ function optional(value: unknown, validate: (value: unknown, field: string) => v
 
 function enumValue(value: unknown, values: readonly string[], field: string): void {
 	check(typeof value === 'string' && values.includes(value), field);
+}
+
+function evidence(value: unknown, field: string): void {
+	const entries = array(value, field);
+	check(entries.length >= 1 && entries.length <= 20, field);
+	for (const entry of entries) {
+		text(entry, field, false, 2000);
+	}
 }
 
 function unique(values: Set<string>, value: string, field: string): void {

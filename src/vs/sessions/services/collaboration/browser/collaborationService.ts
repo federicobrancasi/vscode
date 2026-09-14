@@ -11,7 +11,7 @@ import { isWeb } from '../../../../base/common/platform.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
-import { AgentHostRoomMessageMode, IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessagePage, IAgentHostRoomsService } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { AgentHostRoomMessageMode, AgentHostRoomVerificationVerdict, IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomMessagePage, IAgentHostRoomsService } from '../../../../platform/agentHost/common/agentHostRooms.js';
 import { ResolveSessionConfigResult } from '../../../../platform/agentHost/common/state/protocol/commands.js';
 import { IAgentHostService } from '../../../../platform/agentHost/common/agentService.js';
 import { ModelSelection, PolicyState, SessionModelInfo } from '../../../../platform/agentHost/common/state/protocol/state.js';
@@ -47,6 +47,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 	readonly canSteer = observableValue(this, false);
 	readonly canConfigure = observableValue(this, false);
 	readonly canSetMemberModel = observableValue(this, false);
+	readonly canVerifyResults = observableValue(this, false);
 	readonly error = observableValue<string | undefined>(this, undefined);
 	readonly workspaceTrust: IObservable<ICollaborationWorkspaceTrust>;
 	readonly requests: IObservable<readonly ICollaborationRequest[]>;
@@ -115,6 +116,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 				this.canSteer.set(false, tx);
 				this.canConfigure.set(false, tx);
 				this.canSetMemberModel.set(false, tx);
+				this.canVerifyResults.set(false, tx);
 				this.loading.set(false, tx);
 				this.loadingEarlier.set(false, tx);
 			});
@@ -140,6 +142,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		this.canSteer.set(false, undefined);
 		this.canConfigure.set(false, undefined);
 		this.canSetMemberModel.set(false, undefined);
+		this.canVerifyResults.set(false, undefined);
 		this.loadingEarlier.set(false, undefined);
 		if (!this.enabled || !this.host.rooms) {
 			transaction(tx => {
@@ -211,6 +214,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 				this.canSteer.set(capabilities.supportsSteering === true, tx);
 				this.canConfigure.set(capabilities.supportsConfiguration === true, tx);
 				this.canSetMemberModel.set(capabilities.supportsMemberModels === true, tx);
+				this.canVerifyResults.set(capabilities.supportsResultVerification === true, tx);
 			});
 		} catch (error) {
 			if (generation === this.hostGeneration && !this._store.isDisposed) {
@@ -478,8 +482,32 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		}
 	}
 
-	async startRoom(limits: IAgentHostRoomLimits): Promise<void> {
-		await this.mutate((api, roomId) => api.startRoom(roomId, limits), true);
+	async verifyResult(resultId: string, verdict: AgentHostRoomVerificationVerdict, evidence: string): Promise<void> {
+		if (!this.canVerifyResults.get()) {
+			throw new Error(localize('room.resultVerificationUnavailable', "This host does not support structured result verification. Update or reconnect the local agent host."));
+		}
+		const trimmedEvidence = evidence.trim();
+		if (!trimmedEvidence) {
+			throw new Error(localize('room.resultVerificationEvidenceRequired', "Describe the evidence used to review this result."));
+		}
+		const roomId = this.roomId;
+		const api = this.api;
+		const selection = this.selectionGeneration;
+		const host = this.hostGeneration;
+		const message = await api.verifyResult(roomId, {
+			id: generateUuid(),
+			resultId,
+			verdict,
+			evidence: [trimmedEvidence],
+		});
+		if (selection === this.selectionGeneration && host === this.hostGeneration && roomId === this.activeRoomId.get() && !this._store.isDisposed) {
+			this.history?.acceptMessage(message);
+			this.queueMessageRefresh();
+		}
+	}
+
+	async startRoom(): Promise<void> {
+		await this.mutate((api, roomId) => api.startRoom(roomId, {}), true);
 	}
 
 	async pauseRoom(): Promise<void> {

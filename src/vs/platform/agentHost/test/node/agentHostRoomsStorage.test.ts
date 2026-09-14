@@ -69,7 +69,7 @@ suite('AgentHostRoomsStorage', function () {
 				id: 'message-two', sequence: 2, authorId: 'member-one', authorName: 'Worker', authorKind: 'agent',
 				kind: 'finding', text: 'Inspecting', timestamp: 2, mentions: [], replyTo: 'message-one', deliveries: [],
 			}],
-			executions: [{ memberId: 'member-one', initialized: true, needsTurn: false, turnId: 'turn-two', runId: 'run-one', readSequence: 2, announced: true }],
+			executions: [{ memberId: 'member-one', initialized: true, needsTurn: false, turnId: 'turn-two', runId: 'run-one', readSequence: 2 }],
 		};
 	}
 
@@ -176,6 +176,28 @@ suite('AgentHostRoomsStorage', function () {
 		assert.deepStrictEqual(await restored.load(), [updated]);
 	});
 
+	test('briefed execution state roundtrips while legacy journals remain unbriefed', async () => {
+		const original = record();
+		await storage.save(original);
+		const legacyBriefed = (await storage.load())[0].executions[0].briefed;
+		const updated: IRoomRecord = {
+			...original,
+			room: { ...original.room, revision: original.room.revision + 1 },
+			executions: original.executions.map(execution => ({ ...execution, briefed: true })),
+		};
+		await storage.save(updated);
+
+		assert.deepStrictEqual({
+			legacyBriefed,
+			restoredBriefed: (await storage.load())[0].executions[0].briefed,
+			regressionRejected: await storage.save({
+				...updated,
+				room: { ...updated.room, revision: updated.room.revision + 1 },
+				executions: updated.executions.map(execution => ({ ...execution, briefed: false })),
+			}).then(() => false, () => true),
+		}, { legacyBriefed: undefined, restoredBriefed: true, regressionRejected: true });
+	});
+
 	test('content exclusion denial preserves the worktree and real index without publishing a patch', async () => {
 		const { room } = await initializeRepository();
 		const member = room.members[0];
@@ -254,6 +276,7 @@ suite('AgentHostRoomsStorage', function () {
 			}
 
 			isIdle(sessionUri: string): boolean { return !this.turns.has(sessionUri); }
+			hasTurn(sessionUri: string, turnId: string): boolean { return this.turns.get(sessionUri) === turnId; }
 			async steer(): Promise<boolean> { throw new Error('Steering is not used by this worktree test'); }
 
 			submit(sessionUri: string, turnId: string): void {
@@ -354,6 +377,69 @@ suite('AgentHostRoomsStorage', function () {
 		};
 		await storage.save(steering);
 		assert.deepStrictEqual(await storage.load(), [steering]);
+	});
+
+	test('roundtrips immutable structured results and attributed human verification', async () => {
+		const original = record();
+		const result = {
+			id: 'structured-result', sequence: 3, authorId: 'member-one', authorName: 'Worker', authorKind: 'agent' as const,
+			kind: 'result' as const, text: 'Parser result\n\nThe parser passed.', timestamp: 3, mentions: [], deliveries: [],
+			result: {
+				title: 'Parser result', summary: 'The parser passed.', outcome: 'success' as const,
+				evidence: ['Focused parser tests passed.'], artifactIds: [],
+			},
+		};
+		const verification = {
+			id: 'human-review', sequence: 4, authorId: 'human', authorName: 'Human', authorKind: 'human' as const,
+			kind: 'verification' as const, text: 'Verified parser result.', timestamp: 4, mentions: [], deliveries: [],
+			verification: { resultId: result.id, verdict: 'verified' as const, evidence: ['Repeated the focused test.'] },
+		};
+		const structured: IRoomRecord = {
+			...original,
+			room: { ...original.room, latestMessageSequence: 4 },
+			messages: [...original.messages, result, verification],
+		};
+		await storage.save(structured);
+		assert.deepStrictEqual(await storage.load(), [structured]);
+		await assert.rejects(storage.save({
+			...structured,
+			room: { ...structured.room, revision: 2 },
+			messages: structured.messages.map(message => message.id === result.id
+				? { ...message, result: { ...message.result!, summary: 'Rewritten claim' } }
+				: message),
+		}), /recorded room messages changed/);
+	});
+
+	test('rejects invalid structured result and verification records', async () => {
+		const original = record();
+		const result = {
+			id: 'structured-result', sequence: 3, authorId: 'member-one', authorName: 'Worker', authorKind: 'agent' as const,
+			kind: 'result' as const, text: 'Parser result', timestamp: 3, mentions: [], deliveries: [],
+			result: {
+				title: 'Parser result', summary: 'The parser passed.', outcome: 'success' as const,
+				evidence: ['Focused parser tests passed.'], artifactIds: [], verificationState: 'pending' as const,
+			},
+		};
+		await assert.rejects(storage.save({
+			...original,
+			room: { ...original.room, latestMessageSequence: 3 },
+			messages: [...original.messages, result],
+		}), /persisted result has derived verification state/);
+		const persistedResult = { ...result, result: { ...result.result, verificationState: undefined } };
+		await assert.rejects(storage.save({
+			...original,
+			room: { ...original.room, latestMessageSequence: 4 },
+			messages: [...original.messages, persistedResult, {
+				id: 'self-review', sequence: 4, authorId: 'member-one', authorName: 'Worker', authorKind: 'agent',
+				kind: 'verification', text: 'Self review', timestamp: 4, mentions: [], deliveries: [],
+				verification: { resultId: result.id, verdict: 'verified', evidence: ['I checked it.'] },
+			}],
+		}), /result author verified its own result/);
+		await assert.rejects(storage.save({
+			...original,
+			room: { ...original.room, latestMessageSequence: 3 },
+			messages: [...original.messages, { ...persistedResult, mentions: ['member-one'] }],
+		}), /structured room record has mentions/);
 	});
 
 	test('persists model preferences independently of preserved member identities and configuration', async () => {
@@ -706,6 +792,9 @@ suite('AgentHostRoomsStorage', function () {
 		['missing executions', snapshot => ({ ...snapshot, executions: [] })],
 		['missing execution member', changeExecution({ memberId: 'missing-member' })],
 		['invalid initialized flag', changeExecution({ initialized: 1 })],
+		['invalid briefed flag', changeExecution({ briefed: 1 })],
+		['invalid briefing turn', changeExecution({ briefingTurnId: '' })],
+		['completed and pending brief', changeExecution({ briefed: true, briefingTurnId: 'brief-turn' })],
 		['invalid needsTurn flag', changeExecution({ needsTurn: 1 })],
 		['invalid announced flag', changeExecution({ announced: 1 })],
 		['invalid execution turn', changeExecution({ turnId: '' })],

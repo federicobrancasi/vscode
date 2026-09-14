@@ -14,10 +14,9 @@ Copilot agent host and `chat.agentHost.collaboration.enabled`, then open
 AI features must be enabled and a compatible local host available.
 
 The room's home screen asks for a shared goal, a working folder, and one to ten
-peers with a model menu for each. Shared rules, the committed baseline and
-optional run limits are under **Advanced**; the room title is taken from the
-goal. Draft model choices stay with their slots when the peer count changes or
-the view closes. Existing rooms are listed in the Sessions sidebar under
+peers with a model menu for each. Shared rules and the committed baseline are
+under **Advanced**; the room title is taken from the goal. Draft model choices
+stay with their slots when the peer count changes or the view closes. Existing rooms are listed in the Sessions sidebar under
 **Agent Collab**, which expands to open one directly; the section header itself
 opens this creation screen.
 
@@ -26,12 +25,11 @@ accepted: the room offers to prepare it, showing the exact path, and only then
 runs `git init` with a baseline commit. It is never initialized silently, and a
 folder that is already inside a repository resolves to that repository.
 
-**Create** records the room; it does not by itself authorize
-model execution. **Start** runs the team. **Send** requests a response from every
-peer when no `@mentions` are present, or only the mentioned peers otherwise.
-Finished and stopped peers wake for the new message without a separate Resume.
-Turn caps and deadlines are optional and unset by default, under
-**Optional run limits**.
+**Create** records the room; it does not by itself authorize model execution.
+**Start** runs the team continuously until the human pauses or stops it, a
+member is blocked or fails, or the host shuts down. **Send** addresses every peer
+when no `@mentions` are present, or only the mentioned peers otherwise. Guidance
+for a stopped peer stays pending until **Resume**.
 The host's default model is labeled as such rather than presented as a specific
 model choice.
 
@@ -78,19 +76,18 @@ user's regular sessions are separate surfaces.
 
 ## Collaboration model
 
-Workers are peers. Each reads the same goal and room context, chooses useful
-work, announces its approach, and shares findings or asks another worker for
-help. There is no mandatory lead agent. The host coordinates execution and
-delivery, not research direction.
+Workers share the same goal but keep independent execution transcripts. The
+host coordinates execution and delivery, not research direction.
 
 The workflow follows [Hugging Face agent collaborations](https://github.com/huggingface/agent-collabs):
 
-1. Read the goal, recent posts, current work and unread messages.
-2. Choose an avenue, considering what other members are already doing.
-3. Announce the work.
-4. Work in the member's own Git worktree.
-5. Publish findings, including unsuccessful approaches, with evidence or patches.
-6. Continue while the run permits, or wait when blocked or without useful work.
+1. Read the room once before beginning work.
+2. Choose an avenue and work privately in the member's own Git worktree for as
+   many turns as needed.
+3. After implementing and verifying a meaningful result, publish one concise
+   finding and any code patch.
+4. Read messages newer than the last seen sequence.
+5. Use useful peer evidence or continue improving the member's own approach.
 
 The comparison was checked against HF revision
 [`9f18c7a`](https://github.com/huggingface/agent-collabs/tree/9f18c7a35dc163d7aa151495b68e7a140006c50a).
@@ -109,16 +106,18 @@ session; it does not trust a model-supplied display name.
 Everyone can read shared history. Reading permission is separate from turn
 activation:
 
-- A normal human **Send** with no mentions addresses every peer and requests a
-  response, including after peers have finished or a previous run has stopped.
-- A human mention authorizes the named peer to respond, including after a
-  previous run has stopped. It does not restart the rest of a stopped team.
+- A normal human **Send** with no mentions addresses every peer.
+- A human mention addresses only the named peers.
+- Running peers receive guidance in their active or next admitted turn. Guidance
+  sent after Stop stays pending until explicit Resume.
 - The composer sends explicit recipient IDs and authorizes execution before
   posting. This works with older local hosts as well. The host's lower-level
   context-only posts and previously saved messages keep their original audience;
   opening a room does not reinterpret or redeliver old posts.
-- Agent mentions can coordinate already available peers within the active run,
-  but cannot restart a stopped room or revive stopped peers.
+- Agent mentions are optional peer evidence discovered through `room_read`.
+  They are never inserted into model prompts and cannot restart stopped peers.
+- Structured results and verification records are shared, immutable history.
+  They do not carry mentions, create inbox deliveries, or wake peers.
 - Agents do not receive inbox deliveries for mentioning themselves.
 - A busy recipient receives the message at its next admitted turn.
 - Posting never waits synchronously for another agent's answer.
@@ -128,17 +127,17 @@ activation:
 
 **Send** notifies mentioned peers, or the whole room when there are no mentions.
 Sending is one action: when the host advertises steering and a peer is mid-turn,
-the post is delivered as live guidance so it lands during that turn; otherwise it
-is an ordinary post, which wakes finished peers with a new turn. Either way the
-message is in the room, so a peer that is busy now reads it when it comes free.
+the post is delivered as live guidance so it lands during that turn; otherwise
+the same human-guidance prompt is used for the next admitted turn.
 Control/Command+Enter steers explicitly.
 
 Steering is persisted before delivery. For an active peer the host injects it
 into the existing SDK turn instead of waiting for that turn to finish or
 creating another turn behind the room scheduler. A peer that becomes idle
 during delivery receives it through its next scheduled turn. Pause holds new
-guidance; Stop cancels pending/in-flight delivery and late acknowledgements
-cannot revive work. No polling prompts or hidden extra agent runs are needed.
+guidance. Stop cancels pending/in-flight delivery, later guidance remains saved
+until Resume, and late acknowledgements cannot revive work. No polling prompts
+or hidden extra agent runs are needed.
 
 Delivery states distinguish **Sending guidance**, **Sent to active turn**, and
 terminal outcomes. Runtime acceptance is not evidence that the model understood
@@ -177,13 +176,11 @@ request correctly.
 Text follow-ups submitted from a member's individual chat use the same room
 inbox and target that member. The response is a delivery acknowledgement, not a
 raw SDK turn bypassing the room controller; it identifies the room and offers
-**Back to Room**. New human requests can create a fresh uncapped run for their
-recipients after a previous run finishes. Limits chosen for a team run apply to
-that run, not to subsequent explicit human requests. Pause and an in-progress
-Stop hold messages; **Retry Delivery** can activate a saved pending human request
-once stopping completes, without publishing it twice. Attachments are rejected explicitly
-rather than silently dropped. Ordinary non-room sessions keep their normal
-send path.
+**Back to Room**. Pause holds these messages, and messages sent after Stop stay
+pending until Resume. **Retry Delivery** marks a saved cancelled or failed
+request pending without publishing it twice, but it does not bypass Stop.
+Attachments are rejected explicitly rather than silently dropped. Ordinary
+non-room sessions keep their normal send path.
 
 Member chats disable the native Queue and Steer commands before a request can
 enter the client queue. They remain interactive for approvals and idle
@@ -192,7 +189,7 @@ The room's durable inbox, rather than the ordinary chat queue, owns delivery.
 
 The room owns durable pending delivery records. The live session pending queue
 is not sufficient on its own: an automatically draining queue must not bypass
-Pause, Stop or a run limit. On restart, reconcile known turn bindings and expose
+Pause or Stop. On restart, reconcile known turn bindings and expose
 ambiguous/interrupted submissions rather than silently repeating work.
 
 ## Execution and lifetime
@@ -202,21 +199,39 @@ ordinary independently addressable sessions, identified before concurrent
 startup rather than inferred from whichever session appears next in a cache.
 
 Every initial turn, continuation and targeted activation passes the same
-admission checks. Runs have no implicit turn cap or deadline; optional limits
-must be finite positive values when supplied. An ordinary SDK turn ending
-does not mean the shared goal has been solved.
+admission checks. The current room UI creates uncapped runs. Legacy clients and
+stored records may still contain finite run limits, which remain readable for
+compatibility. An ordinary SDK turn ending does not mean the shared goal has
+been solved.
 
-A **continuous** room keeps admitting turns for an idle member that proposed no
-next step, because an open-ended goal is never finished by the model deciding it
-is. New rooms are continuous; existing and legacy rooms are not, and the setting
-is togglable. Continuous rooms still stop at Pause, Stop, an optional turn cap or
-deadline, and a failed or blocked member is not rewoken. This is a scheduling
-rule, not a promise of useful work.
+A peer receives the full room brief only when its preserved chat is first
+started. It explains the private-work rules once. After an ordinary turn
+finishes, the next admitted turn says:
 
-Peer artifacts are surfaced to a member on a turn interval rather than every
-turn. A shared board that every member reads continuously collapses the
-diversity that having several members is meant to buy; the interval is an
-advisory island model, since the room tools remain available to a running turn.
+> Share what you completed with the room. Publish changed code with
+> room_share_patch and publish meaningful completed work with
+> room_publish_result, including evidence. Use room_post for focused questions
+> and conversational replies.
+>
+> Call room_read with after set to the latest sequence you saw, review peer ideas
+> and feedback, and independently verify a useful peer result when appropriate.
+> Never verify your own result.
+>
+> Ask a focused question in the room if you need help.
+
+Only an explicit Resume or Retry uses:
+
+> Continue working in the existing collaboration room.
+
+Pending human guidance takes precedence over both prompts. It uses the
+human-guidance prompt either inside the active turn or as the next turn. Peer
+messages never become prompt blocks.
+
+Every room keeps admitting turns after ordinary idle completion. A member
+chooses what to work on next, not whether the room should stop. If peer evidence
+is useful it may build on it; otherwise it continues improving its own approach.
+Pause, Stop, removal, a genuine blocked or failed state, and host shutdown stop
+admission. This is a scheduling rule, not a promise of useful work.
 
 A room's roster is not fixed at creation. **Add Agent** gives it one more peer,
 with its own session and worktree; a peer added to a room that has already run
@@ -229,24 +244,21 @@ against the ten-member limit.
 
 Each peer offers the one action that applies to it: **Stop** while it can still
 be stopped, otherwise **Resume** — named **Retry** when it stopped because it
-failed. Resuming one peer takes the same path a human message does, so a stopped
-or exhausted room starts a fresh run for it instead of marking it idle in a room
-that can never admit it.
+failed. Resume explicitly reopens admission for that peer and preserves its
+session, worktree, and pending human guidance.
 
-- **Resume** retries failed or stopped peers in a fresh run without changing
-  their sessions or worktrees. Resuming while paused turns are still active
-  instead keeps their existing run and limits, and releases held guidance.
+- **Resume** retries failed or stopped peers without changing their sessions or
+  worktrees. Resuming while paused turns are still active releases held guidance.
 - **Pause** stops admitting new turns while current work finishes.
 - **Stop** closes admission before requesting cancellation.
 - **Stopping** remains distinct from confirmed termination.
 - **Idle** does not mean success; members can be waiting for advice or work.
-- Late completions and peer messages from a stopped/superseded run cannot
-  restart it. A new human request is a separate explicit authorization.
+- Late completions, human messages, and peer messages cannot restart a stopped
+  room. Human guidance remains pending until Resume.
 
-Dormant workers must not issue repeated model calls merely to poll for
-messages. Run deadlines require cancellation, not only a timeout on a caller
-waiting for a result. Already-running external processes may have a separate
-termination lifecycle.
+Workers read the room after publishing meaningful work; they do not consume
+turns only to poll for messages. Already-running external processes may have a
+separate termination lifecycle.
 
 Closing the room view does not delete the room or stop the live host. Quitting
 VS Code is not an always-on-server guarantee: restore persistent history and
@@ -260,11 +272,13 @@ Provisioning failures must not silently fall back to the user's working folder.
 Dirty user changes are not automatically committed or included in that baseline.
 
 `room_read` returns the caller's identity, current peer work, pending inbox,
-recent addressed human guidance, published artifacts and a pageable message
-history. If another peer announced work between reading and a first work
-announcement, the caller must reread before claiming its own approach. This
-does not assign tasks or attempt semantic deduplication; it prevents claims
-based on a stale view of peer activity.
+recent addressed human guidance, published artifacts, structured results,
+verification records and a pageable message history. `limit` requests a bounded
+latest page; `after` requests messages newer than a previously seen sequence;
+`before` reads older history. Sequence cursors, not timestamps, define
+deterministic ordering. One initial read authorizes private work across later
+continuation turns. A fresh read is required at the next safe tool boundary when
+newer human guidance arrives.
 
 `room_read_artifact` exposes an explicitly published patch, its author/revisions,
 the canonical read-only patch path and paginated contents. Peers inspect that
@@ -275,6 +289,28 @@ other peers have done nothing.
 Sharing publishes an attributed immutable contribution with its baseline and
 content identity. A mutable live diff is not a published snapshot. Longer
 evidence belongs in artifacts instead of repeated long room messages.
+
+### Structured results and independent verification
+
+`room_publish_result` records a completed implementation or investigation as an
+immutable result with a stable ID, title, summary, outcome, one or more evidence
+items, and optional references to patches already published by that author.
+Outcomes are **Success**, **Negative**, **Inconclusive**, or **Blocked**.
+Publishing starts in **Pending**; a success claim is not independent
+verification. A blocked result also uses the existing blocked-member lifecycle.
+
+`room_verify_result` lets another admitted peer append an attributed
+**Verified** or **Rejected** verdict with evidence after reading through the
+target result. An author cannot verify its own result. The human can use
+**Review Result** in the conversation to append the same kind of record without
+starting or authenticating an agent turn.
+
+Verification state is derived from the complete immutable history rather than
+stored separately. The latest human verdict is authoritative. Without a human
+verdict, any peer rejection wins conservatively over peer verification; absent
+either, the result remains pending. A verdict reviews the stated result and
+evidence only: it is not patch approval and does not apply, merge, or grant
+permission to code.
 
 Publication does not merge or apply changes to another member or the user's
 branch. Adoption and conflict handling are explicit. Stop, reconnect and member
@@ -318,9 +354,9 @@ view-state service; the side-panel pane only adopts it while a room is open, and
 hands it back on dispose. Inside, the tab strip alone is pinned at the top, above
 an independently scrolling body.
 
-There are four tabs, whatever the room's size: **Run** holds the run actions and
-the optional run limits, offering only the actions the current state allows —
-Start before a run, Pause and Stop All during one — rather than showing every
+There are four tabs, whatever the room's size: **Run** holds the run actions,
+offering only the actions the current state allows — Start before a run, Pause
+and Stop All during one — rather than showing every
 action and disabling most of them; **Agents** lists every peer;
 **Rules** shows the room's brief as labelled fields alongside the shared
 configuration; **Approvals** holds workspace trust and pending decisions. Giving

@@ -19,7 +19,7 @@ import { generateUuid } from '../../../../base/common/uuid.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
-import { AgentHostRoomMessageMode, IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, MAX_ROOM_WORKERS } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { AgentHostRoomMessageMode, AgentHostRoomVerificationVerdict, IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, MAX_ROOM_WORKERS } from '../../../../platform/agentHost/common/agentHostRooms.js';
 import { SessionModelInfo } from '../../../../platform/agentHost/common/state/sessionState.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
@@ -28,6 +28,7 @@ import { IKeybindingService } from '../../../../platform/keybinding/common/keybi
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
+import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { AccessibilityVerbositySettingId } from '../../../../workbench/contrib/accessibility/browser/accessibilityConfiguration.js';
 import { IEditorService } from '../../../../workbench/services/editor/common/editorService.js';
 import { IViewsService } from '../../../../workbench/services/views/common/viewsService.js';
@@ -38,7 +39,7 @@ import { ICollaborationRoomScrollState, ICollaborationRoomView, ICollaborationRo
 import { CollaborationRoomFocusedContext, ICollaborationRequest, ICollaborationService } from '../../../services/collaboration/common/collaboration.js';
 import { getCollaborationMentionQuery, ICollaborationMentionQuery } from '../../../services/collaboration/common/collaborationMentions.js';
 import { ISessionsProvidersService } from '../../../services/sessions/browser/sessionsProvidersService.js';
-import { deliveryStateLabel, memberStateLabel, roomStateLabel } from './collaborationRoomLabels.js';
+import { deliveryStateLabel, memberStateLabel, resultOutcomeLabel, roomStateLabel, verificationStateLabel, verificationVerdictLabel } from './collaborationRoomLabels.js';
 import { CollaborationArtifactProvider } from './collaborationArtifactProvider.js';
 import { CollaborationRequestWidget } from './collaborationRequestWidget.js';
 import { CollaborationConfigurationPicker } from './collaborationConfigurationPicker.js';
@@ -109,9 +110,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private readonly addMemberButton: HTMLButtonElement;
 	private readonly runPanel: HTMLElement;
 	private readonly rulesPanel: HTMLElement;
-	private readonly runForm: HTMLFormElement;
-	private readonly turnsInput: HTMLInputElement;
-	private readonly deadlineInput: HTMLInputElement;
 	private readonly startButton: HTMLButtonElement;
 	private readonly pauseButton: HTMLButtonElement;
 	private readonly stopButton: HTMLButtonElement;
@@ -149,6 +147,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		@IEditorService private readonly editorService: IEditorService,
 		@IViewsService private readonly viewsService: IViewsService,
 		@IOpenerService private readonly openerService: IOpenerService,
+		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 	) {
 		super();
@@ -267,24 +266,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			}),
 		}));
 
-		this.runForm = this.runPanel.appendChild($('form.room-run-controls')) as HTMLFormElement;
-		const limits = this.runForm.appendChild($('details.room-run-limits'));
-		limits.appendChild($('summary')).textContent = localize('room.optionalLimits', "Optional run limits");
-		this.turnsInput = this.numberField(limits, localize('room.turns', "Maximum total turns for this run"), 10000);
-		this.deadlineInput = this.numberField(limits, localize('room.deadline', "Run deadline (minutes)"), 1440);
-		this.turnsInput.required = false;
-		this.deadlineInput.required = false;
-		this.turnsInput.placeholder = localize('room.noLimit', "No limit");
-		this.deadlineInput.placeholder = localize('room.noDeadline', "No deadline");
 		this.startButton = this.button(this.runControls, localize('room.start', "Start"), () => this.startRun());
 		this.runControls.insertBefore(this.startButton, this.pauseButton);
 		this.startButton.classList.add('primary');
-		this._register(addDisposableListener(this.runForm, EventType.SUBMIT, event => {
-			event.preventDefault();
-			void this.perform(() => this.startRun());
-		}));
-		const limitsHint = this.runForm.appendChild($('span.room-hint'));
-		limitsHint.textContent = localize('room.limitsHint', "Start and Resume keep each peer's selected mode and permissions. Use the All peers menu to change the whole room. Managed approvals remain in this room. Limits are optional.");
 
 		this.historyStatus = this.layoutWidget.main.appendChild($('.room-history-status'));
 		this.historyStatus.setAttribute('role', 'status');
@@ -299,6 +283,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				this.input.focus();
 			},
 			openArtifact: artifactId => { void this.perform(() => this.openArtifact(artifactId)); },
+			reviewResult: message => { void this.perform(() => this.reviewResult(message)); },
 			retry: messageId => { void this.perform(() => this.collaborationService.retryMessage(messageId)); },
 		}));
 		this.historyControls = this.layoutWidget.main.appendChild($('.room-history-controls'));
@@ -348,7 +333,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.send = this.button(composerActions, '', () => this.sendMessage(), this._store, false);
 		this.send.classList.add('room-send', ...ThemeIcon.asClassNameArray(Codicon.arrowUp));
 		this.send.setAttribute('aria-label', localize('room.send', "Send"));
-		this.send.setAttribute('aria-description', localize('room.sendDescription', "Send to mentioned peers, or everyone when none are mentioned. Busy peers receive it during their current turn; finished or stopped peers receive a new turn. Pause holds delivery."));
+		this.send.setAttribute('aria-description', localize('room.sendDescription', "Send to mentioned peers, or everyone when none are mentioned. Busy peers receive human guidance during their current turn. Stopped peers receive saved guidance after Resume. Pause holds delivery."));
 		this._register(addDisposableListener(this.input, EventType.INPUT, () => {
 			this.updateDraft(this.currentDraft?.replyTo);
 			this.updateMentions();
@@ -404,8 +389,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				this.memberElements.clear();
 				this.roster.replaceChildren();
 				this.clearMessages();
-				this.turnsInput.value = '';
-				this.deadlineInput.value = '';
 				this.followingLatest = scrollState && scrollState.roomId === id ? scrollState.followingLatest : true;
 				this.pendingScroll = scrollState && scrollState.roomId === id ? scrollState : undefined;
 				this.lastAnnouncedSequence = 0;
@@ -460,13 +443,10 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			// Removed peers keep their posts but are no longer part of the room's roster.
 			const activeMembers = room?.members.filter(member => !member.removed) ?? [];
 			this.subtitle.textContent = room ? localize('room.summary', "{0} | {1} peers | Base {2}{3}", roomStateLabel(room.state), activeMembers.length, room.baseRevision.slice(0, 8),
-				room.run ? localize('room.runSummary', " | {0} turns{1}{2}", room.run.admittedTurns,
-					room.run.limits.maxTurns === undefined ? '' : localize('room.turnLimit', " / {0} maximum", room.run.limits.maxTurns),
-					room.run.deadline === undefined ? '' : localize('room.runDeadline', " | Deadline {0}", new Date(room.run.deadline).toLocaleTimeString())) : '') : '';
+				room.run ? localize('room.runSummary', " | {0} turns", room.run.admittedTurns) : '') : '';
 			this.subtitle.title = room ? localize('room.repositorySummary', "{0}\nGoal: {1}", room.repositoryUri, room.goal) : '';
 			this.renderRoomRules(room);
 			this.home.element.hidden = !!roomId;
-			this.runForm.hidden = !room || room.state === 'running' || room.state === 'stopping';
 			this.roster.hidden = !room;
 			this.historyControls.hidden = !room;
 			this.feed.hidden = !roomId;
@@ -479,8 +459,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.startButton.hidden = !room || room.state === 'running' || room.state === 'stopping';
 			const canStart = !!room && ['created', 'idle', 'paused', 'stopped', 'interrupted'].includes(room.state);
 			this.startButton.disabled = busy || !available || !canStart;
-			this.turnsInput.disabled = busy || !canStart;
-			this.deadlineInput.disabled = busy || !canStart;
 			// Only the actions that apply to the room's current state are offered, rather
 			// than showing every action and disabling most of them.
 			const canPause = !!room && ['running', 'idle'].includes(room.state);
@@ -511,11 +489,12 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this._register(autorun(reader => {
 			const page = this.collaborationService.messages.read(reader);
 			const room = this.collaborationService.activeRoom.read(reader);
+			const canVerifyResults = this.collaborationService.canVerifyResults.read(reader);
 			const loadingEarlier = this.collaborationService.loadingEarlier.read(reader);
 			this.historyStatus.hidden = !loadingEarlier;
 			this.historyStatus.textContent = loadingEarlier ? localize('room.loadingEarlier', "Loading earlier messages...") : '';
 			this.updateLatestPostsButton(page, room);
-			this.conversation.setMessages(page.messages, room);
+			this.conversation.setMessages(page.messages, room, canVerifyResults);
 			this.restoreScrollPosition();
 			const last = page.messages.at(-1);
 			if (last && last.sequence > this.lastAnnouncedSequence) {
@@ -625,17 +604,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 
 	private async startRun(): Promise<void> {
 		const roomId = this.collaborationService.activeRoomId.get();
-		const maxTurns = this.turnsInput.value.trim() ? this.turnsInput.valueAsNumber : undefined;
-		const timeoutMinutes = this.deadlineInput.value.trim() ? this.deadlineInput.valueAsNumber : undefined;
-		if (this.turnsInput.validity.badInput || this.deadlineInput.validity.badInput
-			|| (maxTurns !== undefined && (!Number.isSafeInteger(maxTurns) || maxTurns < 1 || maxTurns > 10000))
-			|| (timeoutMinutes !== undefined && (!Number.isSafeInteger(timeoutMinutes) || timeoutMinutes < 1 || timeoutMinutes > 1440))) {
-			throw new Error(localize('room.finiteLimits', "Leave limits empty for no cap, or enter positive whole-number limits (at most 10000 turns and 1440 minutes)."));
-		}
-		await this.collaborationService.startRoom({
-			...(maxTurns === undefined ? {} : { maxTurns }),
-			...(timeoutMinutes === undefined ? {} : { timeoutMinutes }),
-		});
+		await this.collaborationService.startRoom();
 		if (!this._store.isDisposed && this.roomViewService.visible.get() && this.collaborationService.activeRoomId.get() === roomId) {
 			this.input.focus();
 		}
@@ -644,7 +613,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	/**
 	 * Sending is one action. When the host supports steering and a peer is mid-turn,
 	 * the post is delivered as live guidance so it lands during that turn; otherwise
-	 * it is an ordinary post, which wakes finished peers with a new turn.
+	 * it is an ordinary post for the next admitted turn.
 	 */
 	private sendMode(): AgentHostRoomMessageMode {
 		const busy = this.collaborationService.activeRoom.get()?.members.some(member => ['working', 'blocked', 'needsInput'].includes(member.state));
@@ -785,8 +754,8 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			const failed = ['failed', 'interrupted'].includes(member.state);
 			elements.retry.textContent = failed ? localize('room.retryPeer', "Retry") : localize('room.resumePeer', "Resume");
 			elements.retry.setAttribute('aria-label', failed
-				? localize('room.retryPeerLabel', "Retry {0} within the current run limits", member.name)
-				: localize('room.resumePeerLabel', "Resume {0} within the current run limits", member.name));
+				? localize('room.retryPeerLabel', "Retry {0}", member.name)
+				: localize('room.resumePeerLabel', "Resume {0}", member.name));
 			elements.retry.title = room.state === 'stopping'
 				? localize('room.resumePeerStopping', "Wait for the room to finish stopping.")
 				: '';
@@ -868,6 +837,49 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			const name = room?.members.find(member => member.id === delivery.memberId)?.name ?? delivery.memberId;
 			return localize('room.delivery', "{0}: {1}{2}", name, deliveryStateLabel(delivery.state), delivery.error ? ` (${delivery.error})` : '');
 		});
+	}
+
+	private async reviewResult(message: IAgentHostRoomMessage): Promise<void> {
+		if (!message.result) {
+			throw new Error(localize('room.resultMissing', "The structured result is no longer available."));
+		}
+		const roomId = this.collaborationService.activeRoomId.get();
+		const choices: { readonly label: string; readonly description: string; readonly verdict: AgentHostRoomVerificationVerdict }[] = [
+			{
+				label: localize('room.verifyResult', "Verify Result"),
+				description: localize('room.verifyResultDescription', "The evidence independently supports this result"),
+				verdict: 'verified',
+			},
+			{
+				label: localize('room.rejectResult', "Reject Result"),
+				description: localize('room.rejectResultDescription', "The evidence does not support this result"),
+				verdict: 'rejected',
+			},
+		];
+		const choice = await this.quickInputService.pick(choices, {
+			title: localize('room.reviewResultTitle', "Review result: {0}", message.result.title),
+			placeHolder: localize('room.reviewResultPlaceholder', "Choose an independent verdict"),
+		});
+		if (!choice) {
+			return;
+		}
+		const evidence = await this.quickInputService.input({
+			title: localize('room.reviewEvidenceTitle', "Evidence for {0}", choice.label),
+			prompt: localize('room.reviewEvidencePrompt', "Describe what you checked and the observed result"),
+			validateInput: async value => {
+				if (!value.trim()) {
+					return localize('room.reviewEvidenceRequired', "Verification evidence is required.");
+				}
+				return value.length > 2000 ? localize('room.reviewEvidenceTooLong', "Verification evidence must be at most 2000 characters.") : undefined;
+			},
+		});
+		if (evidence === undefined || roomId !== this.collaborationService.activeRoomId.get()) {
+			return;
+		}
+		await this.collaborationService.verifyResult(message.id, choice.verdict, evidence);
+		status(choice.verdict === 'verified'
+			? localize('room.resultVerifiedStatus', "Result verified")
+			: localize('room.resultRejectedStatus', "Result rejected"));
 	}
 
 	private async openArtifact(artifactId: string): Promise<void> {
@@ -981,24 +993,6 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		}
 	}
 
-	private textField(parent: HTMLElement, label: string): HTMLInputElement {
-		const container = parent.appendChild($('label'));
-		container.append(label);
-		return container.appendChild($('input')) as HTMLInputElement;
-	}
-
-	private numberField(parent: HTMLElement, label: string, maximum?: number): HTMLInputElement {
-		const field = this.textField(parent, label);
-		field.type = 'number';
-		field.min = '1';
-		field.step = '1';
-		field.required = true;
-		if (maximum !== undefined) {
-			field.max = String(maximum);
-		}
-		return field;
-	}
-
 	private button(parent: HTMLElement, label: string, action: () => void | Promise<void>, store: DisposableStore = this._store, exclusive = true): HTMLButtonElement {
 		const button = parent.appendChild($('button')) as HTMLButtonElement;
 		button.type = 'button';
@@ -1104,7 +1098,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		const room = this.collaborationService.activeRoom.get();
 		if (!room) {
 			return [
-				localize('room.accessibleNew', "Agent Collab. Describe the goal, choose a folder, and pick how many Copilot agents to use and a model for each. Advanced holds shared rules, the Git branch, and optional run limits. Creating a room does not start paid work until you start it or send a message."),
+				localize('room.accessibleNew', "Agent Collab. Describe the goal, choose a folder, and pick how many Copilot agents to use and a model for each. Advanced holds shared rules and the Git branch. Creating a room does not start paid work until you start it or send a message."),
 				...this.collaborationService.rooms.get().map(saved => localize('room.accessibleSavedRoom', "Saved room: {0}. {1}.", saved.title, roomStateLabel(saved.state))),
 				this.notice.textContent ?? '',
 			].join('\n\n');
@@ -1120,12 +1114,33 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			}),
 			...(this.trustNotice.hidden ? [] : [this.trustMessage.textContent ?? '', this.trustDirectories.textContent ?? '']),
 			...[...this.requestElements.values()].map(request => request.getAccessibleContent()),
-			...this.collaborationService.messages.get().messages.map(message => localize('room.accessibleMessage', "{0}, {1}: {2}{3}\n{4}",
-				message.authorName, new Date(message.timestamp).toLocaleString(), message.replyTo ? localize('room.accessibleReply', "Reply to {0}. ", message.replyTo) : '',
-				[message.mode === 'steer' ? localize('room.humanGuidance', "Human guidance") : '', ...this.deliveryLabels(message, room)].filter(Boolean).join(', '), message.text)),
+			...this.collaborationService.messages.get().messages.map(message => this.accessibleMessage(message, room)),
 			...room.artifacts.map(artifact => localize('room.accessibleArtifact', "Published artifact: {0}. Base: {1}. Source: {2}.", artifact.title, artifact.baseRevision, artifact.sourceRevision)),
 			this.notice.textContent ?? '',
 		].join('\n\n');
+	}
+
+	private accessibleMessage(message: IAgentHostRoomMessage, room: IAgentHostRoom): string {
+		const metadata = [
+			message.replyTo ? localize('room.accessibleReply', "Reply to {0}. ", message.replyTo) : '',
+			message.mode === 'steer' ? localize('room.humanGuidance', "Human guidance") : '',
+			...this.deliveryLabels(message, room),
+		].filter(Boolean).join(', ');
+		if (message.result) {
+			const patches = message.result.artifactIds.map(artifactId => room.artifacts.find(artifact => artifact.id === artifactId)?.title ?? artifactId).join(', ');
+			return localize('room.accessibleResult', "{0}, {1}. Structured result: {2}. Outcome: {3}. Verification: {4}. {5}\nSummary: {6}\nEvidence: {7}\nPublished patches: {8}",
+				message.authorName, new Date(message.timestamp).toLocaleString(), message.result.title, resultOutcomeLabel(message.result.outcome),
+				verificationStateLabel(message.result.verificationState ?? 'pending'), metadata, message.result.summary,
+				message.result.evidence.join('; '), patches || localize('room.accessibleNoPatches', "None"));
+		}
+		if (message.verification) {
+			return localize('room.accessibleVerification', "{0}, {1}. Result verification: {2} result {3}. {4}\nEvidence: {5}",
+				message.authorName, new Date(message.timestamp).toLocaleString(), verificationVerdictLabel(message.verification.verdict),
+				message.verification.resultId, metadata, message.verification.evidence.join('; '));
+		}
+		return localize('room.accessibleMessage', "{0}, {1}: {2}{3}\n{4}",
+			message.authorName, new Date(message.timestamp).toLocaleString(), message.replyTo ? localize('room.accessibleReply', "Reply to {0}. ", message.replyTo) : '',
+			[message.mode === 'steer' ? localize('room.humanGuidance', "Human guidance") : '', ...this.deliveryLabels(message, room)].filter(Boolean).join(', '), message.text);
 	}
 
 	private clearMessages(): void {
