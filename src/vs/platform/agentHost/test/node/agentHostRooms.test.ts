@@ -305,12 +305,17 @@ suite('AgentHostRooms', () => {
 				{ id: 'model-b', config: { thinkingLevel: 'low', contextSize: 200_000 } },
 				{ id: 'auto', config: { tier: 'efficiency' } },
 			];
-			const room = await rooms.createRoom({ title: 'Models', goal: 'Use independent choices', repositoryUri: 'file:///repository', workerCount: 3, memberModels: models, continuous: false });
+			const memberNames = ['chaotic-cyborg', 'disciplined-neuron', 'caffeinated-compiler'];
+			const room = await rooms.createRoom({
+				title: 'Models', goal: 'Use independent choices', repositoryUri: 'file:///repository',
+				workerCount: 3, memberNames, memberModels: models, continuous: false,
+			});
 			assert.deepStrictEqual({
+				names: room.members.map(member => member.name),
 				models: room.members.map(getRoomMemberModel),
 				applied: room.members.map(member => member.modelSelection),
 				created: createdModels.size, sends: provider.sendMessageCalls.length, worktrees: storage.worktrees.size,
-			}, { models, applied: [undefined, undefined, undefined], created: 0, sends: 0, worktrees: 0 });
+			}, { names: memberNames, models, applied: [undefined, undefined, undefined], created: 0, sends: 0, worktrees: 0 });
 			await rooms.startRoom(room.id, { maxTurns: 3 });
 			await whenSent(3);
 			assert.deepStrictEqual({
@@ -327,6 +332,9 @@ suite('AgentHostRooms', () => {
 			runtime.models = roomModelCatalog.map(model => model.id === 'model-b' ? { ...model, policyState: PolicyState.Disabled } : model);
 			const channel = createAgentHostRoomsChannel(rooms, disposables.add(new DisposableStore()));
 			const invalid: readonly Record<string, unknown>[] = [
+				{ memberNames: [] }, { memberNames: ['chaotic-cyborg'] },
+				{ memberNames: ['Chaotic-Cyborg', 'disciplined-neuron'] },
+				{ memberNames: ['chaotic-cyborg', 'chaotic-cyborg'] },
 				{ memberModels: [] }, { memberModels: [{ id: 'model-a' }] },
 				{ memberModels: [{ id: 'model-a' }, { id: 'model-b' }] },
 				{ memberModels: [{ id: 'missing' }, undefined] },
@@ -366,12 +374,13 @@ suite('AgentHostRooms', () => {
 			const last: ModelSelection = { id: 'model-b', config: { adaptive: true } };
 			const mixed: readonly (ModelSelection | undefined)[] = [first, undefined, last];
 			const defaults: readonly (ModelSelection | undefined)[] = [undefined, undefined, undefined];
+			const memberNames = ['chaotic-cyborg', 'disciplined-neuron', 'caffeinated-compiler'];
 			const created: IAgentHostRoom[] = [];
 			for (const memberModels of [mixed, defaults]) {
 				for (const model of [undefined, 'model-c']) {
 					created.push(await client.createRoom({
 						title: 'IPC', goal: 'Keep absence distinct', repositoryUri: 'file:///repository',
-						workerCount: 3, memberModels, model, continuous: false,
+						workerCount: 3, memberNames, memberModels, model, continuous: false,
 					}));
 				}
 			}
@@ -380,11 +389,13 @@ suite('AgentHostRooms', () => {
 			runtime.models = roomModelCatalog;
 			const reset = await client.setMemberModel(room.id, room.members[2].id, undefined);
 			assert.deepStrictEqual({
+				names: created.map(room => room.members.map(member => member.name)),
 				models: created.map(room => room.members.map(getRoomMemberModel)),
 				reset: reset.members.map(getRoomMemberModel),
 				submitted: runtime.submitted,
 				capability: (await client.getCapabilities()).supportsMemberModels,
 			}, {
+				names: created.map(() => memberNames),
 				models: [
 					[first, undefined, last],
 					[first, { id: 'model-c' }, last],
@@ -989,7 +1000,7 @@ suite('AgentHostRooms', () => {
 		}
 		await whenRoom(rooms, room.id, room => room.state === 'idle');
 		await rooms.postMessage(room.id, { id: 'broadcast', text: 'Background context, no wakeup', mentions: [] });
-		const options = { id: 'targeted', text: '@Copilot-2 Please check this finding', mentions: [] };
+		const options = { id: 'targeted', text: `@${room.members[1].name} Please check this finding`, mentions: [] };
 		const first = await rooms.postMessage(room.id, options);
 		const duplicate = await rooms.postMessage(room.id, options);
 		await runtime.whenSubmitted(3);
@@ -1267,7 +1278,7 @@ suite('AgentHostRooms', () => {
 		const sessionId = AgentSession.id(room.members[0].sessionUri);
 		await rooms.read(sessionId);
 		await rooms.post(sessionId, { id: 'intent', text: 'Implementing animation', kind: 'work', mentions: [] });
-		await rooms.postMessage(room.id, { id: 'redirect', text: '@Copilot-1 Stop animations and fix the form.', mode: 'steer', mentions: [] });
+		await rooms.postMessage(room.id, { id: 'redirect', text: `@${room.members[0].name} Stop animations and fix the form.`, mode: 'steer', mentions: [] });
 		await whenRoom(rooms, room.id, () => storage.records.get(room.id)!.messages.at(-1)!.deliveries[0].state === 'delivered');
 		assert.throws(() => rooms.beforeTool(sessionId, 'edit'), /New human guidance/);
 		const context = await rooms.read(sessionId);
@@ -1397,7 +1408,7 @@ suite('AgentHostRooms', () => {
 		await runtime.whenSubmitted(1);
 		const sessionId = AgentSession.id(room.members[0].sessionUri);
 		await rooms.read(sessionId);
-		const message = await rooms.post(sessionId, { id: 'self', text: '@Copilot-1 Finished my work', kind: 'finding', mentions: [room.members[0].id] });
+		const message = await rooms.post(sessionId, { id: 'self', text: `@${room.members[0].name} Finished my work`, kind: 'finding', mentions: [room.members[0].id] });
 		runtime.finish(room.members[0].sessionUri);
 		await whenRoom(rooms, room.id, room => room.state === 'idle');
 		assert.deepStrictEqual({ mentions: message.mentions, deliveries: message.deliveries, turns: runtime.submitted.length }, { mentions: [], deliveries: [], turns: 1 });
@@ -1459,14 +1470,18 @@ suite('AgentHostRooms', () => {
 		const scheduled = current.members[2];
 		assert.deepStrictEqual({
 			count: current.members.length,
-			name: scheduled.name,
+			generatedName: /^[a-z]+-[a-z]+$/.test(scheduled.name),
+			uniqueNames: new Set(current.members.map(member => member.name)).size,
 			state: scheduled.state,
 			turns: scheduled.turns,
 			uniqueSessions: new Set(current.members.map(member => member.sessionUri)).size,
 			uniqueWorktrees: new Set(current.members.map(member => member.worktreeUri)).size,
 			submitted: runtime.submitted.some(entry => entry.sessionUri === added.sessionUri),
 			receivedFullBrief: runtime.submitted.find(entry => entry.sessionUri === added.sessionUri)?.prompt.includes('Shared goal: Measure before changing code'),
-		}, { count: 3, name: 'Copilot-3', state: 'starting', turns: 1, uniqueSessions: 3, uniqueWorktrees: 3, submitted: true, receivedFullBrief: true });
+		}, {
+			count: 3, generatedName: true, uniqueNames: 3, state: 'starting', turns: 1,
+			uniqueSessions: 3, uniqueWorktrees: 3, submitted: true, receivedFullBrief: true,
+		});
 	});
 
 	test('an added member takes the next unused name and cannot exceed the room limit', async () => {
@@ -1479,7 +1494,11 @@ suite('AgentHostRooms', () => {
 		const smaller = setup(1);
 		const second = await smaller.create();
 		const grown = await smaller.rooms.addMember(second.id);
-		assert.deepStrictEqual(grown.members.map(member => member.name), ['Copilot-1', 'Copilot-2']);
+		assert.deepStrictEqual({
+			count: grown.members.length,
+			unique: new Set(grown.members.map(member => member.name)).size,
+			format: grown.members.every(member => /^[a-z]+-[a-z]+$/.test(member.name)),
+		}, { count: 2, unique: 2, format: true });
 	});
 
 	test('a removed peer keeps its posts but takes no further turns and is no longer a recipient', async () => {
@@ -1624,7 +1643,7 @@ suite('AgentHostRooms', () => {
 		}
 		await whenRoom(rooms, room.id, room => room.state === 'idle');
 		await rooms.stopRoom(room.id);
-		const message = { id: 'follow-up', text: '@Copilot-1 Check the page', mentions: [] };
+		const message = { id: 'follow-up', text: `@${room.members[0].name} Check the page`, mentions: [] };
 		await rooms.postMessage(room.id, message);
 		const pending = await rooms.getMessages(room.id);
 		assert.deepStrictEqual({

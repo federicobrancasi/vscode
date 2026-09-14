@@ -338,12 +338,14 @@ suite('CollaborationRoomWidget', () => {
 			void selected.complete();
 		}
 		await selected.p;
+		const memberNames = [...home.querySelectorAll('.room-home-model-name')].map(element => element.textContent);
 		[...home.querySelectorAll<HTMLElement>('.monaco-button')].find(button => button.textContent === 'Create and Start')!.click();
 
 		assert.deepStrictEqual({ options: await created.p, starts }, {
 			options: {
 				title: 'Measure startup before changing code', goal: 'Measure startup before changing code', instructions: 'Preserve public APIs',
 				repositoryUri: 'file:///repo', workerCount: 3, initializeRepository: false,
+				memberNames,
 				memberModels: [undefined, undefined, undefined],
 			},
 			starts: [],
@@ -671,10 +673,12 @@ suite('CollaborationRoomWidget', () => {
 		});
 	});
 
-	test('model drafts stay with their numbered slots when the peer count changes', async () => {
+	test('model drafts stay with their named slots when the peer count changes', async () => {
 		const draft: ICollaborationRoomCreationDraft = {
 			title: 'Mixed models', goal: 'Review the design', instructions: '', repositoryUri: 'file:///repo',
-			baseRevision: 'HEAD', workerCount: '3', model: '', memberModels: [{ id: 'model-a' }, undefined, { id: 'model-b' }],
+			baseRevision: 'HEAD', workerCount: '3', model: '',
+			memberNames: ['chaotic-cyborg', 'disciplined-neuron', 'caffeinated-compiler'],
+			memberModels: [{ id: 'model-a' }, undefined, { id: 'model-b' }],
 		};
 		const { container, viewService, starts, created } = setup('created', 0, true, undefined, draft);
 		const select = container.querySelector<HTMLSelectElement>('.room-home-count select')!;
@@ -682,12 +686,37 @@ suite('CollaborationRoomWidget', () => {
 			select.value = value;
 			select.dispatchEvent(new Event('change', { bubbles: true }));
 		}
+		const visibleNames = [...container.querySelectorAll('.room-home-model-name')].map(element => element.textContent);
 		[...container.querySelectorAll<HTMLElement>('.room-home .monaco-button')].find(button => button.textContent === 'Create and Start')!.click();
 		assert.deepStrictEqual({
+			visibleNames,
+			draftNames: viewService.creationDraft.get()?.memberNames,
 			draftModels: viewService.creationDraft.get()?.memberModels,
+			createdNames: (await created.p).memberNames,
 			createdModels: (await created.p).memberModels,
 			starts,
-		}, { draftModels: draft.memberModels, createdModels: draft.memberModels, starts: [] });
+		}, {
+			visibleNames: draft.memberNames, draftNames: draft.memberNames, draftModels: draft.memberModels,
+			createdNames: draft.memberNames, createdModels: draft.memberModels, starts: [],
+		});
+	});
+
+	test('new room drafts assign stable unique AI-themed names to peer slots', () => {
+		const { container, viewService } = setup('created', 0, true);
+		const select = container.querySelector<HTMLSelectElement>('.room-home-count select')!;
+		const initial = [...container.querySelectorAll('.room-home-model-name')].map(element => element.textContent ?? '');
+		for (const value of ['1', '3']) {
+			select.value = value;
+			select.dispatchEvent(new Event('change', { bubbles: true }));
+		}
+		const restored = [...container.querySelectorAll('.room-home-model-name')].map(element => element.textContent ?? '');
+		assert.deepStrictEqual({
+			count: initial.length,
+			unique: new Set(initial).size,
+			format: initial.every(name => /^[a-z]+-[a-z]+$/.test(name)),
+			stable: restored,
+			persisted: viewService.creationDraft.get()?.memberNames,
+		}, { count: 3, unique: 3, format: true, stable: initial, persisted: initial });
 	});
 
 	test('reported work is not repeated in agent cards and authors have distinct stable accents', () => {

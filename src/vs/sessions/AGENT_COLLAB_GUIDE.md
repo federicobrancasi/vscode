@@ -188,8 +188,9 @@ cannot reach an authenticated host can be read and stopped, but not started.
    one-time setup (`git init` plus a baseline commit) with its exact path shown;
    it is never initialized silently. Uncommitted source-folder changes are not
    silently included, committed, or discarded.
-5. Choose one to ten peers and a model for each numbered slot. Choices stay
-   associated with their slots if the peer count changes.
+5. Choose one to ten peers and a model for each named slot. The form assigns
+   stable, unique AI-themed names such as `chaotic-cyborg`; names and model
+   choices stay associated with their slots if the peer count changes.
 6. Shared rules and the branch/tag/commit are under **Advanced**.
 7. Select **Create and Start**. Creation records the room; it does not start paid
    inference.
@@ -219,7 +220,7 @@ Stop stays pending until Resume. Control/Command+Enter always steers.
 | Action | Recipients | Effect |
 |--------|------------|--------|
 | Send without `@mentions` | Every peer in the room | Delivers guidance to running peers; saves it for stopped peers until Resume |
-| Send with `@Copilot-2` | Only the mentioned peers | The same guidance behavior for only those peers |
+| Send with `@caffeinated-compiler` | Only the mentioned peers | The same guidance behavior for only those peers |
 | Reply | Determined by the mentions in the composer | Links the post to an earlier message; check the inserted mention before sending |
 | Retry Delivery | Undelivered recipients of that saved human message | Marks delivery pending without adding a duplicate post; Stop still requires Resume |
 
@@ -232,11 +233,11 @@ What did each of you verify, and what is still blocked?
 Send gives the guidance to every running peer.
 
 ```text
-@Copilot-2 Please check the mobile navigation once more.
+@caffeinated-compiler Please check the mobile navigation once more.
 ```
 
-Send requests a follow-up only from Copilot-2, and reaches it during its current
-turn if it is working.
+Send requests a follow-up only from `caffeinated-compiler`, and reaches it
+during its current turn if it is working.
 
 Text follow-ups from an idle peer's individual chat are also shared in the room
 and addressed to that peer. During an active turn, use the room composer rather
@@ -343,8 +344,8 @@ Sessions sidebar | Room title/status      Room Settings | Run | Agents | Rules |
                  |                                      |
                  | Shared conversation                  | Start / Pause / Stop All
                  |                                      | Needs Attention
-                 | Copilot-1: findings...               | Needs Attention
-                 | Copilot-2: reply...                  |
+                 | chaotic-cyborg: findings...          | Needs Attention
+                 | caffeinated-compiler: reply...        |
                  | You: guidance...                     |
                  |                       Jump to Latest |
                  | Message input                      ↑ |

@@ -45,10 +45,17 @@ function renderRoom(ctx: ComponentFixtureContext, state: RoomFixtureState): void
 	const storage = ctx.disposableStore.add(new InMemoryStorageService());
 	const customViews = ctx.disposableStore.add(new CustomViewService(new NullLogService(), storage));
 	const views = ctx.disposableStore.add(new CollaborationRoomViewService(customViews));
-	if (state === 'mixed-setup') {
+	const memberNames = ['chaotic-cyborg', 'disciplined-neuron', 'caffeinated-compiler'];
+	if (state === 'new' || state === 'home') {
+		views.saveCreationDraft({
+			title: '', goal: '', instructions: '', repositoryUri: undefined,
+			baseRevision: '', workerCount: '3', model: '', memberNames,
+		});
+	} else if (state === 'mixed-setup') {
 		views.saveCreationDraft({
 			title: 'Review the implementation', goal: 'Find defects and share evidence in the room', instructions: '',
 			repositoryUri: 'file:///workspace/project', baseRevision: 'main', workerCount: '3', model: '',
+			memberNames,
 			memberModels: [{ id: 'gpt-5.5' }, { id: 'claude-sonnet-4.6' }, { id: 'auto' }],
 		});
 	}

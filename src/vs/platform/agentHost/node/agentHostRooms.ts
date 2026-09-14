@@ -11,6 +11,7 @@ import { URI } from '../../../base/common/uri.js';
 import { generateUuid } from '../../../base/common/uuid.js';
 import { localize } from '../../../nls.js';
 import { ILogService } from '../../log/common/log.js';
+import { generateAgentHostRoomMemberName, isAgentHostRoomMemberName } from '../common/agentHostRoomNames.js';
 import { AgentHostRoomMessageKind, AgentHostRoomVerificationState, defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomPublishResultOptions, IAgentHostRoomsService, IAgentHostRoomVerifyResultOptions, MAX_ROOM_WORKERS, newAgentHostRoomConfiguration } from '../common/agentHostRooms.js';
 import { AgentSession } from '../common/agentService.js';
 import { ResolveSessionConfigResult } from '../common/state/protocol/commands.js';
@@ -68,6 +69,33 @@ function buildHumanGuidancePrompt(messages: readonly IAgentHostRoomMessage[]): s
 		...messages.map(message => `[${message.id}] ${message.authorName}: ${message.text}`),
 		'Prioritize the human request. Call room_read for the shared context, then continue from the existing work without restarting the original task.',
 	].join('\n\n');
+}
+
+function resolveRoomMemberNames(value: unknown, workerCount: number): string[] {
+	if (value === undefined) {
+		const names: string[] = [];
+		for (let index = 0; index < workerCount; index++) {
+			names.push(generateAgentHostRoomMemberName(names));
+		}
+		return names;
+	}
+	if (!Array.isArray(value) || value.length !== workerCount) {
+		throw new Error(localize('rooms.invalidMemberNames', "Provide exactly one name per room member."));
+	}
+	const names: string[] = [];
+	const normalized = new Set<string>();
+	for (const name of value) {
+		if (typeof name !== 'string' || !isAgentHostRoomMemberName(name)) {
+			throw new Error(localize('rooms.invalidMemberName', "Room member names must be lowercase kebab-case identifiers."));
+		}
+		const key = name.toLowerCase();
+		if (normalized.has(key)) {
+			throw new Error(localize('rooms.duplicateMemberName', "Room member names must be unique."));
+		}
+		normalized.add(key);
+		names.push(name);
+	}
+	return names;
 }
 
 function buildRoomTurnPrompt(room: IAgentHostRoom, member: IAgentHostRoomMember, inbox: readonly IAgentHostRoomMessage[], briefed: boolean, resumed: boolean): string {
@@ -363,6 +391,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		if (options.memberModels !== undefined && (!Array.isArray(options.memberModels) || options.memberModels.length !== options.workerCount)) {
 			throw new Error(localize('rooms.invalidMemberModels', "Provide exactly one model selection per room member."));
 		}
+		const memberNames = resolveRoomMemberNames(options.memberNames, options.workerCount);
 		const fallback = options.model === undefined ? undefined : parseRoomModelSelection({ id: options.model });
 		const models = Array.from({ length: options.workerCount }, (_, index) => {
 			const selected = options.memberModels?.[index];
@@ -384,7 +413,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			const memberId = generateUuid();
 			const sessionUri = AgentSession.uri('copilotcli', generateUuid()).toString();
 			return {
-				id: memberId, name: `Copilot-${index + 1}`, sessionUri, chatUri: buildDefaultChatUri(sessionUri),
+				id: memberId, name: memberNames[index], sessionUri, chatUri: buildDefaultChatUri(sessionUri),
 				model: models[index]?.id, pendingModel: models[index], state: 'pending', turns: 0, worktreeUri: this._storage.worktreeUri(id, memberId),
 				configuration: { ...newAgentHostRoomConfiguration },
 			};
@@ -582,7 +611,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			throw new Error(localize('rooms.invalidMentions', "Mention only members of this room."));
 		}
 		const names = [...options.mentions];
-		for (const match of options.text.matchAll(/@(?<name>Copilot-\d+)\b/gi)) {
+		for (const match of options.text.matchAll(/@(?<name>[a-z0-9]+(?:-[a-z0-9]+)+)\b/gi)) {
 			names.push(match.groups!.name);
 		}
 		if (options.mode === 'steer' && names.length === 0) {
@@ -765,15 +794,9 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			}
 			const memberId = generateUuid();
 			const sessionUri = AgentSession.uri('copilotcli', generateUuid()).toString();
-			// Names identify peers in the shared conversation, so a new member takes the
-			// next unused number rather than one an existing peer already answers to.
 			const taken = new Set(record.room.members.map(member => member.name));
-			let index = record.room.members.length + 1;
-			while (taken.has(`Copilot-${index}`)) {
-				index++;
-			}
 			const member: IAgentHostRoomMember = {
-				id: memberId, name: `Copilot-${index}`, sessionUri, chatUri: buildDefaultChatUri(sessionUri),
+				id: memberId, name: generateAgentHostRoomMemberName(taken), sessionUri, chatUri: buildDefaultChatUri(sessionUri),
 				model: selection?.id, pendingModel: selection, state: 'pending', turns: 0,
 				worktreeUri: this._storage.worktreeUri(roomId, memberId),
 				configuration: { ...newAgentHostRoomConfiguration },

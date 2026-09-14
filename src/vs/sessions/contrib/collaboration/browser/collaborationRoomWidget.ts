@@ -256,13 +256,15 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				return {
 					goal: draft?.goal ?? '', folder: draft?.repositoryUri ? URI.parse(draft.repositoryUri).fsPath : '',
 					count: draft?.workerCount ?? '3', instructions: draft?.instructions ?? '', baseRevision: draft?.baseRevision ?? '',
+					memberNames: draft?.memberNames ?? [],
 					memberModels: draft?.memberModels ?? (draft?.model ? Array.from({ length: MAX_ROOM_WORKERS }, () => ({ id: draft.model })) : []),
 				};
 			},
 			saveDraft: draft => this.roomViewService.saveCreationDraft(draft && {
 				title: '', goal: draft.goal, instructions: draft.instructions,
 				repositoryUri: draft.folder ? URI.file(draft.folder).toString() : undefined,
-				baseRevision: draft.baseRevision, workerCount: draft.count, model: '', memberModels: draft.memberModels,
+				baseRevision: draft.baseRevision, workerCount: draft.count, model: '',
+				memberNames: draft.memberNames, memberModels: draft.memberModels,
 			}),
 		}));
 

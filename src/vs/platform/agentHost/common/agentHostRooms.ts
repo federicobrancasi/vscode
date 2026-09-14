@@ -189,6 +189,8 @@ export interface IAgentHostRoomCreateOptions {
 	readonly model?: string;
 	/** Keep idle members working without an explicit next step. Defaults to true for new rooms. */
 	readonly continuous?: boolean;
+	/** Ordered by worker index. Names must be unique lowercase kebab-case identifiers. */
+	readonly memberNames?: readonly string[];
 	/** Ordered by worker index. An undefined entry uses the legacy model option, or the provider default. */
 	readonly memberModels?: readonly (ModelSelection | undefined)[];
 }

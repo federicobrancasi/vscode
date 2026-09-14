@@ -16,7 +16,13 @@ AI features must be enabled and a compatible local host available.
 The room's home screen asks for a shared goal, a working folder, and one to ten
 peers with a model menu for each. Shared rules and the committed baseline are
 under **Advanced**; the room title is taken from the goal. Draft model choices
-stay with their slots when the peer count changes or the view closes. Existing rooms are listed in the Sessions sidebar under
+stay with their slots when the peer count changes or the view closes. Each draft
+peer receives a unique lowercase AI-themed name such as `chaotic-cyborg`.
+The name is saved with the draft, validated by the host at creation, and remains
+the peer's identity across model changes, restarts, retirement, and resume.
+The host generates the same style of names when an older client omits them;
+existing rooms keep their recorded names unchanged.
+Existing rooms are listed in the Sessions sidebar under
 **Agent Collab**, which expands to open one directly; the section header itself
 opens this creation screen.
 

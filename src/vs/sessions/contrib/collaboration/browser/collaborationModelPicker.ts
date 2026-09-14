@@ -170,6 +170,9 @@ export class CollaborationModelPicker extends Disposable {
 		});
 		try {
 			await this.select(model);
+			if (!this._store.isDisposed) {
+				this.state.set({ ...this.state.get(), selection: model }, undefined);
+			}
 		} catch (error) {
 			if (!this._store.isDisposed && !isCancellationError(error)) {
 				this.selectionError.set(toErrorMessage(error), undefined);

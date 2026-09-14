@@ -11,6 +11,7 @@ import { Disposable, DisposableMap } from '../../../../base/common/lifecycle.js'
 import { autorun, observableValue } from '../../../../base/common/observable.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
+import { generateAgentHostRoomMemberName } from '../../../../platform/agentHost/common/agentHostRoomNames.js';
 import { IAgentHostRoomCreateOptions, MAX_ROOM_WORKERS } from '../../../../platform/agentHost/common/agentHostRooms.js';
 import { ModelSelection } from '../../../../platform/agentHost/common/state/sessionState.js';
 import { IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
@@ -24,6 +25,7 @@ export interface ICollaborationHomeDraft {
 	readonly count: string;
 	readonly instructions: string;
 	readonly baseRevision: string;
+	readonly memberNames?: readonly string[];
 	readonly memberModels: readonly (ModelSelection | undefined)[];
 }
 
@@ -39,7 +41,7 @@ export interface ICollaborationHomeDelegate {
 	saveDraft(draft: ICollaborationHomeDraft | undefined): void;
 }
 
-const EMPTY_DRAFT: ICollaborationHomeDraft = { goal: '', folder: '', count: '3', instructions: '', baseRevision: '', memberModels: [] };
+const EMPTY_DRAFT: ICollaborationHomeDraft = { goal: '', folder: '', count: '3', instructions: '', baseRevision: '', memberNames: [], memberModels: [] };
 
 /**
  * The room's landing surface: one card that asks only for a goal, a folder and
@@ -58,6 +60,7 @@ export class CollaborationHome extends Disposable {
 	private readonly errorElement: HTMLElement;
 	private readonly pickers = this._register(new DisposableMap<number, CollaborationModelPicker>());
 	private folder: URI | undefined;
+	private memberNames: string[] = [];
 	private memberModels: (ModelSelection | undefined)[] = [];
 
 	constructor(
@@ -148,24 +151,39 @@ export class CollaborationHome extends Disposable {
 		this.baseInput.value = draft.baseRevision;
 		this.folderInput.value = draft.folder;
 		this.folder = draft.folder ? URI.file(draft.folder) : undefined;
+		this.memberNames = [...(draft.memberNames ?? [])];
 		this.memberModels = [...draft.memberModels];
 		const count = Number(draft.count);
 		this.selectedCount = Number.isInteger(count) && count >= 1 && count <= MAX_ROOM_WORKERS ? count : 3;
 		this.countSelect.select(this.selectedCount - 1);
 		this.renderModelPickers();
+		this.save();
 	}
 
 	private save(): void {
 		this.delegate.saveDraft({
 			goal: this.goalInput.value, folder: this.folder?.fsPath ?? '', count: String(this.count),
 			instructions: this.instructionsInput.value, baseRevision: this.baseInput.value,
-			memberModels: this.memberModels.slice(0, this.count),
+			memberNames: [...this.memberNames],
+			memberModels: [...this.memberModels],
 		});
 	}
 
-	/** Draft model choices stay with their slot when the agent count changes. */
+	private ensureMemberNames(): void {
+		const taken = new Set(this.memberNames);
+		for (let index = 0; index < this.count; index++) {
+			if (!this.memberNames[index]) {
+				const name = generateAgentHostRoomMemberName(taken);
+				this.memberNames[index] = name;
+				taken.add(name);
+			}
+		}
+	}
+
+	/** Draft identities and model choices stay with their slot when the agent count changes. */
 	private renderModelPickers(): void {
 		const count = this.count;
+		this.ensureMemberNames();
 		for (const [index] of [...this.pickers.keys()].map(index => [index] as const)) {
 			if (index >= count) {
 				this.pickers.deleteAndDispose(index);
@@ -173,10 +191,11 @@ export class CollaborationHome extends Disposable {
 		}
 		this.modelsContainer.textContent = '';
 		for (let index = 0; index < count; index++) {
+			const memberName = this.memberNames[index];
 			const row = this.modelsContainer.appendChild($('.room-home-model'));
-			row.appendChild($('span.room-home-model-name')).textContent = localize('room.homeAgentName', "Copilot-{0}", index + 1);
+			row.appendChild($('span.room-home-model-name')).textContent = memberName;
 			const picker = this.instantiationService.createInstance(CollaborationModelPicker, row,
-				localize('room.homeAgentName', "Copilot-{0}", index + 1), this.catalog, model => {
+				memberName, this.catalog, model => {
 					this.memberModels[index] = model;
 					this.save();
 				});
@@ -251,6 +270,7 @@ export class CollaborationHome extends Disposable {
 				repositoryUri: folderUri, workerCount: this.count,
 				...(base ? { baseRevision: base } : {}),
 				initializeRepository,
+				memberNames: this.memberNames.slice(0, this.count),
 				memberModels: Array.from({ length: this.count }, (_, index) => this.memberModels[index]),
 			});
 		} finally {

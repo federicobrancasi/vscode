@@ -66,7 +66,6 @@ suite('CollaborationModelPicker', () => {
 		const saved: { peer: string; model: ModelSelection }[] = [];
 		const first = create('Copilot 1', model => {
 			saved.push({ peer: 'first', model });
-			first.state.set({ selection: model, enabled: true }, undefined);
 		});
 		const second = create('Copilot 2', model => { saved.push({ peer: 'second', model }); });
 		first.state.set({ selection: { id: 'model-a' }, enabled: true }, undefined);
@@ -75,8 +74,13 @@ suite('CollaborationModelPicker', () => {
 		choose(first, 'Model B');
 		await timeout(0);
 		assert.deepStrictEqual({
-			saved, first: first.state.get().selection, second: second.state.get().selection,
-		}, { saved: [{ peer: 'first', model: { id: 'model-b' } }], first: { id: 'model-b' }, second: { id: 'model-a' } });
+			saved, first: first.state.get().selection,
+			firstLabel: first.element.querySelector('.model-picker-name')?.textContent?.trim(),
+			second: second.state.get().selection,
+		}, {
+			saved: [{ peer: 'first', model: { id: 'model-b' } }], first: { id: 'model-b' },
+			firstLabel: 'Model B', second: { id: 'model-a' },
+		});
 	});
 
 	test('an unacknowledged model stays pending and a rejected choice restores the authoritative label', async () => {
