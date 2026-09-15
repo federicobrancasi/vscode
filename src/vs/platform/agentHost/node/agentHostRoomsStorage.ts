@@ -441,7 +441,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		optional(room.error, text, 'room.error');
 		let coordinatorSession: URI | undefined;
 		if (room.coordinator !== undefined) {
-			const coordinator = object(room.coordinator, 'room.coordinator', ['id', 'name', 'sessionUri', 'chatUri', 'worktreeUri', 'desiredModel', 'appliedModel', 'pendingModel', 'modelError', 'state', 'initialized', 'cursor', 'eventSequence', 'eventCursor', 'pendingEvents', 'turnId', 'activeEventSequence', 'activeEvents', 'error']);
+			const coordinator = object(room.coordinator, 'room.coordinator', ['id', 'name', 'sessionUri', 'chatUri', 'worktreeUri', 'desiredModel', 'appliedModel', 'pendingModel', 'modelError', 'state', 'initialized', 'cursor', 'eventSequence', 'eventCursor', 'pendingEvents', 'nextEventTurnAt', 'turnId', 'activeEventSequence', 'activeEvents', 'error']);
 			identifier(coordinator.id, 'coordinator.id');
 			text(coordinator.name, 'coordinator.name', false);
 			text(coordinator.sessionUri, 'coordinator.sessionUri', false);
@@ -474,6 +474,10 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 			for (const event of pendingEvents) {
 				enumValue(event, ['result', 'verification', 'blocked', 'failed', 'needsInput', 'assignmentCreated', 'assignmentSuperseded', 'assignmentCompleted', 'memberAdded', 'memberRemoved'], 'coordinator.pendingEvent');
 				unique(eventKinds, String(event), 'coordinator.pendingEvent');
+			}
+			if (coordinator.nextEventTurnAt !== undefined) {
+				count(coordinator.nextEventTurnAt, 'coordinator.nextEventTurnAt');
+				check(pendingEvents.length > 0, 'coordinator event timer has no pending events');
 			}
 			optional(coordinator.turnId, identifier, 'coordinator.turnId');
 			if (coordinator.activeEventSequence !== undefined) {

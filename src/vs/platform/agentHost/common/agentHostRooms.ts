@@ -107,6 +107,8 @@ export interface IAgentHostRoomCoordinator {
 	/** Event sequence completed by the coordinator. */
 	readonly eventCursor: number;
 	readonly pendingEvents: readonly AgentHostRoomCoordinatorEventKind[];
+	/** Earliest time at which pending meaningful events may start one coalesced proactive turn. */
+	readonly nextEventTurnAt?: number;
 	readonly turnId?: string;
 	readonly activeEventSequence?: number;
 	readonly activeEvents?: readonly AgentHostRoomCoordinatorEventKind[];

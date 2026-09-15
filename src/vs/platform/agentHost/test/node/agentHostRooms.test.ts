@@ -232,7 +232,7 @@ suite('AgentHostRooms', () => {
 
 	function setup(workerCount = 2, storage = new MemoryRoomStorage(), now?: () => number) {
 		const runtime = new RoomRuntime();
-		const rooms = disposables.add(new AgentHostRooms(storage, runtime, new NullLogService(), now));
+		const rooms = disposables.add(new AgentHostRooms(storage, runtime, new NullLogService(), now, 0));
 		// These suites describe wind-down semantics; continuous rooms are covered separately.
 		const create = (continuous = false) => rooms.createRoom({ title: 'Shared work', goal: 'Measure before changing code', repositoryUri: 'file:///repository', workerCount, continuous });
 		return { storage, runtime, rooms, create };
@@ -468,6 +468,31 @@ suite('AgentHostRooms', () => {
 		for (const member of room.members) {
 			runtime.finish(member.sessionUri);
 		}
+	});
+
+	test('meaningful events wait in one fifteen-minute coordinator window', async () => {
+		const now = 1_000;
+		const runtime = new RoomRuntime();
+		const rooms = disposables.add(new AgentHostRooms(new MemoryRoomStorage(), runtime, new NullLogService(), () => now, 15 * 60 * 1000));
+		const room = await rooms.createRoom({
+			title: 'Coordinator interval',
+			goal: 'Coalesce status reviews',
+			repositoryUri: 'file:///repository',
+			workerCount: 1,
+			continuous: false,
+		});
+		await rooms.ensureCoordinator(room.id);
+		await rooms.addMember(room.id);
+		const coordinator = await rooms.getCoordinator(room.id);
+		assert.deepStrictEqual({
+			pendingEvents: coordinator?.pendingEvents,
+			nextEventTurnAt: coordinator?.nextEventTurnAt,
+			submissions: runtime.submitted,
+		}, {
+			pendingEvents: ['memberAdded'],
+			nextEventTurnAt: now + 15 * 60 * 1000,
+			submissions: [],
+		});
 	});
 
 	test('superseding assignments remain idempotent', async () => {

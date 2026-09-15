@@ -66,6 +66,7 @@ export interface IRoomArtifactContent {
 
 const CONTINUE_ROOM_PROMPT = 'Continue working in the existing collaboration room.';
 const MAX_ACTIVE_COORDINATOR_ASSIGNMENTS = 20;
+const COORDINATOR_EVENT_REVIEW_INTERVAL = 15 * 60 * 1000;
 const CONTINUE_AFTER_TURN_PROMPT = [
 	'Share meaningful completed work with room_publish_result, including evidence, and publish changed code with room_share_patch. Use room_post for focused questions and conversational replies.',
 	'Call room_read with after set to the latest sequence you saw, review peer ideas and feedback, and independently verify a useful peer result when appropriate. Never verify your own result.',
@@ -141,6 +142,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 	private readonly _coordinatorSessions = new Map<string, string>();
 	private readonly _queue = new SequencerByKey<string>();
 	private readonly _timers = new Map<string, ReturnType<typeof setTimeout>>();
+	private readonly _coordinatorTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly _stops = new Map<string, Promise<IAgentHostRoom>>();
 	private readonly _memberStops = new Map<string, Promise<IAgentHostRoom>>();
 	private readonly _coordinatorPreparations = new Map<string, Promise<IAgentHostRoomCoordinator>>();
@@ -155,6 +157,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		private readonly _runtime: IRoomRuntime,
 		private readonly _logService: ILogService,
 		private readonly _now: () => number = Date.now,
+		private readonly _coordinatorReviewInterval = COORDINATOR_EVENT_REVIEW_INTERVAL,
 	) {
 		super();
 		this._register(_runtime);
@@ -197,6 +200,9 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 						activeEventSequence: undefined,
 						activeEvents: undefined,
 						pendingEvents: [...new Set([...record.room.coordinator.pendingEvents, ...(record.room.coordinator.activeEvents ?? [])])],
+						nextEventTurnAt: record.room.coordinator.pendingEvents.length || record.room.coordinator.activeEvents?.length
+							? record.room.coordinator.nextEventTurnAt ?? this._now() + this._coordinatorReviewInterval
+							: undefined,
 						error: localize('rooms.coordinatorInterrupted', "The coordinator turn was interrupted when the host stopped."),
 					} : record.room.coordinator,
 					members: interrupted
@@ -218,6 +224,11 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			}
 			if (restored.room.coordinator) {
 				this._coordinatorSessions.set(restored.room.coordinator.sessionUri, restored.room.id);
+			}
+		}
+		for (const record of this._records.values()) {
+			if (record.room.coordinator?.pendingEvents.length) {
+				this._scheduleCoordinator(record.room.id);
 			}
 		}
 	}
@@ -1661,6 +1672,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					...coordinator,
 					eventSequence: coordinator.eventSequence + 1,
 					pendingEvents: [...new Set([...coordinator.pendingEvents, ...events])],
+					nextEventTurnAt: coordinator.nextEventTurnAt ?? this._now() + this._coordinatorReviewInterval,
 				},
 			},
 		};
@@ -1673,6 +1685,21 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 	}
 
 	private _scheduleCoordinator(roomId: string): void {
+		const coordinator = this._record(roomId).room.coordinator;
+		if (!coordinator?.pendingEvents.length) {
+			this._clearCoordinatorTimer(roomId);
+			return;
+		}
+		if (coordinator.nextEventTurnAt !== undefined && coordinator.nextEventTurnAt > this._now()) {
+			if (!this._coordinatorTimers.has(roomId)) {
+				this._coordinatorTimers.set(roomId, setTimeout(() => {
+					this._coordinatorTimers.delete(roomId);
+					this._scheduleCoordinator(roomId);
+				}, coordinator.nextEventTurnAt - this._now()));
+			}
+			return;
+		}
+		this._clearCoordinatorTimer(roomId);
 		void this._queue.queue(roomId, () => this._admitCoordinator(roomId))
 			.catch(error => this._logService.warn('[AgentHostRooms] Coordinator scheduling failed', error));
 	}
@@ -1695,6 +1722,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					activeEventSequence: coordinator.eventSequence,
 					activeEvents: coordinator.pendingEvents,
 					pendingEvents: [],
+					nextEventTurnAt: undefined,
 					error: undefined,
 				},
 			},
@@ -2004,6 +2032,9 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				pendingEvents: finished && !completed
 					? [...new Set([...coordinator.pendingEvents, ...(coordinator.activeEvents ?? [])])]
 					: coordinator.pendingEvents,
+				nextEventTurnAt: finished && !completed && coordinator.activeEvents?.length
+					? coordinator.nextEventTurnAt ?? this._now() + this._coordinatorReviewInterval
+					: coordinator.nextEventTurnAt,
 				eventCursor: completed && coordinator.activeEventSequence !== undefined
 					? Math.max(coordinator.eventCursor, coordinator.activeEventSequence)
 					: coordinator.eventCursor,
@@ -2154,6 +2185,11 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		this._timers.delete(roomId);
 	}
 
+	private _clearCoordinatorTimer(roomId: string): void {
+		clearTimeout(this._coordinatorTimers.get(roomId));
+		this._coordinatorTimers.delete(roomId);
+	}
+
 	async shutdown(): Promise<void> {
 		await this._ready;
 		this._closed = true;
@@ -2183,6 +2219,9 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 								activeEventSequence: undefined,
 								activeEvents: undefined,
 								pendingEvents: [...new Set([...record.room.coordinator.pendingEvents, ...(record.room.coordinator.activeEvents ?? [])])],
+								nextEventTurnAt: record.room.coordinator.pendingEvents.length || record.room.coordinator.activeEvents?.length
+									? record.room.coordinator.nextEventTurnAt ?? this._now() + this._coordinatorReviewInterval
+									: undefined,
 							},
 						},
 					});
@@ -2197,6 +2236,10 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			clearTimeout(timer);
 		}
 		this._timers.clear();
+		for (const timer of this._coordinatorTimers.values()) {
+			clearTimeout(timer);
+		}
+		this._coordinatorTimers.clear();
 		this._modelChangeVersions.clear();
 		this._coordinatorPreparations.clear();
 		super.dispose();
