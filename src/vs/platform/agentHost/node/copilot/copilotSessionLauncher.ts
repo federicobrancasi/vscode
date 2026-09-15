@@ -32,7 +32,7 @@ import { IAgentHostTerminalManager } from '../agentHostTerminalManager.js';
 import { IAgentHostSessionOpenTelemetry } from '../agentHostSessionOpenTelemetry.js';
 import { IAgentHostRoomsController } from '../agentHostRoomsController.js';
 import { roomExcludedTools } from '../agentHostRoomsTypes.js';
-import { createCopilotRoomTools } from './copilotRoomTools.js';
+import { createCopilotRoomCoordinatorTools, createCopilotRoomTools } from './copilotRoomTools.js';
 import { IByokLmBridgeRegistry } from '../byokLmBridgeRegistry.js';
 import { IByokLmProxyService, type IByokLmProxyHandle } from './byokLmProxyService.js';
 import type { ICopilotMcpServerInfo, ICopilotPluginInfo } from './copilotAgent.js';
@@ -889,9 +889,16 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		// renderer reports no BYOK models), merged into the returned config so both
 		// createSession and resumeSession advertise the models to the runtime.
 		const byok = await this._resolveByokSessionConfig(plan.sessionId);
+		const roomSessionUri = runtime.configurationResource.toString();
+		const isRoomCoordinator = this._rooms.isCoordinatorSessionUri(roomSessionUri);
+		const rooms = this._rooms.isRoomSessionUri(roomSessionUri) || isRoomCoordinator ? this._rooms : undefined;
+		const roomSessionId = AgentSession.id(runtime.configurationResource);
+		const roomTools = !rooms ? [] : isRoomCoordinator
+			? createCopilotRoomCoordinatorTools(roomSessionId, rooms)
+			: createCopilotRoomTools(roomSessionId, rooms);
 		const enableCustomTerminalTool = this._configurationService.getRootValue(copilotCliConfigSchema, CopilotCliConfigKey.EnableCustomTerminalTool) === true;
 		let shellTools: Awaited<ReturnType<typeof createShellTools>> = [];
-		if (enableCustomTerminalTool) {
+		if (enableCustomTerminalTool && !isRoomCoordinator) {
 			if (!plan.shellManager) {
 				throw new Error(`ShellManager is required to launch Copilot session '${plan.sessionId}'`);
 			}
@@ -902,9 +909,6 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		// exception: the SDK validates the session-start `agent:` against `customAgents`
 		// by name, so the selected agent is force-included (see `toSdkSessionCustomAgents`).
 		const pluginsWithoutDirs = plugins.filter(p => !p.pluginDir || p.pluginDir.scheme !== Schemas.file);
-		const rooms = this._rooms.isRoomSessionUri(runtime.configurationResource.toString()) ? this._rooms : undefined;
-		const roomSessionId = AgentSession.id(runtime.configurationResource);
-		const roomTools = rooms ? createCopilotRoomTools(roomSessionId, rooms) : [];
 		const explicitMcpServers = plan.isEphemeral ? [] : plugins.flatMap(plugin => plugin.mcpServers.filter(server =>
 			!plugin.disabledMcpServers?.includes(server.name)
 			&& isMcpServerExplicitlyProjected(server)
@@ -934,13 +938,17 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		});
 		const availableTools = getToolFilterOverride(availableToolsOverride, 'availableTools', modelId, this._logService, plan.sessionId);
 		const excludedTools = getToolFilterOverride(excludedToolsOverride, 'excludedTools', modelId, this._logService, plan.sessionId);
-		const sdkAvailableTools = availableTools && rooms
-			? [...(toSdkToolFilterPatterns(availableTools) ?? []), ...roomTools.map(tool => tool.name)]
-			: toSdkToolFilterPatterns(availableTools);
+		const sdkAvailableTools = isRoomCoordinator
+			? roomTools.map(tool => tool.name)
+			: availableTools && rooms
+				? [...(toSdkToolFilterPatterns(availableTools) ?? []), ...roomTools.map(tool => tool.name)]
+				: toSdkToolFilterPatterns(availableTools);
 		const configuredSdkExcludedTools = plan.isEphemeral
 			? [...(toSdkToolFilterPatterns(excludedTools) ?? []), ...EPHEMERAL_DISABLED_COPILOT_TOOLS]
 			: toSdkToolFilterPatterns(excludedTools);
-		const clientToolNames = filterClientToolNames(clientToolNamesFromSnapshot(plan.snapshot), availableTools, excludedTools);
+		const clientToolNames = isRoomCoordinator
+			? new Set<string>()
+			: filterClientToolNames(clientToolNamesFromSnapshot(plan.snapshot), availableTools, excludedTools);
 		const sdkExcludedTools = clientToolNames.has(SEMANTIC_SEARCH_TOOL_NAME)
 			? configuredSdkExcludedTools
 			: [...new Set([...(configuredSdkExcludedTools ?? []), `builtin:${SEMANTIC_SEARCH_TOOL_NAME}`])];
@@ -965,7 +973,7 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 			&& agentHostModelSupportsToolSearch(effectiveModel?.id)
 			&& clientToolNames.has(CLIENT_TOOL_SEARCH_REFERENCE_NAME);
 		const toolSearchDeferThreshold = normalizeToolSearchDeferThreshold(this._configurationService.getRootValue(copilotCliConfigSchema, CopilotCliConfigKey.ToolSearchDeferThreshold));
-		const tools = [...shellTools, ...runtime.createClientSdkTools(toolSearchActive), ...runtime.createServerSdkTools()];
+		const tools = isRoomCoordinator ? [] : [...shellTools, ...runtime.createClientSdkTools(toolSearchActive), ...runtime.createServerSdkTools()];
 		const promptOverrides = await applyConfiguredPromptOverrides(promptOverrideString, promptOverrideFile, tools, this._fileService, this._logService);
 		const hooks = toSdkHooks(pluginsWithoutDirs.flatMap(p => p.hooks), {
 			onPreToolUse: async input => {

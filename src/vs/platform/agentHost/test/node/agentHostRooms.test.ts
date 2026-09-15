@@ -25,9 +25,9 @@ import { ResolveSessionConfigResult } from '../../common/state/protocol/commands
 import { AgentSession } from '../../common/agentService.js';
 import { AgentHostRooms } from '../../node/agentHostRooms.js';
 import { createAgentHostRoomsChannel } from '../../node/agentHostRoomsChannel.js';
-import { IRoomRecord, IRoomRuntime, IRoomRuntimeEvent, IRoomStorage, RoomContentValidator } from '../../node/agentHostRoomsTypes.js';
+import { IRoomRecord, IRoomRuntime, IRoomRuntimeEvent, IRoomSessionParticipant, IRoomStorage, RoomContentValidator } from '../../node/agentHostRoomsTypes.js';
 import { getRoomMemberModel, validateRoomModelSelection } from '../../node/agentHostRoomsModels.js';
-import { createCopilotRoomTools } from '../../node/copilot/copilotRoomTools.js';
+import { createCopilotRoomCoordinatorTools, createCopilotRoomTools } from '../../node/copilot/copilotRoomTools.js';
 import { createNoopGitService, createNullSessionDataService } from '../common/sessionTestHelpers.js';
 import { MockAgent } from './mockAgent.js';
 import { createTestAgentService, getTestAgentHostRoomsController, getTestAgentServiceComposition, getTestAgentStateManager, registerTestAgentProvider } from './agentServiceTestUtils.js';
@@ -71,8 +71,8 @@ class MemoryRoomStorage implements IRoomStorage {
 	async isRepository(): Promise<boolean> { return true; }
 	async resolveRepository(repositoryUri: string) { return { repositoryUri, baseRevision: 'a'.repeat(40) }; }
 	worktreeUri(roomId: string, memberId: string): string { return `file:///room-worktrees/${roomId}/${memberId}`; }
-	async ensureWorktree(room: IAgentHostRoom, member: IAgentHostRoomMember): Promise<void> {
-		assert.deepStrictEqual(member, room.members.find(candidate => candidate.id === member.id));
+	async ensureWorktree(room: IAgentHostRoom, member: IRoomSessionParticipant): Promise<void> {
+		assert.ok(room.members.some(candidate => candidate.id === member.id) || room.coordinator?.id === member.id);
 		if (this.worktreeError) {
 			throw this.worktreeError;
 		}
@@ -119,9 +119,9 @@ class RoomRuntime extends Disposable implements IRoomRuntime {
 		}
 	}
 	validateModel(model: ModelSelection): void { validateRoomModelSelection(model, this.models); }
-	getModel(member: IAgentHostRoomMember): ModelSelection | undefined { return this.appliedModels.get(member.sessionUri); }
+	getModel(member: IRoomSessionParticipant): ModelSelection | undefined { return this.appliedModels.get(member.sessionUri); }
 	publishModel(): void { }
-	async applyModel(member: IAgentHostRoomMember, model: ModelSelection): Promise<void> {
+	async applyModel(member: IRoomSessionParticipant, model: ModelSelection): Promise<void> {
 		assert.ok(this.isIdle(member.sessionUri), 'A model change cannot affect an active execution');
 		if (equals(this.appliedModels.get(member.sessionUri), model) && !this.modelError) {
 			return;
@@ -134,14 +134,14 @@ class RoomRuntime extends Disposable implements IRoomRuntime {
 		this.appliedModels.set(member.sessionUri, model);
 	}
 
-	async resolveConfiguration(member: IAgentHostRoomMember, configuration?: IAgentHostRoomConfiguration): Promise<ResolveSessionConfigResult> {
+	async resolveConfiguration(member: IRoomSessionParticipant, configuration?: IAgentHostRoomConfiguration): Promise<ResolveSessionConfigResult> {
 		return {
 			schema: platformSessionSchema.toProtocol(),
 			values: { ...(configuration ?? this.configurations.get(member.sessionUri) ?? member.configuration ?? defaultAgentHostRoomConfiguration) },
 		};
 	}
 
-	async applyConfiguration(member: IAgentHostRoomMember): Promise<void> {
+	async applyConfiguration(member: IRoomSessionParticipant): Promise<void> {
 		this.beforeApplyConfiguration?.();
 		if (this.configurationError) {
 			throw this.configurationError;
@@ -149,7 +149,7 @@ class RoomRuntime extends Disposable implements IRoomRuntime {
 		this.configurations.set(member.sessionUri, { ...defaultAgentHostRoomConfiguration, ...member.configuration });
 	}
 
-	async prepare(_room: IAgentHostRoom, member: IAgentHostRoomMember): Promise<void> {
+	async prepare(_room: IAgentHostRoom, member: IRoomSessionParticipant): Promise<void> {
 		this.prepared.push(member.sessionUri);
 		this._preparedWaiters.get(this.prepared.length)?.complete();
 		if (this.blockPrepare) {
@@ -296,6 +296,311 @@ suite('AgentHostRooms', () => {
 		};
 		return { storage, service, provider, rooms, state, configuration, changeConfiguration, whenSent, createdModels, chatModels };
 	}
+
+	test('coordinator identity, model lifecycle, capability, and worker accounting are independent', async () => {
+		const { rooms, runtime, storage } = setup(MAX_ROOM_WORKERS);
+		const room = await rooms.createRoom({
+			title: 'Coordinator',
+			goal: 'Coordinate ten workers',
+			repositoryUri: 'file:///repository',
+			workerCount: MAX_ROOM_WORKERS,
+			coordinatorModel: { id: 'model-a', config: { thinkingLevel: 'high' } },
+		});
+		const coordinator = await rooms.ensureCoordinator(room.id);
+		runtime.active.set(coordinator.sessionUri, 'model-turn');
+		runtime.emit({ sessionUri: coordinator.sessionUri, turnId: 'model-turn', state: 'working' });
+		await whenRoom(rooms, room.id, value => value.coordinator?.turnId === 'model-turn');
+		const pending = await rooms.setCoordinatorModel(room.id, { id: 'model-b', config: { adaptive: true } });
+		runtime.finish(coordinator.sessionUri);
+		const applied = await whenRoom(rooms, room.id, value => value.coordinator?.appliedModel?.id === 'model-b');
+		await assert.rejects(rooms.addMember(room.id), /at most/);
+
+		assert.deepStrictEqual({
+			workers: room.members.length,
+			coordinatorInRoster: room.members.some(member => member.id === coordinator.id),
+			coordinator: {
+				sessionUri: applied.coordinator!.sessionUri,
+				chatUri: applied.coordinator!.chatUri,
+				desiredModel: applied.coordinator!.desiredModel,
+				appliedModel: applied.coordinator!.appliedModel,
+				pendingModel: applied.coordinator!.pendingModel,
+				state: applied.coordinator!.state,
+				initialized: applied.coordinator!.initialized,
+			},
+			pending: { desired: pending.desiredModel, applied: pending.appliedModel, pending: pending.pendingModel },
+			prepared: runtime.prepared,
+			modelChanges: runtime.modelChanges,
+			worktrees: [...storage.worktrees],
+			supportsCoordinator: (await rooms.getCapabilities()).supportsCoordinator,
+		}, {
+			workers: MAX_ROOM_WORKERS,
+			coordinatorInRoster: false,
+			coordinator: {
+				sessionUri: room.coordinator!.sessionUri,
+				chatUri: room.coordinator!.chatUri,
+				desiredModel: { id: 'model-b', config: { adaptive: true } },
+				appliedModel: { id: 'model-b', config: { adaptive: true } },
+				pendingModel: undefined,
+				state: 'idle',
+				initialized: true,
+			},
+			pending: {
+				desired: { id: 'model-b', config: { adaptive: true } },
+				applied: { id: 'model-a', config: { thinkingLevel: 'high' } },
+				pending: { id: 'model-b', config: { adaptive: true } },
+			},
+			prepared: [coordinator.sessionUri, coordinator.sessionUri],
+			modelChanges: [
+				{ sessionUri: coordinator.sessionUri, model: { id: 'model-a', config: { thinkingLevel: 'high' } } },
+				{ sessionUri: coordinator.sessionUri, model: { id: 'model-b', config: { adaptive: true } } },
+			],
+			worktrees: [coordinator.worktreeUri],
+			supportsCoordinator: true,
+		});
+	});
+
+	test('assignments drive pairings and meaningful events coalesce one non-blocking coordinator follow-up', async () => {
+		const { rooms, runtime } = setup(2);
+		const room = await rooms.createRoom({
+			title: 'Coordinator',
+			goal: 'Implement and verify',
+			repositoryUri: 'file:///repository',
+			workerCount: 2,
+			continuous: false,
+		});
+		const coordinator = await rooms.ensureCoordinator(room.id);
+		runtime.active.set(coordinator.sessionUri, 'human-coordinator-turn');
+		runtime.emit({ sessionUri: coordinator.sessionUri, turnId: 'human-coordinator-turn', state: 'working' });
+		await whenRoom(rooms, room.id, value => value.coordinator?.turnId === 'human-coordinator-turn');
+		const tools = createCopilotRoomCoordinatorTools(AgentSession.id(coordinator.sessionUri), rooms);
+		assert.throws(() => rooms.beforeTool(AgentSession.id(coordinator.sessionUri), 'bash'), /only inspect room state/);
+		await tools.find(tool => tool.name === 'room_assign')!.handler!({
+			id: 'pair-parser',
+			assignees: room.members.map(member => member.name),
+			kind: 'work',
+			description: 'Implement and cross-check the parser.',
+			expectedEvidence: ['Focused parser tests', 'A published patch when code changes'],
+			note: 'Pair on the parser and report independent evidence.',
+		}, { sessionId: 'forged', toolCallId: 'assign', toolName: 'room_assign', arguments: {} });
+		await tools.find(tool => tool.name === 'room_post')!.handler!({
+			id: 'coordination-note',
+			text: 'The parser pair is active.',
+		}, { sessionId: 'forged', toolCallId: 'note', toolName: 'room_post', arguments: {} });
+		await runtime.whenSubmitted(2);
+		const assignmentPost = (await rooms.getMessages(room.id)).messages.find(message => message.id === 'pair-parser')!;
+		const coordinationNote = (await rooms.getMessages(room.id)).messages.find(message => message.id === 'coordination-note')!;
+		const [first, second] = room.members.map(member => AgentSession.id(member.sessionUri));
+		await rooms.read(first);
+		await rooms.read(second);
+		await rooms.publishResult(first, {
+			id: 'parser-result',
+			title: 'Parser result',
+			summary: 'The parser passes the focused suite.',
+			outcome: 'success',
+			evidence: ['Focused parser tests passed.'],
+			artifactIds: [],
+			assignmentId: 'pair-parser',
+		});
+		const eventSequence = (await rooms.getCoordinator(room.id))!.eventSequence;
+		await rooms.post(second, { id: 'ordinary-chatter', kind: 'message', text: 'I am reading the parser result.', mentions: [] });
+		const toolSnapshot = await tools.find(tool => tool.name === 'room_coordinator_snapshot')!.handler!(
+			{}, { sessionId: 'forged', toolCallId: 'snapshot', toolName: 'room_coordinator_snapshot', arguments: {} });
+		const snapshot = await rooms.coordinatorSnapshot(AgentSession.id(coordinator.sessionUri));
+		assert.deepStrictEqual(toolSnapshot, snapshot);
+		runtime.finish(coordinator.sessionUri);
+		await runtime.whenSubmitted(3);
+		const followUps = runtime.submitted.filter(submission => submission.sessionUri === coordinator.sessionUri);
+		runtime.finish(coordinator.sessionUri, 'failed');
+		await whenRoom(rooms, room.id, value => value.coordinator?.state === 'failed');
+
+		assert.deepStrictEqual({
+			tools: tools.map(tool => tool.name),
+			coordinationNote: {
+				text: coordinationNote.text,
+				mentions: coordinationNote.mentions,
+				deliveries: coordinationNote.deliveries,
+			},
+			assignmentTargets: {
+				mentions: assignmentPost.mentions,
+				deliveries: assignmentPost.deliveries.map(delivery => delivery.memberId),
+			},
+			eventSequenceAfterChatter: (await rooms.getCoordinator(room.id))!.eventSequence,
+			pairings: snapshot.workers.map(worker => [worker.id, worker.pairedWith]),
+			assignment: snapshot.assignments.map(assignment => ({
+				id: assignment.id,
+				assignees: assignment.assigneeIds,
+				state: assignment.state,
+				completed: assignment.completedAssigneeIds,
+			})),
+			result: snapshot.results.map(result => ({ id: result.id, assignmentId: result.assignmentId, verification: result.verificationState })),
+			followUps: followUps.map(submission => submission.prompt),
+			coordinatorState: (await rooms.getCoordinator(room.id))!.state,
+			pendingEventsAfterFailure: (await rooms.getCoordinator(room.id))!.pendingEvents,
+			roomState: (await rooms.getRoom(room.id)).state,
+		}, {
+			tools: ['room_coordinator_snapshot', 'room_assign', 'room_post'],
+			coordinationNote: {
+				text: 'The parser pair is active.',
+				mentions: [],
+				deliveries: [],
+			},
+			assignmentTargets: {
+				mentions: room.members.map(member => member.id),
+				deliveries: room.members.map(member => member.id),
+			},
+			eventSequenceAfterChatter: eventSequence,
+			pairings: [
+				[room.members[0].id, [room.members[1].id]],
+				[room.members[1].id, [room.members[0].id]],
+			],
+			assignment: [{
+				id: 'pair-parser',
+				assignees: room.members.map(member => member.id),
+				state: 'pending',
+				completed: [room.members[0].id],
+			}],
+			result: [{ id: 'parser-result', assignmentId: 'pair-parser', verification: 'pending' }],
+			followUps: ['Review the new meaningful room events and coordinate the next explicit assignments.'],
+			coordinatorState: 'failed',
+			pendingEventsAfterFailure: ['result'],
+			roomState: 'running',
+		});
+		for (const member of room.members) {
+			runtime.finish(member.sessionUri);
+		}
+	});
+
+	test('superseding assignments remain idempotent', async () => {
+		const { rooms, runtime } = setup(1);
+		const room = await rooms.createRoom({
+			title: 'Redirect',
+			goal: 'Redirect work safely',
+			repositoryUri: 'file:///repository',
+			workerCount: 1,
+			continuous: false,
+		});
+		const coordinator = await rooms.ensureCoordinator(room.id);
+		runtime.active.set(coordinator.sessionUri, 'human-coordinator-turn');
+		runtime.emit({ sessionUri: coordinator.sessionUri, turnId: 'human-coordinator-turn', state: 'working' });
+		await whenRoom(rooms, room.id, value => value.coordinator?.turnId === 'human-coordinator-turn');
+		const sessionId = AgentSession.id(coordinator.sessionUri);
+		await rooms.assign(sessionId, {
+			id: 'initial-work',
+			assignees: [room.members[0].id],
+			kind: 'work',
+			description: 'Inspect the parser.',
+			expectedEvidence: ['Parser evidence'],
+		});
+		const redirect = {
+			id: 'redirected-work',
+			assignees: [room.members[0].id],
+			kind: 'work' as const,
+			description: 'Inspect the tokenizer instead.',
+			expectedEvidence: ['Tokenizer evidence'],
+			supersedes: 'initial-work',
+		};
+		const first = await rooms.assign(sessionId, redirect);
+		const retry = await rooms.assign(sessionId, redirect);
+		const snapshot = await rooms.getCoordinatorSnapshot(room.id);
+		assert.deepStrictEqual({
+			first: first.id,
+			retry: retry.id,
+			assignments: snapshot.assignments.map(assignment => [assignment.id, assignment.state]),
+			messages: (await rooms.getMessages(room.id)).messages.map(message => message.id),
+		}, {
+			first: 'redirected-work',
+			retry: 'redirected-work',
+			assignments: [['initial-work', 'superseded'], ['redirected-work', 'pending']],
+			messages: ['initial-work', 'redirected-work'],
+		});
+		runtime.finish(coordinator.sessionUri);
+		runtime.finish(room.members[0].sessionUri);
+	});
+
+	test('coordinator issues cite only the worker record that describes the blocker', async () => {
+		const { rooms, runtime } = setup(1);
+		const room = await rooms.createRoom({
+			title: 'Evidence',
+			goal: 'Keep evidence attributable',
+			repositoryUri: 'file:///repository',
+			workerCount: 1,
+			continuous: false,
+		});
+		await rooms.ensureCoordinator(room.id);
+		await rooms.startRoom(room.id, { maxTurns: 1 });
+		await runtime.whenSubmitted(1);
+		const sessionId = AgentSession.id(room.members[0].sessionUri);
+		await rooms.read(sessionId);
+		await rooms.post(sessionId, { id: 'unrelated-chatter', kind: 'message', text: 'I checked an older result.', mentions: [] });
+		await rooms.post(sessionId, { id: 'actual-blocker', kind: 'work', text: 'The fixture is unavailable.', mentions: [], blocked: true });
+		const snapshot = await rooms.getCoordinatorSnapshot(room.id);
+		assert.deepStrictEqual({
+			issues: snapshot.issues,
+			unownedWork: snapshot.unownedWork,
+		}, {
+			issues: [{
+				memberId: room.members[0].id,
+				kind: 'blocked',
+				description: 'The fixture is unavailable.',
+				evidenceIds: ['actual-blocker'],
+			}],
+			unownedWork: [{
+				id: 'room-goal',
+				description: 'Keep evidence attributable',
+				evidenceIds: [],
+			}, {
+				id: `worker-work:${room.members[0].id}`,
+				description: 'The fixture is unavailable.',
+				memberId: room.members[0].id,
+				evidenceIds: ['actual-blocker'],
+			}],
+		});
+		runtime.finish(room.members[0].sessionUri);
+	});
+
+	test('coordinator snapshots bound superseded history and model-facing text', async () => {
+		const { rooms, runtime } = setup(1);
+		const room = await rooms.createRoom({
+			title: 'Bounded snapshot',
+			goal: 'Keep coordinator prompts bounded',
+			repositoryUri: 'file:///repository',
+			workerCount: 1,
+			continuous: false,
+		});
+		const coordinator = await rooms.ensureCoordinator(room.id);
+		runtime.active.set(coordinator.sessionUri, 'human-coordinator-turn');
+		runtime.emit({ sessionUri: coordinator.sessionUri, turnId: 'human-coordinator-turn', state: 'working' });
+		await whenRoom(rooms, room.id, value => value.coordinator?.turnId === 'human-coordinator-turn');
+		const sessionId = AgentSession.id(coordinator.sessionUri);
+		for (let index = 0; index < 60; index++) {
+			await rooms.assign(sessionId, {
+				id: `assignment-${index}`,
+				assignees: [room.members[0].id],
+				kind: 'work',
+				description: 'd'.repeat(3000),
+				expectedEvidence: ['e'.repeat(1500)],
+				...(index ? { supersedes: `assignment-${index - 1}` } : {}),
+			});
+		}
+		const snapshot = await rooms.getCoordinatorSnapshot(room.id);
+		assert.deepStrictEqual({
+			assignments: snapshot.assignments.length,
+			first: snapshot.assignments[0].id,
+			last: snapshot.assignments.at(-1)?.id,
+			descriptionLength: snapshot.assignments.at(-1)?.description.length,
+			evidenceLength: snapshot.assignments.at(-1)?.expectedEvidence[0].length,
+			evidenceIds: snapshot.evidenceIds.length,
+		}, {
+			assignments: 50,
+			first: 'assignment-10',
+			last: 'assignment-59',
+			descriptionLength: 2000,
+			evidenceLength: 1000,
+			evidenceIds: 50,
+		});
+		runtime.finish(coordinator.sessionUri);
+		runtime.finish(room.members[0].sessionUri);
+	});
 
 	suite('member models', () => {
 		test('three peers retain distinct model IDs and SDK configuration before creation and after starting', async () => {
@@ -837,11 +1142,26 @@ suite('AgentHostRooms', () => {
 		for (const configuration of [null, [], { mode: 'invalid' }, { autoApprove: true }, { sandboxEnabled: 'disabled' }, { isolation: 'folder' }, { workingDirectories: [] }]) {
 			await assert.rejects(channel.call('room-client', 'setRoomConfiguration', [room.id, configuration]), /Invalid/);
 		}
-		for (const command of ['setMemberConfiguration', '_setConfiguration', 'getMemberModelForChat', 'setMemberModelForChat', '_applyMemberModel', '_binding', 'isRoomSessionUri', 'beforeTool']) {
+		for (const command of ['setMemberConfiguration', '_setConfiguration', 'getMemberModelForChat', 'setMemberModelForChat', '_applyMemberModel', '_binding', 'isRoomSessionUri', 'isCoordinatorSessionUri', 'getCoordinatorTurnSnapshot', 'beforeTool', 'assign']) {
 			await assert.rejects(channel.call('room-client', command, [room.members[0].sessionUri, { mode: 'plan' }]), /Unknown room method/);
 		}
 		await channel.call('room-client', 'setRoomConfiguration', [room.id, { mode: 'plan' }]);
-		assert.deepStrictEqual((await rooms.getRoomConfiguration(room.id)).values, { ...newAgentHostRoomConfiguration, mode: 'plan' });
+		await channel.call('room-client', 'ensureCoordinator', [room.id]);
+		await channel.call('room-client', 'getCoordinatorSnapshot', [room.id]);
+		const coordinator = await rooms.getCoordinator(room.id);
+		const snapshot = await rooms.getCoordinatorSnapshot(room.id);
+		const capabilities = await rooms.getCapabilities();
+		assert.deepStrictEqual({
+			configuration: (await rooms.getRoomConfiguration(room.id)).values,
+			coordinator: coordinator!.id,
+			snapshot: snapshot.coordinator.id,
+			capability: capabilities.supportsCoordinator,
+		}, {
+			configuration: { ...newAgentHostRoomConfiguration, mode: 'plan' },
+			coordinator: room.coordinator!.id,
+			snapshot: room.coordinator!.id,
+			capability: true,
+		});
 	});
 
 	test('two preserved sessions apply room and individual choices immediately and retain them after Stop and Resume', async () => {
@@ -1880,6 +2200,7 @@ suite('AgentHostRooms', () => {
 		assert.doesNotThrow(() => rooms.beforeTool(sessionId, 'bash'));
 		assert.throws(() => rooms.beforeTool(sessionId, 'task'), /nested agents/);
 		assert.throws(() => rooms.beforeTool(sessionId, 'search_code_subagent'), /nested agents/);
+		assert.throws(() => rooms.beforeTool(sessionId, 'room_assign'), /Only the room coordinator/);
 		await rooms.post(sessionId, { id: 'finding', kind: 'finding', text: 'The baseline is 20ms', mentions: [] });
 		runtime.finish(member.sessionUri);
 		await runtime.whenSubmitted(2);

@@ -12,13 +12,14 @@ import { generateUuid } from '../../../base/common/uuid.js';
 import { localize } from '../../../nls.js';
 import { ILogService } from '../../log/common/log.js';
 import { generateAgentHostRoomMemberName, isAgentHostRoomMemberName } from '../common/agentHostRoomNames.js';
-import { AgentHostRoomMessageKind, AgentHostRoomVerificationState, defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomPublishResultOptions, IAgentHostRoomsService, IAgentHostRoomVerifyResultOptions, MAX_ROOM_WORKERS, newAgentHostRoomConfiguration } from '../common/agentHostRooms.js';
+import { AgentHostRoomCoordinatorEventKind, AgentHostRoomMessageKind, AgentHostRoomVerificationState, defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomAssignOptions, IAgentHostRoomConfiguration, IAgentHostRoomCoordinator, IAgentHostRoomCoordinatorSnapshot, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMember, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomPublishResultOptions, IAgentHostRoomsService, IAgentHostRoomVerifyResultOptions, MAX_ROOM_WORKERS, newAgentHostRoomConfiguration } from '../common/agentHostRooms.js';
 import { AgentSession } from '../common/agentService.js';
 import { ResolveSessionConfigResult } from '../common/state/protocol/commands.js';
 import { buildDefaultChatUri, ModelSelection } from '../common/state/sessionState.js';
 import { intersectRoomConfigurations, parseRoomConfiguration, validateRoomConfigurationChange } from './agentHostRoomsConfiguration.js';
+import { projectAgentHostRoomCoordinatorSnapshot } from './agentHostRoomCoordinator.js';
 import { getRoomMemberModel, parseRoomModelSelection } from './agentHostRoomsModels.js';
-import { IRoomMemberExecution, IRoomRecord, IRoomRuntime, IRoomRuntimeEvent, IRoomStorage, roomExcludedTools } from './agentHostRoomsTypes.js';
+import { IRoomMemberExecution, IRoomRecord, IRoomRuntime, IRoomRuntimeEvent, IRoomSessionParticipant, IRoomStorage, roomCoordinatorExclusiveTools, roomCoordinatorTools, roomExcludedTools } from './agentHostRoomsTypes.js';
 
 export interface IRoomAgentPost extends IAgentHostRoomPostOptions {
 	readonly kind?: 'message' | 'work' | 'finding';
@@ -35,6 +36,13 @@ export interface IRoomSessionTools {
 	reviewResult(sessionId: string, options: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage>;
 	sharePatch(sessionId: string, title: string): Promise<IAgentHostRoomArtifact>;
 	beforeTool(sessionId: string, toolName: string, expectedTurnId?: string): void;
+}
+
+export interface IRoomCoordinatorTools {
+	isCoordinatorSession(sessionId: string): boolean;
+	coordinatorSnapshot(sessionId: string): Promise<IAgentHostRoomCoordinatorSnapshot>;
+	assign(sessionId: string, options: IAgentHostRoomAssignOptions): Promise<IAgentHostRoomMessage>;
+	postCoordinationNote(sessionId: string, id: string, text: string): Promise<IAgentHostRoomMessage>;
 }
 
 export interface IRoomContext {
@@ -57,6 +65,7 @@ export interface IRoomArtifactContent {
 }
 
 const CONTINUE_ROOM_PROMPT = 'Continue working in the existing collaboration room.';
+const MAX_ACTIVE_COORDINATOR_ASSIGNMENTS = 20;
 const CONTINUE_AFTER_TURN_PROMPT = [
 	'Share meaningful completed work with room_publish_result, including evidence, and publish changed code with room_share_patch. Use room_post for focused questions and conversational replies.',
 	'Call room_read with after set to the latest sequence you saw, review peer ideas and feedback, and independently verify a useful peer result when appropriate. Never verify your own result.',
@@ -123,16 +132,18 @@ function buildRoomTurnPrompt(room: IAgentHostRoom, member: IAgentHostRoomMember,
  * The room is a separate durable authority, not an AHP queued message.
  * All admissions are journalled before touching the runtime.
  */
-export class AgentHostRooms extends Disposable implements IAgentHostRoomsService, IRoomSessionTools {
+export class AgentHostRooms extends Disposable implements IAgentHostRoomsService, IRoomSessionTools, IRoomCoordinatorTools {
 	declare readonly _serviceBrand: undefined;
 	private readonly _onDidChangeRoom = this._register(new Emitter<IAgentHostRoom>());
 	readonly onDidChangeRoom = this._onDidChangeRoom.event;
 	private readonly _records = new Map<string, IRoomRecord>();
 	private readonly _sessions = new Map<string, { roomId: string; memberId: string }>();
+	private readonly _coordinatorSessions = new Map<string, string>();
 	private readonly _queue = new SequencerByKey<string>();
 	private readonly _timers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly _stops = new Map<string, Promise<IAgentHostRoom>>();
 	private readonly _memberStops = new Map<string, Promise<IAgentHostRoom>>();
+	private readonly _coordinatorPreparations = new Map<string, Promise<IAgentHostRoomCoordinator>>();
 	private readonly _modelChangeVersions = new Map<string, number>();
 	private readonly _resumePrompts = new Set<string>();
 	private readonly _ready: Promise<void>;
@@ -159,6 +170,10 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				...stored,
 				room: {
 					...stored.room,
+					coordinator: stored.room.coordinator ? {
+						...stored.room.coordinator,
+						chatUri: stored.room.coordinator.chatUri ?? buildDefaultChatUri(stored.room.coordinator.sessionUri),
+					} : undefined,
 					members: stored.room.members.map(member => ({
 						...member, chatUri: member.chatUri ?? buildDefaultChatUri(member.sessionUri),
 						...(member.model?.trim() && !member.model.includes('\0') && member.modelSelection === undefined && member.pendingModel === undefined
@@ -170,24 +185,39 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				},
 			};
 			const interrupted = record.executions.some(execution => execution.turnId) || record.room.state === 'running' || record.room.state === 'stopping';
-			const restored: IRoomRecord = interrupted ? {
+			const coordinatorInterrupted = record.room.coordinator?.turnId !== undefined;
+			const restored: IRoomRecord = interrupted || coordinatorInterrupted ? {
 				...record,
 				room: {
-					...record.room, revision: record.room.revision + 1, updatedAt: this._now(), state: 'interrupted',
-					members: record.room.members.map(member => ['starting', 'working', 'needsInput', 'stopping'].includes(member.state) ? { ...member, state: 'interrupted', activity: undefined } : member),
+					...record.room, revision: record.room.revision + 1, updatedAt: this._now(), state: interrupted ? 'interrupted' : record.room.state,
+					coordinator: coordinatorInterrupted ? {
+						...record.room.coordinator,
+						state: 'interrupted',
+						turnId: undefined,
+						activeEventSequence: undefined,
+						activeEvents: undefined,
+						pendingEvents: [...new Set([...record.room.coordinator.pendingEvents, ...(record.room.coordinator.activeEvents ?? [])])],
+						error: localize('rooms.coordinatorInterrupted', "The coordinator turn was interrupted when the host stopped."),
+					} : record.room.coordinator,
+					members: interrupted
+						? record.room.members.map(member => ['starting', 'working', 'needsInput', 'stopping'].includes(member.state) ? { ...member, state: 'interrupted', activity: undefined } : member)
+						: record.room.members,
 				},
-				executions: record.executions.map(execution => ({ ...execution, turnId: undefined, runId: undefined })),
-				messages: record.messages.map(message => ({
+				executions: interrupted ? record.executions.map(execution => ({ ...execution, turnId: undefined, runId: undefined })) : record.executions,
+				messages: interrupted ? record.messages.map(message => ({
 					...message,
 					deliveries: message.deliveries.map(delivery => ['submitted', 'steering', 'delivered'].includes(delivery.state) ? { ...delivery, state: 'interrupted' } : delivery),
-				})),
+				})) : record.messages,
 			} : record;
-			if (interrupted) {
+			if (interrupted || coordinatorInterrupted) {
 				await this._storage.save(restored);
 			}
 			this._records.set(restored.room.id, restored);
 			for (const member of restored.room.members) {
 				this._sessions.set(member.sessionUri, { roomId: restored.room.id, memberId: member.id });
+			}
+			if (restored.room.coordinator) {
+				this._coordinatorSessions.set(restored.room.coordinator.sessionUri, restored.room.id);
 			}
 		}
 	}
@@ -208,6 +238,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			supportsMemberModels: true,
 			supportsStructuredResults: true,
 			supportsResultVerification: true,
+			supportsCoordinator: true,
 		};
 	}
 
@@ -223,6 +254,126 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 	async getRoom(roomId: string): Promise<IAgentHostRoom> {
 		await this._ready;
 		return this._record(roomId).room;
+	}
+
+	async ensureCoordinator(roomId: string): Promise<IAgentHostRoomCoordinator> {
+		await this._ready;
+		this._assertOpen();
+		const existing = this._coordinatorPreparations.get(roomId);
+		if (existing) {
+			return existing;
+		}
+		const preparation = this._ensureCoordinator(roomId);
+		this._coordinatorPreparations.set(roomId, preparation);
+		try {
+			return await preparation;
+		} finally {
+			this._coordinatorPreparations.delete(roomId);
+		}
+	}
+
+	private async _ensureCoordinator(roomId: string): Promise<IAgentHostRoomCoordinator> {
+		let coordinator = await this._queue.queue(roomId, async () => {
+			let record = this._record(roomId);
+			if (!record.room.coordinator) {
+				const id = generateUuid();
+				const sessionUri = AgentSession.uri('copilotcli', generateUuid()).toString();
+				record = await this._save({
+					...record,
+					room: {
+						...record.room,
+						coordinator: {
+							id,
+							name: localize('rooms.coordinatorName', "Coordinator"),
+							sessionUri,
+							chatUri: buildDefaultChatUri(sessionUri),
+							worktreeUri: this._storage.worktreeUri(roomId, id),
+							state: 'pending',
+							initialized: false,
+							cursor: 0,
+							eventSequence: 0,
+							eventCursor: 0,
+							pendingEvents: [],
+						},
+					},
+				});
+				this._coordinatorSessions.set(sessionUri, roomId);
+			}
+			return record.room.coordinator!;
+		});
+		const participant = this._coordinatorParticipant(coordinator);
+		try {
+			await this._storage.ensureWorktree(this._record(roomId).room, participant, coordinator.initialized);
+			await this._runtime.prepare(this._record(roomId).room, participant, coordinator.initialized);
+			await this._runtime.applyConfiguration(participant);
+			coordinator = await this._queue.queue(roomId, async () => {
+				let record = this._record(roomId);
+				record = await this._applyCoordinatorModel(record);
+				const prepared = {
+					...record.room.coordinator!,
+					initialized: true,
+					state: 'idle' as const,
+					error: undefined,
+				};
+				return (await this._save({ ...record, room: { ...record.room, coordinator: prepared } })).room.coordinator!;
+			});
+		} catch (error) {
+			await this._queue.queue(roomId, async () => {
+				const record = this._record(roomId);
+				if (!record.room.coordinator) {
+					return;
+				}
+				await this._save({
+					...record,
+					room: {
+						...record.room,
+						coordinator: { ...record.room.coordinator, state: 'offline', turnId: undefined, activeEventSequence: undefined, activeEvents: undefined, error: String(error) },
+					},
+				});
+			});
+			throw error;
+		}
+		this._scheduleCoordinator(roomId);
+		return coordinator;
+	}
+
+	async getCoordinator(roomId: string): Promise<IAgentHostRoomCoordinator | undefined> {
+		await this._ready;
+		return this._record(roomId).room.coordinator;
+	}
+
+	async setCoordinatorModel(roomId: string, model: ModelSelection | undefined): Promise<IAgentHostRoomCoordinator> {
+		await this._ready;
+		this._assertOpen();
+		const selection = parseRoomModelSelection(model ?? { id: 'auto' });
+		this._runtime.validateModel(selection);
+		return this._queue.queue(roomId, async () => {
+			let record = this._record(roomId);
+			if (!record.room.coordinator) {
+				throw new Error(localize('rooms.noCoordinator', "The room coordinator has not been created."));
+			}
+			const current = record.room.coordinator;
+			if (equals(current.desiredModel, selection) && !current.modelError) {
+				return current;
+			}
+			record = await this._save({
+				...record,
+				room: {
+					...record.room,
+					coordinator: { ...current, desiredModel: selection, pendingModel: selection, modelError: undefined },
+				},
+			});
+			this._runtime.publishModel(this._coordinatorParticipant(record.room.coordinator!));
+			if (record.room.coordinator!.initialized && !record.room.coordinator!.turnId && this._runtime.isIdle(record.room.coordinator!.sessionUri)) {
+				record = await this._applyCoordinatorModel(record);
+			}
+			return record.room.coordinator!;
+		});
+	}
+
+	async getCoordinatorSnapshot(roomId: string): Promise<IAgentHostRoomCoordinatorSnapshot> {
+		await this._ready;
+		return projectAgentHostRoomCoordinatorSnapshot(this._record(roomId));
 	}
 
 	async setMemberModel(roomId: string, memberId: string, model: ModelSelection | undefined): Promise<IAgentHostRoom> {
@@ -318,6 +469,50 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		return saved;
 	}
 
+	private _coordinatorParticipant(coordinator: IAgentHostRoomCoordinator): IRoomSessionParticipant {
+		return {
+			id: coordinator.id,
+			sessionUri: coordinator.sessionUri,
+			chatUri: coordinator.chatUri,
+			worktreeUri: coordinator.worktreeUri,
+			model: coordinator.desiredModel?.id,
+			modelSelection: coordinator.appliedModel,
+			pendingModel: coordinator.pendingModel,
+			configuration: { ...newAgentHostRoomConfiguration },
+		};
+	}
+
+	private async _applyCoordinatorModel(record: IRoomRecord): Promise<IRoomRecord> {
+		const coordinator = record.room.coordinator;
+		if (!coordinator) {
+			return record;
+		}
+		const participant = this._coordinatorParticipant(coordinator);
+		let applied: ModelSelection | undefined;
+		try {
+			const requested = coordinator.pendingModel ?? coordinator.desiredModel ?? this._runtime.getModel(participant);
+			if (requested) {
+				this._runtime.validateModel(requested);
+				await this._runtime.applyModel(participant, requested);
+			}
+			applied = requested ?? this._runtime.getModel(participant);
+		} catch (error) {
+			await this._save({
+				...record,
+				room: {
+					...record.room,
+					coordinator: { ...coordinator, modelError: String(error) },
+				},
+			});
+			throw error;
+		}
+		const updated = { ...coordinator, appliedModel: applied, pendingModel: undefined, modelError: undefined };
+		return equals(coordinator, updated) ? record : this._save({
+			...record,
+			room: { ...record.room, coordinator: updated },
+		});
+	}
+
 	async getRoomConfiguration(roomId: string): Promise<ResolveSessionConfigResult> {
 		await this._ready;
 		return this._queue.queue(roomId, async () => intersectRoomConfigurations(
@@ -393,6 +588,10 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 		const memberNames = resolveRoomMemberNames(options.memberNames, options.workerCount);
 		const fallback = options.model === undefined ? undefined : parseRoomModelSelection({ id: options.model });
+		const coordinatorModel = options.coordinatorModel === undefined ? undefined : parseRoomModelSelection(options.coordinatorModel);
+		if (coordinatorModel) {
+			this._runtime.validateModel(coordinatorModel);
+		}
 		const models = Array.from({ length: options.workerCount }, (_, index) => {
 			const selected = options.memberModels?.[index];
 			const model = selected === undefined ? fallback : parseRoomModelSelection(selected);
@@ -409,6 +608,23 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 		const id = generateUuid();
 		const now = this._now();
+		const coordinatorId = generateUuid();
+		const coordinatorSessionUri = AgentSession.uri('copilotcli', generateUuid()).toString();
+		const coordinator: IAgentHostRoomCoordinator = {
+			id: coordinatorId,
+			name: localize('rooms.coordinatorName', "Coordinator"),
+			sessionUri: coordinatorSessionUri,
+			chatUri: buildDefaultChatUri(coordinatorSessionUri),
+			worktreeUri: this._storage.worktreeUri(id, coordinatorId),
+			desiredModel: coordinatorModel,
+			pendingModel: coordinatorModel,
+			state: 'pending',
+			initialized: false,
+			cursor: 0,
+			eventSequence: 0,
+			eventCursor: 0,
+			pendingEvents: [],
+		};
 		const members: IAgentHostRoomMember[] = Array.from({ length: options.workerCount }, (_, index) => {
 			const memberId = generateUuid();
 			const sessionUri = AgentSession.uri('copilotcli', generateUuid()).toString();
@@ -421,7 +637,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		const room: IAgentHostRoom = {
 			id, title: options.title.trim(), goal: options.goal.trim(), instructions: options.instructions ?? '',
 			...repository, createdAt: now, updatedAt: now, revision: 1, state: 'created',
-			members, artifacts: [], latestMessageSequence: 0,
+			coordinator, members, artifacts: [], latestMessageSequence: 0,
 		};
 		const record: IRoomRecord = {
 			version: 1, room, messages: [],
@@ -432,6 +648,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		for (const member of members) {
 			this._sessions.set(member.sessionUri, { roomId: id, memberId: member.id });
 		}
+		this._coordinatorSessions.set(coordinator.sessionUri, id);
 		this._onDidChangeRoom.fire(room);
 		return room;
 	}
@@ -545,10 +762,16 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				},
 				messages: [...record.messages, message],
 			};
-			await this._save(author ? updated : this._wakeHumanRecipients(updated, mentions));
+			const persisted = author && options.blocked === true
+				? this._withCoordinatorEvents(updated, ['blocked'])
+				: author ? updated : this._wakeHumanRecipients(updated, mentions);
+			await this._save(persisted);
 			return message;
 		});
 		this._schedule(roomId);
+		if (memberId && options.blocked === true) {
+			this._scheduleCoordinator(roomId);
+		}
 		return message;
 	}
 
@@ -801,15 +1024,16 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				worktreeUri: this._storage.worktreeUri(roomId, memberId),
 				configuration: { ...newAgentHostRoomConfiguration },
 			};
-			const saved = await this._save({
+			const saved = await this._save(this._withCoordinatorEvents({
 				...record,
 				room: { ...record.room, members: [...record.room.members, member] },
 				executions: [...record.executions, { memberId, initialized: false, needsTurn: true }],
-			});
+			}, ['memberAdded']));
 			this._sessions.set(sessionUri, { roomId, memberId });
 			return saved.room;
 		});
 		this._schedule(roomId);
+		this._scheduleCoordinator(roomId);
 		return room;
 	}
 
@@ -833,7 +1057,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 		const room = await this._queue.queue(roomId, async () => {
 			const current = this._record(roomId);
-			return (await this._save({
+			return (await this._save(this._withCoordinatorEvents({
 				...current,
 				room: {
 					...current.room,
@@ -842,10 +1066,11 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				},
 				executions: current.executions.map(execution => execution.memberId === memberId
 					? { ...execution, needsTurn: false, turnId: undefined, runId: undefined } : execution),
-			})).room;
+			}, ['memberRemoved']))).room;
 		});
 		this._resumePrompts.delete(memberId);
 		this._schedule(roomId);
+		this._scheduleCoordinator(roomId);
 		return room;
 	}
 
@@ -897,6 +1122,199 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 
 	isRoomSessionUri(sessionUri: string): boolean {
 		return this._sessions.has(sessionUri);
+	}
+
+	isCoordinatorSession(sessionId: string): boolean {
+		return this._coordinatorSessions.has(AgentSession.uri('copilotcli', sessionId).toString());
+	}
+
+	isCoordinatorSessionUri(sessionUri: string): boolean {
+		return this._coordinatorSessions.has(sessionUri);
+	}
+
+	isCoordinatorChat(sessionUri: string, chatUri: string): boolean {
+		const roomId = this._coordinatorSessions.get(sessionUri);
+		return roomId !== undefined && this._record(roomId).room.coordinator?.chatUri === chatUri;
+	}
+
+	isCoordinatorAdmittedTurn(sessionUri: string, chatUri: string, turnId: string): boolean {
+		const roomId = this._coordinatorSessions.get(sessionUri);
+		const coordinator = roomId === undefined ? undefined : this._record(roomId).room.coordinator;
+		return coordinator?.chatUri === chatUri && coordinator.turnId === turnId;
+	}
+
+	isCoordinatorDirectTurnAvailable(sessionUri: string, chatUri: string): boolean {
+		const roomId = this._coordinatorSessions.get(sessionUri);
+		const coordinator = roomId === undefined ? undefined : this._record(roomId).room.coordinator;
+		return coordinator?.chatUri === chatUri && coordinator.turnId === undefined;
+	}
+
+	async getCoordinatorModelForChat(sessionUri: string, chatUri: string): Promise<ModelSelection | undefined> {
+		await this._ready;
+		const roomId = this._coordinatorSessions.get(sessionUri);
+		const coordinator = roomId === undefined ? undefined : this._record(roomId).room.coordinator;
+		return coordinator?.chatUri === chatUri ? coordinator.desiredModel ?? coordinator.appliedModel : undefined;
+	}
+
+	async setCoordinatorModelForChat(sessionUri: string, chatUri: string, model: ModelSelection): Promise<void> {
+		await this._ready;
+		const roomId = this._coordinatorSessions.get(sessionUri);
+		if (roomId !== undefined && this._record(roomId).room.coordinator?.chatUri === chatUri) {
+			await this.setCoordinatorModel(roomId, model);
+		}
+	}
+
+	async getCoordinatorTurnSnapshot(sessionUri: string, chatUri: string, turnId: string): Promise<IAgentHostRoomCoordinatorSnapshot | undefined> {
+		await this._ready;
+		const roomId = this._coordinatorSessions.get(sessionUri);
+		if (roomId === undefined) {
+			return undefined;
+		}
+		return this._queue.queue(roomId, async () => {
+			let record = this._record(roomId);
+			const coordinator = record.room.coordinator;
+			if (!coordinator || coordinator.chatUri !== chatUri || (coordinator.turnId !== undefined && coordinator.turnId !== turnId)) {
+				return undefined;
+			}
+			const snapshot = projectAgentHostRoomCoordinatorSnapshot(record);
+			if (coordinator.cursor < record.room.latestMessageSequence) {
+				record = await this._save({
+					...record,
+					room: { ...record.room, coordinator: { ...coordinator, cursor: record.room.latestMessageSequence } },
+				});
+			}
+			return snapshot;
+		});
+	}
+
+	async coordinatorSnapshot(sessionId: string): Promise<IAgentHostRoomCoordinatorSnapshot> {
+		await this._ready;
+		this.beforeTool(sessionId, 'room_coordinator_snapshot');
+		const roomId = this._coordinatorBinding(sessionId);
+		return projectAgentHostRoomCoordinatorSnapshot(this._record(roomId));
+	}
+
+	async assign(sessionId: string, options: IAgentHostRoomAssignOptions): Promise<IAgentHostRoomMessage> {
+		await this._ready;
+		this.beforeTool(sessionId, 'room_assign');
+		const roomId = this._coordinatorBinding(sessionId);
+		const message = await this._queue.queue(roomId, async () => {
+			this._assertOpen();
+			let record = this._record(roomId);
+			const coordinator = record.room.coordinator!;
+			this._messageId(options.id);
+			this._text(options.description, 8000);
+			const expectedEvidence = this._evidence(options.expectedEvidence);
+			const existing = record.messages.find(candidate => candidate.id === options.id);
+			if (options.kind !== 'work' && options.kind !== 'verification') {
+				throw new Error(localize('rooms.invalidAssignmentKind', "Choose a work or verification assignment."));
+			}
+			if (!Array.isArray(options.assignees) || options.assignees.length < 1 || options.assignees.length > MAX_ROOM_WORKERS) {
+				throw new Error(localize('rooms.invalidAssignmentAssignees', "Assign one or more current room members."));
+			}
+			const assigneeIds = [...new Set(options.assignees.map(value => {
+				const member = record.room.members.find(candidate => !candidate.removed && (candidate.id === value || candidate.name.toLowerCase() === String(value).toLowerCase()));
+				if (!member) {
+					throw new Error(localize('rooms.invalidAssignmentAssignee', "An assignment assignee is not a current room member."));
+				}
+				return member.id;
+			}))];
+			if (assigneeIds.length !== options.assignees.length) {
+				throw new Error(localize('rooms.duplicateAssignmentAssignee', "Assignment assignees must be unique."));
+			}
+			const resultMessage = options.resultId === undefined ? undefined : record.messages.find(candidate => candidate.id === options.resultId && candidate.result);
+			if ((options.kind === 'verification') !== !!resultMessage) {
+				throw new Error(localize('rooms.assignmentResult', "Verification assignments require an existing structured result; work assignments must not include one."));
+			}
+			if (resultMessage && assigneeIds.includes(resultMessage.authorId)) {
+				throw new Error(localize('rooms.assignmentSelfVerification', "A result author cannot be assigned to verify their own result."));
+			}
+			const superseded = options.supersedes === undefined ? undefined : record.messages.find(candidate => candidate.id === options.supersedes && candidate.assignment);
+			if (options.supersedes !== undefined && (!superseded || record.messages.some(candidate => candidate.id !== options.id && candidate.assignment?.supersedes === options.supersedes))) {
+				throw new Error(localize('rooms.assignmentSupersedes', "Choose a current assignment to supersede."));
+			}
+			if (options.note !== undefined) {
+				this._text(options.note, 32000);
+			}
+			const assignment = {
+				assigneeIds,
+				kind: options.kind,
+				description: options.description,
+				expectedEvidence,
+				resultId: options.resultId,
+				supersedes: options.supersedes,
+				note: options.note,
+			} as const;
+			if (existing) {
+				if (existing.authorId !== coordinator.id || existing.kind !== 'work' || !equals(existing.assignment, assignment)) {
+					throw new Error(localize('rooms.messageConflict', "This message ID is already used by a different message."));
+				}
+				return existing;
+			}
+			if (!options.supersedes && projectAgentHostRoomCoordinatorSnapshot(record).assignments.filter(candidate => candidate.state === 'pending').length >= MAX_ACTIVE_COORDINATOR_ASSIGNMENTS) {
+				throw new Error(localize('rooms.tooManyActiveAssignments', "Supersede or complete an existing assignment before creating more coordinator work."));
+			}
+			const message: IAgentHostRoomMessage = {
+				id: options.id,
+				sequence: record.room.latestMessageSequence + 1,
+				authorId: coordinator.id,
+				authorName: coordinator.name,
+				authorKind: 'agent',
+				kind: 'work',
+				text: options.note ?? options.description,
+				timestamp: this._now(),
+				mentions: assigneeIds,
+				assignment,
+				deliveries: assigneeIds.map(memberId => ({ memberId, state: 'pending' })),
+			};
+			record = this._wakeHumanRecipients({
+				...record,
+				room: { ...record.room, latestMessageSequence: message.sequence },
+				messages: [...record.messages, message],
+			}, assigneeIds);
+			await this._save(record);
+			return message;
+		});
+		this._schedule(roomId);
+		return message;
+	}
+
+	async postCoordinationNote(sessionId: string, id: string, text: string): Promise<IAgentHostRoomMessage> {
+		await this._ready;
+		this.beforeTool(sessionId, 'room_post');
+		const roomId = this._coordinatorBinding(sessionId);
+		return this._queue.queue(roomId, async () => {
+			this._assertOpen();
+			const record = this._record(roomId);
+			const coordinator = record.room.coordinator!;
+			this._messageId(id);
+			this._text(text, 32000);
+			const existing = record.messages.find(message => message.id === id);
+			if (existing) {
+				if (existing.authorId !== coordinator.id || existing.kind !== 'message' || existing.text !== text || existing.assignment) {
+					throw new Error(localize('rooms.messageConflict', "This message ID is already used by a different message."));
+				}
+				return existing;
+			}
+			const message: IAgentHostRoomMessage = {
+				id,
+				sequence: record.room.latestMessageSequence + 1,
+				authorId: coordinator.id,
+				authorName: coordinator.name,
+				authorKind: 'agent',
+				kind: 'message',
+				text,
+				timestamp: this._now(),
+				mentions: [],
+				deliveries: [],
+			};
+			await this._save({
+				...record,
+				room: { ...record.room, latestMessageSequence: message.sequence },
+				messages: [...record.messages, message],
+			});
+			return message;
+		});
 	}
 
 	isAdmittedTurn(sessionUri: string, chatUri: string, turnId: string): boolean {
@@ -987,9 +1405,9 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 	}
 
 	private async _publishResult(roomId: string, memberId: string, options: IAgentHostRoomPublishResultOptions): Promise<IAgentHostRoomMessage> {
-		return this._queue.queue(roomId, async () => {
+		const message = await this._queue.queue(roomId, async () => {
 			this._assertOpen();
-			const record = this._record(roomId);
+			let record = this._record(roomId);
 			const member = this._member(record, memberId);
 			this._assertMemberTurn(record, memberId);
 			this._messageId(options.id);
@@ -1000,12 +1418,23 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			}
 			const evidence = this._evidence(options.evidence);
 			const artifactIds = this._resultArtifacts(record, member, options.artifactIds);
+			if (options.assignmentId !== undefined) {
+				this._messageId(options.assignmentId);
+				const assignment = record.messages.find(message => message.id === options.assignmentId)?.assignment;
+				if (assignment?.kind !== 'work' || !assignment.assigneeIds.includes(memberId)) {
+					throw new Error(localize('rooms.invalidResultAssignment', "The result assignment must be an earlier work assignment for this member."));
+				}
+				if (record.messages.some(message => message.id !== options.id && message.result?.assignmentId === options.assignmentId && message.authorId === memberId)) {
+					throw new Error(localize('rooms.completedResultAssignment', "This member already published a result for the assignment."));
+				}
+			}
 			const result = {
 				title: options.title,
 				summary: options.summary,
 				outcome: options.outcome,
 				evidence,
 				artifactIds,
+				...(options.assignmentId ? { assignmentId: options.assignmentId } : {}),
 			} as const;
 			const existing = record.messages.find(message => message.id === options.id);
 			if (existing) {
@@ -1027,7 +1456,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				result,
 				deliveries: [],
 			};
-			await this._save({
+			record = {
 				...record,
 				room: {
 					...record.room,
@@ -1038,15 +1467,25 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					} : candidate),
 				},
 				messages: [...record.messages, message],
-			});
-			return { ...message, result: { ...result, verificationState: 'pending' } };
+			};
+			const events: AgentHostRoomCoordinatorEventKind[] = ['result'];
+			if (result.outcome === 'blocked') {
+				events.push('blocked');
+			}
+			if (result.assignmentId && this._assignmentState(record, result.assignmentId) === 'completed') {
+				events.push('assignmentCompleted');
+			}
+			await this._save(this._withCoordinatorEvents(record, events));
+			return { ...message, result: { ...result, verificationState: 'pending' as const } };
 		});
+		this._scheduleCoordinator(roomId);
+		return message;
 	}
 
 	private async _verifyResult(roomId: string, memberId: string | undefined, options: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage> {
-		return this._queue.queue(roomId, async () => {
+		const message = await this._queue.queue(roomId, async () => {
 			this._assertOpen();
-			const record = this._record(roomId);
+			let record = this._record(roomId);
 			this._messageId(options.id);
 			this._messageId(options.resultId);
 			if (options.verdict !== 'verified' && options.verdict !== 'rejected') {
@@ -1097,13 +1536,23 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				verification,
 				deliveries: [],
 			};
-			await this._save({
+			record = {
 				...record,
 				room: { ...record.room, latestMessageSequence: message.sequence },
 				messages: [...record.messages, message],
-			});
+			};
+			const events: AgentHostRoomCoordinatorEventKind[] = ['verification'];
+			for (const assignmentMessage of record.messages) {
+				if (assignmentMessage.assignment?.kind === 'verification' && assignmentMessage.assignment.resultId === options.resultId
+					&& this._assignmentState(record, assignmentMessage.id) === 'completed') {
+					events.push('assignmentCompleted');
+				}
+			}
+			await this._save(this._withCoordinatorEvents(record, events));
 			return message;
 		});
+		this._scheduleCoordinator(roomId);
+		return message;
 	}
 
 	private _verificationState(messages: readonly IAgentHostRoomMessage[], resultId: string): AgentHostRoomVerificationState {
@@ -1141,6 +1590,17 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 	}
 
 	beforeTool(sessionId: string, toolName: string, expectedTurnId?: string): void {
+		const coordinatorRoomId = this._coordinatorSessions.get(AgentSession.uri('copilotcli', sessionId).toString());
+		if (coordinatorRoomId !== undefined) {
+			const coordinator = this._record(coordinatorRoomId).room.coordinator!;
+			if (!coordinator.turnId || (expectedTurnId !== undefined && coordinator.turnId !== expectedTurnId)) {
+				throw new Error(localize('rooms.unadmittedCoordinatorTurn', "This coordinator turn is not active."));
+			}
+			if (!roomCoordinatorTools.some(name => toolName === name || toolName.endsWith(`:${name}`) || toolName.endsWith(`.${name}`))) {
+				throw new Error(localize('rooms.coordinatorToolRestricted', "The room coordinator can only inspect room state, create structured assignments, and post informational notes."));
+			}
+			return;
+		}
 		const binding = this._binding(sessionId);
 		const record = this._record(binding.roomId);
 		this._assertMemberTurn(record, binding.memberId);
@@ -1149,6 +1609,9 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 		if (roomExcludedTools.some(name => toolName === name || toolName.endsWith(`:${name}`) || toolName.endsWith(`.${name}`))) {
 			throw new Error(localize('rooms.noDelegation', "Room members cannot launch nested agents. Collaborate with the existing room members instead."));
+		}
+		if (roomCoordinatorExclusiveTools.some(name => toolName === name || toolName.endsWith(`:${name}`) || toolName.endsWith(`.${name}`))) {
+			throw new Error(localize('rooms.coordinatorToolOnly', "Only the room coordinator can use coordinator tools."));
 		}
 		if (toolName === 'room_read' || toolName === 'room_post' || toolName === 'room_read_artifact') {
 			return;
@@ -1184,6 +1647,85 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 		await this._runtime.assertContentAccess(member.sessionUri, paths.map(path =>
 			URI.joinPath(URI.parse(worktreeUri), path).fsPath));
+	}
+
+	private _withCoordinatorEvents(record: IRoomRecord, events: readonly AgentHostRoomCoordinatorEventKind[]): IRoomRecord {
+		const coordinator = record.room.coordinator;
+		if (!coordinator || events.length === 0) {
+			return record;
+		}
+		return {
+			...record,
+			room: {
+				...record.room,
+				coordinator: {
+					...coordinator,
+					eventSequence: coordinator.eventSequence + 1,
+					pendingEvents: [...new Set([...coordinator.pendingEvents, ...events])],
+				},
+			},
+		};
+	}
+
+	private _assignmentState(record: IRoomRecord, assignmentId: string): 'pending' | 'completed' | 'superseded' {
+		return record.room.coordinator
+			? projectAgentHostRoomCoordinatorSnapshot(record).assignments.find(assignment => assignment.id === assignmentId)?.state ?? 'pending'
+			: 'pending';
+	}
+
+	private _scheduleCoordinator(roomId: string): void {
+		void this._queue.queue(roomId, () => this._admitCoordinator(roomId))
+			.catch(error => this._logService.warn('[AgentHostRooms] Coordinator scheduling failed', error));
+	}
+
+	private async _admitCoordinator(roomId: string): Promise<void> {
+		const record = this._record(roomId);
+		const coordinator = record.room.coordinator;
+		if (this._closed || !coordinator?.initialized || coordinator.pendingEvents.length === 0 || coordinator.turnId || !this._runtime.isIdle(coordinator.sessionUri)) {
+			return;
+		}
+		const turnId = generateUuid();
+		const saved = await this._save({
+			...record,
+			room: {
+				...record.room,
+				coordinator: {
+					...coordinator,
+					state: 'starting',
+					turnId,
+					activeEventSequence: coordinator.eventSequence,
+					activeEvents: coordinator.pendingEvents,
+					pendingEvents: [],
+					error: undefined,
+				},
+			},
+		});
+		void this._launchCoordinator(saved, turnId).catch(error => this._logService.warn('[AgentHostRooms] Coordinator launch failed', error));
+	}
+
+	private async _launchCoordinator(reservation: IRoomRecord, turnId: string): Promise<void> {
+		const roomId = reservation.room.id;
+		const coordinator = reservation.room.coordinator!;
+		try {
+			const participant = this._coordinatorParticipant(coordinator);
+			await this._storage.ensureWorktree(reservation.room, participant, true);
+			await this._runtime.prepare(reservation.room, participant, true);
+			await this._runtime.applyConfiguration(participant);
+			await this._queue.queue(roomId, async () => {
+				let record = this._record(roomId);
+				if (record.room.coordinator?.turnId !== turnId || !this._runtime.isIdle(coordinator.sessionUri)) {
+					return;
+				}
+				if (record.room.coordinator.pendingModel) {
+					record = await this._applyCoordinatorModel(record);
+				}
+				if (record.room.coordinator?.turnId === turnId) {
+					this._runtime.submit(coordinator.sessionUri, turnId, 'Review the new meaningful room events and coordinate the next explicit assignments.');
+				}
+			});
+		} catch (error) {
+			await this._onCoordinatorRuntimeEvent(roomId, { sessionUri: coordinator.sessionUri, turnId, state: 'failed', error: String(error) });
+		}
 	}
 
 	private _schedule(roomId: string): void {
@@ -1395,6 +1937,11 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 
 	private async _onRuntimeEvent(event: IRoomRuntimeEvent): Promise<void> {
 		await this._ready;
+		const coordinatorRoomId = this._coordinatorSessions.get(event.sessionUri);
+		if (coordinatorRoomId !== undefined) {
+			await this._onCoordinatorRuntimeEvent(coordinatorRoomId, event);
+			return;
+		}
 		const binding = this._sessions.get(event.sessionUri);
 		if (!binding || this._closed) {
 			return;
@@ -1408,7 +1955,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			}
 			const finished = ['idle', 'failed', 'stopped'].includes(event.state);
 			const member = this._member(record, binding.memberId);
-			await this._save({
+			let updated: IRoomRecord = {
 				...record,
 				room: {
 					...record.room, members: record.room.members.map(item => item.id === member.id ? {
@@ -1420,9 +1967,58 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					...message, deliveries: message.deliveries.map(delivery => delivery.memberId === member.id && delivery.turnId === execution.turnId && ['submitted', 'delivered'].includes(delivery.state)
 						? { ...delivery, state: event.state === 'idle' ? 'completed' : event.state === 'stopped' ? 'cancelled' : 'failed', error: event.error } : delivery),
 				})) : record.messages,
-			});
+			};
+			const coordinatorEvent = event.state === 'failed'
+				? 'failed'
+				: event.state === 'needsInput' ? 'needsInput' : event.state === 'idle' && member.work?.blocked ? 'blocked' : undefined;
+			if (coordinatorEvent) {
+				updated = this._withCoordinatorEvents(updated, [coordinatorEvent]);
+			}
+			await this._save(updated);
 		});
 		this._schedule(binding.roomId);
+		if (event.state === 'failed' || event.state === 'needsInput' || event.state === 'idle' && this._member(this._record(binding.roomId), binding.memberId).work?.blocked) {
+			this._scheduleCoordinator(binding.roomId);
+		}
+	}
+
+	private async _onCoordinatorRuntimeEvent(roomId: string, event: IRoomRuntimeEvent): Promise<void> {
+		if (this._closed) {
+			return;
+		}
+		let applyPendingModel = false;
+		await this._queue.queue(roomId, async () => {
+			const record = this._record(roomId);
+			const coordinator = record.room.coordinator;
+			if (!coordinator || coordinator.sessionUri !== event.sessionUri || (coordinator.turnId && event.turnId && coordinator.turnId !== event.turnId)) {
+				return;
+			}
+			const finished = event.state === 'idle' || event.state === 'failed' || event.state === 'stopped';
+			const completed = event.state === 'idle';
+			const state = event.state === 'stopped' ? 'interrupted' : event.state;
+			const updated: IAgentHostRoomCoordinator = {
+				...coordinator,
+				state,
+				turnId: finished ? undefined : event.turnId ?? coordinator.turnId,
+				activeEventSequence: finished ? undefined : coordinator.activeEventSequence,
+				activeEvents: finished ? undefined : coordinator.activeEvents,
+				pendingEvents: finished && !completed
+					? [...new Set([...coordinator.pendingEvents, ...(coordinator.activeEvents ?? [])])]
+					: coordinator.pendingEvents,
+				eventCursor: completed && coordinator.activeEventSequence !== undefined
+					? Math.max(coordinator.eventCursor, coordinator.activeEventSequence)
+					: coordinator.eventCursor,
+				error: event.error,
+			};
+			applyPendingModel = finished && updated.pendingModel !== undefined;
+			await this._save({ ...record, room: { ...record.room, coordinator: updated } });
+		});
+		if (applyPendingModel) {
+			void this.ensureCoordinator(roomId).catch(error => this._logService.warn('[AgentHostRooms] Coordinator model application failed', error));
+		}
+		if (event.state === 'idle') {
+			this._scheduleCoordinator(roomId);
+		}
 	}
 
 	private _canSubmit(roomId: string, memberId: string, turnId: string, runId: string): boolean {
@@ -1444,6 +2040,14 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			throw new Error(localize('rooms.noBinding', "The session is not a room member."));
 		}
 		return binding;
+	}
+
+	private _coordinatorBinding(sessionId: string): string {
+		const roomId = this._coordinatorSessions.get(AgentSession.uri('copilotcli', sessionId).toString());
+		if (roomId === undefined) {
+			throw new Error(localize('rooms.noCoordinatorBinding', "The session is not a room coordinator."));
+		}
+		return roomId;
 	}
 
 	private _record(roomId: string): IRoomRecord {
@@ -1479,6 +2083,10 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					if (execution.turnId) {
 						void this._runtime.abort(this._member(current, execution.memberId).sessionUri, execution.turnId).catch(abortError => this._logService.error('[AgentHostRooms] Abort after persistence failure failed', abortError));
 					}
+				}
+				if (current.room.coordinator?.turnId) {
+					void this._runtime.abort(current.room.coordinator.sessionUri, current.room.coordinator.turnId)
+						.catch(abortError => this._logService.error('[AgentHostRooms] Coordinator abort after persistence failure failed', abortError));
 				}
 			}
 			throw error;
@@ -1545,7 +2153,33 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		const active = [...this._records.values()].filter(record => record.room.run
 			|| record.executions.some(execution => execution.turnId)
 			|| ['running', 'idle', 'paused', 'stopping'].includes(record.room.state));
+		const coordinators = [...this._records.values()].flatMap(record => record.room.coordinator?.turnId
+			? [{ roomId: record.room.id, sessionUri: record.room.coordinator.sessionUri, turnId: record.room.coordinator.turnId }]
+			: []);
 		await Promise.all(active.map(record => this.stopRoom(record.room.id)));
+		await Promise.all(coordinators.map(coordinator => this._runtime.abort(coordinator.sessionUri, coordinator.turnId)
+			.catch(error => this._logService.warn('[AgentHostRooms] Coordinator shutdown failed', error))));
+		for (const coordinator of coordinators) {
+			await this._queue.queue(coordinator.roomId, async () => {
+				const record = this._record(coordinator.roomId);
+				if (record.room.coordinator?.turnId === coordinator.turnId) {
+					await this._save({
+						...record,
+						room: {
+							...record.room,
+							coordinator: {
+								...record.room.coordinator,
+								state: 'interrupted',
+								turnId: undefined,
+								activeEventSequence: undefined,
+								activeEvents: undefined,
+								pendingEvents: [...new Set([...record.room.coordinator.pendingEvents, ...(record.room.coordinator.activeEvents ?? [])])],
+							},
+						},
+					});
+				}
+			});
+		}
 	}
 
 	override dispose(): void {
@@ -1555,6 +2189,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		}
 		this._timers.clear();
 		this._modelChangeVersions.clear();
+		this._coordinatorPreparations.clear();
 		super.dispose();
 	}
 }

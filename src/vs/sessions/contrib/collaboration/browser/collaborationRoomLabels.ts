@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { localize } from '../../../../nls.js';
-import { AgentHostRoomDeliveryState, AgentHostRoomMemberState, AgentHostRoomMessageKind, AgentHostRoomResultOutcome, AgentHostRoomState, AgentHostRoomVerificationState, AgentHostRoomVerificationVerdict } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { AgentHostRoomCoordinatorState, AgentHostRoomDeliveryState, AgentHostRoomMemberState, AgentHostRoomMessageKind, AgentHostRoomResultOutcome, AgentHostRoomState, AgentHostRoomVerificationState, AgentHostRoomVerificationVerdict } from '../../../../platform/agentHost/common/agentHostRooms.js';
 
 export function messageKindLabel(kind: AgentHostRoomMessageKind): string {
 	switch (kind) {
@@ -63,6 +63,19 @@ export function memberStateLabel(state: AgentHostRoomMemberState): string {
 		case 'stopped': return localize('member.stopped', "Stopped");
 		case 'failed': return localize('member.failed', "Failed");
 		case 'interrupted': return localize('member.interrupted', "Interrupted");
+	}
+}
+
+export function coordinatorStateLabel(state: AgentHostRoomCoordinatorState): string {
+	switch (state) {
+		case 'pending': return localize('coordinator.pending', "Not prepared");
+		case 'starting': return localize('coordinator.starting', "Starting");
+		case 'working': return localize('coordinator.working', "Coordinating");
+		case 'idle': return localize('coordinator.idle', "Ready");
+		case 'needsInput': return localize('coordinator.needsInput', "Needs input");
+		case 'failed': return localize('coordinator.failed', "Failed");
+		case 'offline': return localize('coordinator.offline', "Offline");
+		case 'interrupted': return localize('coordinator.interrupted', "Interrupted");
 	}
 }
 

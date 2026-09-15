@@ -4585,13 +4585,56 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		}
 	}
 
-	async resolveSessionChat(sessionResource: URI, chatResource: URI | undefined, token: CancellationToken): Promise<{ readonly session: ISession; readonly chat: IChat } | undefined> {
+	async resolveSessionChat(sessionResource: URI, chatResource: URI | undefined, token: CancellationToken, reserved?: {
+		readonly title: string;
+		readonly createdAt: number;
+		readonly worktreeUri: URI;
+	}): Promise<{ readonly session: ISession; readonly chat: IChat } | undefined> {
 		const connection = this.connection;
 		if (!connection) {
 			return undefined;
 		}
 		this._ensureSessionCache();
-		const entry = [...this._sessionCache].find(([, session]) => isEqual(session.backendUri, sessionResource));
+		let entry = [...this._sessionCache].find(([, session]) => isEqual(session.backendUri, sessionResource));
+		if (!entry) {
+			await this._refreshSessions();
+			entry = [...this._sessionCache].find(([, session]) => isEqual(session.backendUri, sessionResource));
+		}
+		if (!entry && reserved) {
+			const ref = connection.getSubscription(StateComponents.Session, sessionResource, 'BaseAgentHostSessionsProvider.resolveReserved');
+			const waitDisposables = new DisposableStore();
+			try {
+				const stateEvent = Event.any(
+					ref.object.onDidChange,
+					Event.map(ref.object.onDidError ?? Event.None, error => error as SessionState | Error),
+				);
+				const state = ref.object.value ?? await raceCancellation(Event.toPromise(stateEvent, waitDisposables), token);
+				const expectedChat = chatResource?.toString();
+				if (!state || state instanceof Error || (state.lifecycle !== SessionLifecycle.Ready && state.lifecycle !== SessionLifecycle.Creating)
+					|| state.workingDirectories?.length !== 1 || !isEqual(URI.parse(state.workingDirectories[0]), reserved.worktreeUri)
+					|| (expectedChat !== undefined && !state.chats.some(chat => chat.resource === expectedChat))) {
+					return undefined;
+				}
+				const rawId = AgentSession.id(sessionResource);
+				const meta = this._adoptSessionMeta({
+					session: sessionResource,
+					startTime: reserved.createdAt,
+					modifiedTime: reserved.createdAt,
+					summary: reserved.title,
+					workingDirectories: [reserved.worktreeUri],
+				});
+				const cached = this.createAdapter(meta);
+				this._sessionCache.set(rawId, cached);
+				this._cacheDirty = true;
+				this._applySessionStateUpdate(cached.sessionId, state);
+				this._ensureSessionStateSubscription(cached.sessionId);
+				this._onDidChangeSessions.fire({ added: [cached], removed: [], changed: [] });
+				entry = [rawId, cached];
+			} finally {
+				waitDisposables.dispose();
+				ref.dispose();
+			}
+		}
 		if (!entry) {
 			return undefined;
 		}
@@ -4599,7 +4642,8 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		this._keepSessionStateAlive(session.sessionId);
 		await waitForState(this._getChatCatalogLoading(rawId), loading => !loading, undefined, token);
 		const state = this._lastSessionStates.get(session.sessionId);
-		if (this.connection !== connection || this._sessionCache.get(rawId) !== session || state?.lifecycle !== SessionLifecycle.Ready) {
+		if (this.connection !== connection || this._sessionCache.get(rawId) !== session
+			|| (state?.lifecycle !== SessionLifecycle.Ready && !(reserved && state?.lifecycle === SessionLifecycle.Creating))) {
 			return undefined;
 		}
 		const chat = chatResource

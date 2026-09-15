@@ -94,7 +94,7 @@ export class CollaborationConversation extends Disposable {
 				getWidgetAriaLabel: () => localize('room.feed', "Shared conversation"),
 				getWidgetRole: () => 'list',
 				getRole: () => 'listitem',
-				getAriaLabel: message => localize('room.messageAria', "{0}, {1}: {2}", message.authorName, messageKindLabel(message.kind), accessibleMessageText(message)),
+				getAriaLabel: message => localize('room.messageAria', "{0}, {1}: {2}", message.authorName, messageKindLabel(message.kind), accessibleMessageText(message, this.room, this.messages)),
 			},
 			keyboardNavigationLabelProvider: { getKeyboardNavigationLabel: message => `${message.authorName} ${message.text}` },
 			supportDynamicHeights: true,
@@ -182,6 +182,9 @@ export class CollaborationConversation extends Disposable {
 		if (message.result) {
 			template.markdown.clear();
 			this.renderResult(message, template.body);
+		} else if (message.assignment) {
+			template.markdown.clear();
+			this.renderAssignment(message, template.body);
 		} else if (message.verification) {
 			template.markdown.clear();
 			this.renderVerification(message, template.body);
@@ -237,6 +240,42 @@ export class CollaborationConversation extends Disposable {
 		const evidence = element.appendChild($('ul.room-result-evidence'));
 		for (const item of result.evidence) {
 			evidence.appendChild($('li')).textContent = item;
+		}
+		container.replaceChildren(element);
+	}
+
+	private renderAssignment(message: IAgentHostRoomMessage, container: HTMLElement): void {
+		const assignment = message.assignment!;
+		const state = assignmentState(message, this.messages);
+		const element = $('.room-assignment');
+		element.dataset.state = state;
+		const heading = element.appendChild($('.room-assignment-heading'));
+		heading.appendChild($('strong.room-assignment-title')).textContent = assignment.kind === 'verification'
+			? localize('room.verificationAssignment', "Verification Assignment")
+			: assignment.assigneeIds.length > 1
+				? localize('room.pairedAssignment', "Paired Assignment")
+				: localize('room.workAssignment', "Work Assignment");
+		heading.appendChild($('span.room-assignment-state')).textContent = assignmentStateLabel(state);
+		element.appendChild($('p.room-assignment-objective')).textContent = assignment.description;
+		if (assignment.note) {
+			element.appendChild($('p.room-assignment-note')).textContent = localize('room.assignmentNote', "Coordination note: {0}", assignment.note);
+		}
+		const names = assignment.assigneeIds.map(id => this.room?.members.find(member => member.id === id)?.name ?? id);
+		element.appendChild($('div.room-assignment-assignees')).textContent = assignment.assigneeIds.length > 1
+			? localize('room.pairedAgents', "Paired agents: {0}", names.join(', '))
+			: localize('room.assignedAgent', "Assigned agent: {0}", names[0]);
+		if (assignment.supersedes) {
+			element.appendChild($('div.room-assignment-link')).textContent = localize('room.assignmentSupersedes', "Supersedes assignment: {0}", assignment.supersedes);
+		}
+		if (assignment.resultId) {
+			element.appendChild($('div.room-assignment-link')).textContent = localize('room.assignmentResult', "Result to verify: {0}", assignment.resultId);
+		}
+		if (assignment.expectedEvidence.length) {
+			element.appendChild($('div.room-assignment-evidence-heading')).textContent = localize('room.assignmentEvidence', "Expected Evidence");
+			const evidence = element.appendChild($('ul.room-assignment-evidence'));
+			for (const item of assignment.expectedEvidence) {
+				evidence.appendChild($('li')).textContent = item;
+			}
 		}
 		container.replaceChildren(element);
 	}
@@ -367,7 +406,26 @@ export class CollaborationConversation extends Disposable {
 	focus(): void { this.list.domFocus(); }
 }
 
-function accessibleMessageText(message: IAgentHostRoomMessage): string {
+function assignmentState(message: IAgentHostRoomMessage, messages: readonly IAgentHostRoomMessage[]): 'pending' | 'completed' | 'superseded' {
+	if (messages.some(candidate => candidate.assignment?.supersedes === message.id)) {
+		return 'superseded';
+	}
+	const assignment = message.assignment!;
+	const completed = assignment.kind === 'work'
+		? assignment.assigneeIds.filter(id => messages.some(candidate => candidate.authorId === id && candidate.result?.assignmentId === message.id))
+		: assignment.assigneeIds.filter(id => messages.some(candidate => candidate.authorId === id && candidate.verification?.resultId === assignment.resultId));
+	return completed.length === assignment.assigneeIds.length ? 'completed' : 'pending';
+}
+
+function assignmentStateLabel(state: ReturnType<typeof assignmentState>): string {
+	switch (state) {
+		case 'pending': return localize('room.assignmentPending', "Pending");
+		case 'completed': return localize('room.assignmentCompleted', "Completed");
+		case 'superseded': return localize('room.assignmentSuperseded', "Superseded");
+	}
+}
+
+function accessibleMessageText(message: IAgentHostRoomMessage, room: IAgentHostRoom | undefined, messages: readonly IAgentHostRoomMessage[]): string {
 	if (message.result) {
 		return localize('room.resultAria', "{0}. Outcome: {1}. Verification: {2}. {3}. Evidence: {4}",
 			message.result.title, resultOutcomeLabel(message.result.outcome), verificationStateLabel(message.result.verificationState ?? 'pending'),
@@ -376,6 +434,18 @@ function accessibleMessageText(message: IAgentHostRoomMessage): string {
 	if (message.verification) {
 		return localize('room.verificationAria', "{0} result {1}. Evidence: {2}",
 			verificationVerdictLabel(message.verification.verdict), message.verification.resultId, message.verification.evidence.join('; '));
+	}
+	if (message.assignment) {
+		const assignment = message.assignment;
+		const assignees = assignment.assigneeIds.map(id => room?.members.find(member => member.id === id)?.name ?? id).join(', ');
+		return localize('room.assignmentAria', "{0}. State: {1}. Assigned to: {2}. Objective: {3}. Expected evidence: {4}.{5}{6}",
+			assignment.kind === 'verification' ? localize('room.verificationAssignment', "Verification Assignment") : localize('room.workAssignment', "Work Assignment"),
+			assignmentStateLabel(assignmentState(message, messages)), assignees, assignment.description, assignment.expectedEvidence.join('; '),
+			assignment.supersedes ? localize('room.assignmentSupersedesAria', " Supersedes {0}.", assignment.supersedes) : '',
+			[
+				assignment.resultId ? localize('room.assignmentResultAria', " Verifies result {0}.", assignment.resultId) : '',
+				assignment.note ? localize('room.assignmentNoteAria', " Coordination note: {0}.", assignment.note) : '',
+			].join(''));
 	}
 	return message.text;
 }

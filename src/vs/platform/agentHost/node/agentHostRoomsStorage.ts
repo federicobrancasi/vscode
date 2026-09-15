@@ -19,7 +19,7 @@ import { IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomMember, IAgentHos
 import { buildDefaultChatUri } from '../common/state/sessionState.js';
 import { parseRoomConfiguration } from './agentHostRoomsConfiguration.js';
 import { parseRoomModelSelection } from './agentHostRoomsModels.js';
-import { IRoomRecord, IRoomStorage, RoomContentValidator } from './agentHostRoomsTypes.js';
+import { IRoomRecord, IRoomSessionParticipant, IRoomStorage, RoomContentValidator } from './agentHostRoomsTypes.js';
 
 /**
  * Durable room authority. Worktrees and published patches outlive individual
@@ -57,6 +57,13 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 				const preserved = identities(previous.room);
 				const current = identities(snapshot.room);
 				check(current.length >= preserved.length && equals(preserved, current.slice(0, preserved.length)), 'preserved member identities changed');
+				if (previous.room.coordinator) {
+					const identity = (room: IAgentHostRoom) => room.coordinator && [
+						room.coordinator.id, room.coordinator.name, room.coordinator.sessionUri,
+						room.coordinator.chatUri, room.coordinator.worktreeUri,
+					];
+					check(equals(identity(previous.room), identity(snapshot.room)), 'preserved coordinator identity changed');
+				}
 				for (const execution of previous.executions) {
 					check(execution.briefed !== true || snapshot.executions.find(value => value.memberId === execution.memberId)?.briefed === true, 'execution brief regressed');
 				}
@@ -135,8 +142,8 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		return URI.file(join(this.root, 'worktrees', roomId, memberId)).toString();
 	}
 
-	ensureWorktree(room: IAgentHostRoom, member: IAgentHostRoomMember, requireExisting = false): Promise<void> {
-		return this.worktreeQueue.queue(room.id, () => this.prepareWorktree(room, member, requireExisting));
+	ensureWorktree(room: IAgentHostRoom, participant: IRoomSessionParticipant, requireExisting = false): Promise<void> {
+		return this.worktreeQueue.queue(room.id, () => this.prepareWorktree(room, participant, requireExisting));
 	}
 
 	publishPatch(room: IAgentHostRoom, member: IAgentHostRoomMember, title: string, validateContent?: RoomContentValidator): Promise<IAgentHostRoomArtifact> {
@@ -231,6 +238,9 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 			for (const member of record.room.members) {
 				unique(sessions, extUri.getComparisonKey(URI.parse(member.sessionUri, true)), 'member.sessionUri');
 			}
+			if (record.room.coordinator) {
+				unique(sessions, extUri.getComparisonKey(URI.parse(record.room.coordinator.sessionUri, true)), 'coordinator.sessionUri');
+			}
 			for (const artifact of record.room.artifacts) {
 				unique(artifacts, artifact.id, 'artifact.id');
 			}
@@ -255,16 +265,20 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		check(messages.length === room.latestMessageSequence, 'latestMessageSequence does not match messages');
 		const messageIds = new Set<string>();
 		const resultAuthors = new Map<string, string>();
+		const assignments = new Map<string, { readonly kind: string; readonly assigneeIds: readonly string[]; readonly resultId?: string }>();
+		const supersededAssignments = new Set<string>();
+		const assignmentResults = new Set<string>();
 		for (const [index, value] of messages.entries()) {
-			const message = object(value, 'message', ['id', 'sequence', 'authorId', 'authorName', 'authorKind', 'kind', 'mode', 'text', 'timestamp', 'mentions', 'replyTo', 'artifactId', 'result', 'verification', 'deliveries']);
+			const message = object(value, 'message', ['id', 'sequence', 'authorId', 'authorName', 'authorKind', 'kind', 'mode', 'text', 'timestamp', 'mentions', 'replyTo', 'artifactId', 'assignment', 'result', 'verification', 'deliveries']);
 			identifier(message.id, 'message.id');
 			check(message.sequence === index + 1, 'message.sequence');
 			identifier(message.authorId, 'message.authorId');
 			text(message.authorName, 'message.authorName', false);
 			enumValue(message.authorKind, ['human', 'agent', 'system'], 'message.authorKind');
 			if (message.authorKind === 'agent') {
-				check(memberIds.has(message.authorId), 'message author is not a member');
-				check(room.members.find(member => member.id === message.authorId)?.name === message.authorName, 'message author name does not match its member');
+				const member = room.members.find(member => member.id === message.authorId);
+				check(member !== undefined || room.coordinator?.id === message.authorId, 'message author is not a room agent');
+				check(member?.name === message.authorName || room.coordinator?.id === message.authorId && room.coordinator.name === message.authorName, 'message author name does not match its room identity');
 			} else {
 				check(message.authorId === message.authorKind, 'message author identity');
 			}
@@ -289,8 +303,41 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 			if (message.kind === 'artifact') {
 				publishedArtifactIds.add(String(message.artifactId));
 			}
+			if (message.assignment !== undefined) {
+				const assignment = object(message.assignment, 'message.assignment', ['assigneeIds', 'kind', 'description', 'expectedEvidence', 'resultId', 'supersedes', 'note']);
+				const assigneeIds = array(assignment.assigneeIds, 'message.assignment.assigneeIds');
+				check(assigneeIds.length > 0 && assigneeIds.length <= MAX_ROOM_WORKERS, 'message.assignment.assigneeIds');
+				const uniqueAssignees = new Set<string>();
+				for (const assigneeId of assigneeIds) {
+					identifier(assigneeId, 'message.assignment.assigneeId');
+					check(memberIds.has(assigneeId), 'assignment assignee does not exist');
+					unique(uniqueAssignees, assigneeId, 'message.assignment.assigneeId');
+				}
+				enumValue(assignment.kind, ['work', 'verification'], 'message.assignment.kind');
+				text(assignment.description, 'message.assignment.description', false, 8000);
+				evidence(assignment.expectedEvidence, 'message.assignment.expectedEvidence');
+				optional(assignment.note, text, 'message.assignment.note');
+				if (assignment.resultId !== undefined) {
+					identifier(assignment.resultId, 'message.assignment.resultId');
+					check(resultAuthors.has(String(assignment.resultId)), 'assignment result was not published earlier');
+				}
+				check((assignment.kind === 'verification') === (assignment.resultId !== undefined), 'verification assignment result linkage');
+				if (assignment.supersedes !== undefined) {
+					identifier(assignment.supersedes, 'message.assignment.supersedes');
+					check(assignments.has(String(assignment.supersedes)), 'superseded assignment was not published earlier');
+					unique(supersededAssignments, String(assignment.supersedes), 'message.assignment.supersedes');
+				}
+				check(message.kind === 'work' && message.authorKind === 'agent' && room.coordinator?.id === message.authorId, 'assignment payload requires a coordinator work message');
+				check((message.mentions as readonly string[]).length === assigneeIds.length
+					&& assigneeIds.every(assigneeId => (message.mentions as readonly string[]).includes(String(assigneeId))), 'assignment mentions do not match assignees');
+				assignments.set(String(message.id), {
+					kind: String(assignment.kind),
+					assigneeIds: assigneeIds.map(String),
+					resultId: assignment.resultId === undefined ? undefined : String(assignment.resultId),
+				});
+			}
 			if (message.result !== undefined) {
-				const result = object(message.result, 'message.result', ['title', 'summary', 'outcome', 'evidence', 'artifactIds', 'verificationState']);
+				const result = object(message.result, 'message.result', ['title', 'summary', 'outcome', 'evidence', 'artifactIds', 'assignmentId', 'verificationState']);
 				text(result.title, 'message.result.title', false, 200);
 				text(result.summary, 'message.result.summary', false, 8000);
 				enumValue(result.outcome, ['success', 'negative', 'inconclusive', 'blocked'], 'message.result.outcome');
@@ -305,7 +352,13 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 					check(room.artifacts.find(artifact => artifact.id === artifactId)?.memberId === message.authorId, 'result artifact has a different author');
 				}
 				check(result.verificationState === undefined, 'persisted result has derived verification state');
-				check(message.kind === 'result' && message.authorKind === 'agent', 'result payload requires an agent result message');
+				check(message.kind === 'result' && message.authorKind === 'agent' && memberIds.has(message.authorId), 'result payload requires a member result message');
+				if (result.assignmentId !== undefined) {
+					identifier(result.assignmentId, 'message.result.assignmentId');
+					const assignment = assignments.get(String(result.assignmentId));
+					check(assignment?.kind === 'work' && assignment.assigneeIds.includes(String(message.authorId)), 'result assignment does not assign its author');
+					unique(assignmentResults, `${result.assignmentId}:${message.authorId}`, 'result assignment author');
+				}
 				resultAuthors.set(String(message.id), String(message.authorId));
 			}
 			check(message.kind !== 'result' || message.result !== undefined, 'result message has no result');
@@ -316,16 +369,19 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 				evidence(verification.evidence, 'message.verification.evidence');
 				const resultAuthor = resultAuthors.get(String(verification.resultId));
 				check(resultAuthor !== undefined, 'verification result was not published earlier');
-				check(message.authorKind === 'human' || message.authorKind === 'agent', 'verification author');
+				check(message.authorKind === 'human' || message.authorKind === 'agent' && memberIds.has(message.authorId), 'verification author');
 				check(message.authorKind !== 'agent' || message.authorId !== resultAuthor, 'result author verified its own result');
 				check(message.kind === 'verification', 'verification payload requires a verification message');
 			}
 			check(message.kind !== 'verification' || message.verification !== undefined, 'verification message has no verification');
 			check(message.kind === 'result' || message.result === undefined, 'result payload on another message kind');
 			check(message.kind === 'verification' || message.verification === undefined, 'verification payload on another message kind');
+			check(message.kind === 'work' || message.assignment === undefined, 'assignment payload on another message kind');
 			if (message.kind === 'result' || message.kind === 'verification') {
 				check(array(message.mentions, 'message.mentions').length === 0, 'structured room record has mentions');
 				check(array(message.deliveries, 'message.deliveries').length === 0, 'structured room record has deliveries');
+			}
+			if (message.assignment !== undefined || message.kind === 'result' || message.kind === 'verification') {
 				check(message.mode === undefined, 'structured room record has a delivery mode');
 			}
 			const delivered = new Set<string>();
@@ -368,7 +424,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 	}
 
 	private validateRoom(value: unknown): asserts value is IAgentHostRoom {
-		const room = object(value, 'room', ['id', 'revision', 'title', 'goal', 'instructions', 'repositoryUri', 'baseRevision', 'createdAt', 'updatedAt', 'state', 'continuous', 'members', 'artifacts', 'latestMessageSequence', 'run', 'error']);
+		const room = object(value, 'room', ['id', 'revision', 'title', 'goal', 'instructions', 'repositoryUri', 'baseRevision', 'createdAt', 'updatedAt', 'state', 'continuous', 'coordinator', 'members', 'artifacts', 'latestMessageSequence', 'run', 'error']);
 		identifier(room.id, 'room.id');
 		count(room.revision, 'room.revision');
 		text(room.title, 'room.title', false);
@@ -383,6 +439,58 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		check(room.continuous === undefined || typeof room.continuous === 'boolean', 'room.continuous');
 		count(room.latestMessageSequence, 'room.latestMessageSequence');
 		optional(room.error, text, 'room.error');
+		let coordinatorSession: URI | undefined;
+		if (room.coordinator !== undefined) {
+			const coordinator = object(room.coordinator, 'room.coordinator', ['id', 'name', 'sessionUri', 'chatUri', 'worktreeUri', 'desiredModel', 'appliedModel', 'pendingModel', 'modelError', 'state', 'initialized', 'cursor', 'eventSequence', 'eventCursor', 'pendingEvents', 'turnId', 'activeEventSequence', 'activeEvents', 'error']);
+			identifier(coordinator.id, 'coordinator.id');
+			text(coordinator.name, 'coordinator.name', false);
+			text(coordinator.sessionUri, 'coordinator.sessionUri', false);
+			const session = URI.parse(coordinator.sessionUri, true);
+			coordinatorSession = session;
+			check(session.scheme === 'copilotcli' && !session.authority && session.path.length > 1 && !session.query && !session.fragment, 'coordinator.sessionUri');
+			identifier(session.path.slice(1), 'coordinator.sessionId');
+			check(coordinator.chatUri === buildDefaultChatUri(String(coordinator.sessionUri)), 'coordinator.chatUri must be the preserved session default chat');
+			check(sameFile(localFile(coordinator.worktreeUri, 'coordinator.worktreeUri').fsPath, localFile(this.worktreeUri(String(room.id), String(coordinator.id)), 'coordinator worktree').fsPath), 'coordinator worktree identity');
+			if (coordinator.desiredModel !== undefined) {
+				parseRoomModelSelection(coordinator.desiredModel);
+			}
+			if (coordinator.appliedModel !== undefined) {
+				parseRoomModelSelection(coordinator.appliedModel);
+			}
+			if (coordinator.pendingModel !== undefined) {
+				parseRoomModelSelection(coordinator.pendingModel);
+				check(equals(coordinator.pendingModel, coordinator.desiredModel), 'coordinator pending model differs from desired model');
+			}
+			optional(coordinator.modelError, text, 'coordinator.modelError');
+			enumValue(coordinator.state, ['pending', 'starting', 'working', 'idle', 'needsInput', 'failed', 'offline', 'interrupted'], 'coordinator.state');
+			boolean(coordinator.initialized, 'coordinator.initialized');
+			count(coordinator.cursor, 'coordinator.cursor');
+			check(coordinator.cursor <= room.latestMessageSequence, 'coordinator.cursor exceeds messages');
+			count(coordinator.eventSequence, 'coordinator.eventSequence');
+			count(coordinator.eventCursor, 'coordinator.eventCursor');
+			check(coordinator.eventCursor <= coordinator.eventSequence, 'coordinator.eventCursor exceeds events');
+			const pendingEvents = array(coordinator.pendingEvents, 'coordinator.pendingEvents');
+			const eventKinds = new Set<string>();
+			for (const event of pendingEvents) {
+				enumValue(event, ['result', 'verification', 'blocked', 'failed', 'needsInput', 'assignmentCreated', 'assignmentSuperseded', 'assignmentCompleted', 'memberAdded', 'memberRemoved'], 'coordinator.pendingEvent');
+				unique(eventKinds, String(event), 'coordinator.pendingEvent');
+			}
+			optional(coordinator.turnId, identifier, 'coordinator.turnId');
+			if (coordinator.activeEventSequence !== undefined) {
+				count(coordinator.activeEventSequence, 'coordinator.activeEventSequence');
+				check(coordinator.activeEventSequence <= coordinator.eventSequence && coordinator.turnId !== undefined, 'coordinator active event');
+			}
+			if (coordinator.activeEvents !== undefined) {
+				const activeEvents = array(coordinator.activeEvents, 'coordinator.activeEvents');
+				const activeEventKinds = new Set<string>();
+				for (const event of activeEvents) {
+					enumValue(event, ['result', 'verification', 'blocked', 'failed', 'needsInput', 'assignmentCreated', 'assignmentSuperseded', 'assignmentCompleted', 'memberAdded', 'memberRemoved'], 'coordinator.activeEvent');
+					unique(activeEventKinds, String(event), 'coordinator.activeEvent');
+				}
+				check(coordinator.activeEventSequence !== undefined, 'coordinator active events have no sequence');
+			}
+			optional(coordinator.error, text, 'coordinator.error');
+		}
 		const members = array(room.members, 'room.members');
 		check(members.length > 0 && members.length <= MAX_ROOM_WORKERS, 'room member count');
 		const memberIds = new Set<string>();
@@ -397,6 +505,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 			check(session.scheme === 'copilotcli' && !session.authority && session.path.length > 1 && !session.query && !session.fragment, 'member.sessionUri');
 			identifier(session.path.slice(1), 'member.sessionId');
 			unique(sessions, extUri.getComparisonKey(session), 'member.sessionUri');
+			check(coordinatorSession === undefined || !extUri.isEqual(coordinatorSession, session), 'coordinator session is a member session');
 			if (member.chatUri !== undefined) {
 				check(member.chatUri === buildDefaultChatUri(member.sessionUri), 'member.chatUri must be the preserved session default chat');
 			}
@@ -464,9 +573,12 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		}
 	}
 
-	private async prepareWorktree(room: IAgentHostRoom, member: IAgentHostRoomMember, requireExisting: boolean): Promise<void> {
+	private async prepareWorktree(room: IAgentHostRoom, member: IRoomSessionParticipant, requireExisting: boolean): Promise<void> {
 		this.validateRoom(room);
-		check(room.members.some(value => equals(value, member)), 'worktree member is not in room');
+		check(room.members.some(value => equals(value, member))
+			|| !!room.coordinator && room.coordinator.id === member.id && room.coordinator.sessionUri === member.sessionUri
+			&& room.coordinator.chatUri === member.chatUri && room.coordinator.worktreeUri === member.worktreeUri,
+			'worktree participant is not in room');
 		const repository = await this.resolveRepository(room.repositoryUri, room.baseRevision);
 		check(repository.baseRevision === room.baseRevision, 'room baseRevision is not pinned');
 		const original = localFile(repository.repositoryUri, 'repositoryUri').fsPath;

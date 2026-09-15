@@ -163,6 +163,90 @@ suite('AgentHostRoomsStorage', function () {
 		}), /preserved member identities/);
 	});
 
+	test('old journals remain valid and coordinator identity, assignments, and result linkage are immutable', async () => {
+		const original = record();
+		await storage.save(original);
+		const oldJournalCoordinator = (await new AgentHostRoomsStorage(URI.file(root), new NullLogService()).load())[0].room.coordinator;
+		const coordinatorSession = 'copilotcli:/coordinator-one';
+		const coordinator = {
+			id: 'coordinator-one',
+			name: 'Coordinator',
+			sessionUri: coordinatorSession,
+			chatUri: buildDefaultChatUri(coordinatorSession),
+			worktreeUri: storage.worktreeUri(original.room.id, 'coordinator-one'),
+			desiredModel: { id: 'test-model' },
+			appliedModel: { id: 'test-model' },
+			state: 'idle' as const,
+			initialized: true,
+			cursor: 2,
+			eventSequence: 1,
+			eventCursor: 0,
+			pendingEvents: ['result'] as const,
+		};
+		const assignment = {
+			id: 'assignment-one',
+			sequence: 3,
+			authorId: coordinator.id,
+			authorName: coordinator.name,
+			authorKind: 'agent' as const,
+			kind: 'work' as const,
+			text: 'Inspect the parser',
+			timestamp: 3,
+			mentions: ['member-one'],
+			assignment: {
+				assigneeIds: ['member-one'],
+				kind: 'work' as const,
+				description: 'Inspect the parser',
+				expectedEvidence: ['Focused parser test output'],
+			},
+			deliveries: [{ memberId: 'member-one', state: 'pending' as const }],
+		};
+		const result = {
+			id: 'result-one',
+			sequence: 4,
+			authorId: 'member-one',
+			authorName: 'Worker',
+			authorKind: 'agent' as const,
+			kind: 'result' as const,
+			text: 'Parser result',
+			timestamp: 4,
+			mentions: [],
+			result: {
+				title: 'Parser result',
+				summary: 'The parser passed.',
+				outcome: 'success' as const,
+				evidence: ['Focused parser tests passed.'],
+				artifactIds: [],
+				assignmentId: assignment.id,
+			},
+			deliveries: [],
+		};
+		const coordinated: IRoomRecord = {
+			...original,
+			room: { ...original.room, revision: 2, coordinator, latestMessageSequence: 4 },
+			messages: [...original.messages, assignment, result],
+		};
+		await storage.save(coordinated);
+		await assert.rejects(storage.save({
+			...coordinated,
+			room: { ...coordinated.room, revision: 3, coordinator: { ...coordinator, name: 'Other Coordinator' } },
+			messages: coordinated.messages.map(message => message.authorId === coordinator.id ? { ...message, authorName: 'Other Coordinator' } : message),
+		}), /preserved coordinator identity/);
+		await assert.rejects(storage.save({
+			...coordinated,
+			room: { ...coordinated.room, revision: 3 },
+			messages: coordinated.messages.map(message => message.id === assignment.id
+				? { ...message, assignment: { ...message.assignment!, expectedEvidence: ['Different evidence'] } }
+				: message),
+		}), /recorded room messages changed/);
+
+		assert.deepStrictEqual({
+			oldJournalCoordinator,
+			coordinator: (await storage.load())[0].room.coordinator,
+			assignmentId: (await storage.load())[0].messages.at(-1)?.result?.assignmentId,
+		}, { oldJournalCoordinator: undefined, coordinator, assignmentId: assignment.id });
+	});
+
 	test('member configuration roundtrips and upgrades legacy journals without changing identities', async () => {
 		const original = record();
 		await storage.save(original);

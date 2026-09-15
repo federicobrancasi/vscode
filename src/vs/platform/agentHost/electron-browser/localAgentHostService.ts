@@ -80,6 +80,37 @@ function notifyOnFatalAgentHostStartError(notificationService: INotificationServ
 	));
 }
 
+export function createLocalAgentHostRoomsService(onDidChangeRoom: Event<IAgentHostRoom>, getProxy: () => IAgentHostRoomsService): IAgentHostRoomsService {
+	return {
+		_serviceBrand: undefined,
+		onDidChangeRoom,
+		getCapabilities: () => getProxy().getCapabilities(),
+		isRepository: folderUri => getProxy().isRepository(folderUri),
+		listRooms: () => getProxy().listRooms(),
+		getRoom: roomId => getProxy().getRoom(roomId),
+		createRoom: options => getProxy().createRoom(options),
+		ensureCoordinator: roomId => getProxy().ensureCoordinator(roomId),
+		getCoordinator: roomId => getProxy().getCoordinator(roomId),
+		setCoordinatorModel: (roomId, model) => getProxy().setCoordinatorModel(roomId, model),
+		getCoordinatorSnapshot: roomId => getProxy().getCoordinatorSnapshot(roomId),
+		getMessages: (roomId, query) => getProxy().getMessages(roomId, query),
+		postMessage: (roomId, message) => getProxy().postMessage(roomId, message),
+		verifyResult: (roomId, verification) => getProxy().verifyResult(roomId, verification),
+		retryMessage: (roomId, messageId) => getProxy().retryMessage(roomId, messageId),
+		startRoom: (roomId, limits) => getProxy().startRoom(roomId, limits),
+		pauseRoom: roomId => getProxy().pauseRoom(roomId),
+		stopRoom: roomId => getProxy().stopRoom(roomId),
+		addMember: (roomId, model) => getProxy().addMember(roomId, model),
+		removeMember: (roomId, memberId) => getProxy().removeMember(roomId, memberId),
+		stopMember: (roomId, memberId) => getProxy().stopMember(roomId, memberId),
+		retryMember: (roomId, memberId) => getProxy().retryMember(roomId, memberId),
+		getRoomConfiguration: roomId => getProxy().getRoomConfiguration(roomId),
+		setRoomConfiguration: (roomId, configuration) => getProxy().setRoomConfiguration(roomId, configuration),
+		setMemberModel: (roomId, memberId, model) => getProxy().setMemberModel(roomId, memberId, model),
+		getArtifact: (roomId, artifactId) => getProxy().getArtifact(roomId, artifactId),
+	};
+}
+
 /**
  * Keeps management-channel calls on the same MessagePort generation as the
  * connected AHP transport.
@@ -152,30 +183,7 @@ export class LocalAgentHostServiceClient extends Disposable implements IAgentHos
 	private readonly _clientStore = this._register(new MutableDisposable<DisposableStore>());
 	private readonly _managementConnection = this._register(new LocalAgentHostManagementConnection());
 	private readonly _onDidChangeRoom = this._register(new Emitter<IAgentHostRoom>());
-	readonly rooms: IAgentHostRoomsService = {
-		_serviceBrand: undefined,
-		onDidChangeRoom: this._onDidChangeRoom.event,
-		getCapabilities: () => this._roomsProxy().getCapabilities(),
-		isRepository: folderUri => this._roomsProxy().isRepository(folderUri),
-		listRooms: () => this._roomsProxy().listRooms(),
-		getRoom: roomId => this._roomsProxy().getRoom(roomId),
-		createRoom: options => this._roomsProxy().createRoom(options),
-		getMessages: (roomId, query) => this._roomsProxy().getMessages(roomId, query),
-		postMessage: (roomId, message) => this._roomsProxy().postMessage(roomId, message),
-		verifyResult: (roomId, verification) => this._roomsProxy().verifyResult(roomId, verification),
-		retryMessage: (roomId, messageId) => this._roomsProxy().retryMessage(roomId, messageId),
-		startRoom: (roomId, limits) => this._roomsProxy().startRoom(roomId, limits),
-		pauseRoom: roomId => this._roomsProxy().pauseRoom(roomId),
-		stopRoom: roomId => this._roomsProxy().stopRoom(roomId),
-		addMember: (roomId, model) => this._roomsProxy().addMember(roomId, model),
-		removeMember: (roomId, memberId) => this._roomsProxy().removeMember(roomId, memberId),
-		stopMember: (roomId, memberId) => this._roomsProxy().stopMember(roomId, memberId),
-		retryMember: (roomId, memberId) => this._roomsProxy().retryMember(roomId, memberId),
-		getRoomConfiguration: roomId => this._roomsProxy().getRoomConfiguration(roomId),
-		setRoomConfiguration: (roomId, configuration) => this._roomsProxy().setRoomConfiguration(roomId, configuration),
-		setMemberModel: (roomId, memberId, model) => this._roomsProxy().setMemberModel(roomId, memberId, model),
-		getArtifact: (roomId, artifactId) => this._roomsProxy().getArtifact(roomId, artifactId),
-	};
+	readonly rooms: IAgentHostRoomsService = createLocalAgentHostRoomsService(this._onDidChangeRoom.event, () => this._roomsProxy());
 	private readonly _ahpLogger: AhpJsonlLogger | undefined;
 	private _protocolClient: AgentHostProtocolClient | undefined;
 	private _connectStarted = false;

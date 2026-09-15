@@ -38,6 +38,7 @@ export interface ICollaborationRoomCreationDraft {
 	readonly baseRevision: string;
 	readonly workerCount: string;
 	readonly model: string;
+	readonly coordinatorModel?: ModelSelection;
 	readonly memberNames?: readonly string[];
 	readonly memberModels?: readonly (ModelSelection | undefined)[];
 }

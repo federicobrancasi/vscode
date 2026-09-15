@@ -1454,6 +1454,53 @@ suite('AgentHostChatContributions', () => {
 		assert.deepStrictEqual(result.message, { text: injectSideChatContext('built-in-send-order'), origin: { kind: MessageKind.User } });
 	});
 
+	test('injects deterministic coordinator state through outgoing message text', async () => {
+		const contributions = createBuiltInContributions(disposables);
+		const coordinatorSession = 'copilotcli:/coordinator';
+		const coordinatorChat = buildDefaultChatUri(coordinatorSession);
+		const coordinator = {
+			id: 'coordinator',
+			name: 'Coordinator',
+			sessionUri: coordinatorSession,
+			chatUri: coordinatorChat,
+			worktreeUri: 'file:///coordinator',
+			state: 'working' as const,
+			initialized: true,
+			cursor: 0,
+			eventSequence: 1,
+			eventCursor: 0,
+			pendingEvents: [] as const,
+			turnId: 'turn',
+		};
+		const snapshot = {
+			room: { id: 'room', title: 'Room', goal: 'Coordinate', state: 'running' as const, sequence: 3 },
+			coordinator,
+			workers: [],
+			assignments: [],
+			results: [],
+			issues: [],
+			pendingHumanGuidance: [],
+			unownedWork: [{ id: 'room-goal', description: 'Coordinate', evidenceIds: [] }],
+			evidenceIds: ['result-1'],
+		};
+		contributions.rooms.isCoordinatorChat = (session, chat) => session === coordinatorSession && chat === coordinatorChat;
+		contributions.rooms.getCoordinatorTurnSnapshot = async () => snapshot;
+
+		const result = await contributions.service.outgoingTurn({
+			session: coordinatorSession,
+			chat: coordinatorChat,
+			message: { text: 'Please coordinate', origin: { kind: MessageKind.User } },
+			turnId: 'turn',
+		});
+
+		assert.deepStrictEqual(result, {
+			message: {
+				text: `Please coordinate\n\n<room_coordinator_instructions>\n\nYou coordinate this collaboration room for the human while workers continue collaborating directly.\nBase status and progress claims only on the deterministic snapshot below, and cite its evidence IDs when explaining who is assigned, paired, blocked, or finished.\nUse room_assign for explicit work, pairing, redirection, and verification requests. A pair exists only when one assignment names multiple assignees. Use room_post only for a useful informational Activity note.\nNever imply that workers need your permission to continue. You cannot stop, resume, add, or remove workers, answer approvals, change permissions, edit worker files, or launch nested agents.\n\n</room_coordinator_instructions>\n\n<room_coordinator_snapshot>\n\n${JSON.stringify(snapshot)}\n\n</room_coordinator_snapshot>`,
+				origin: { kind: MessageKind.User },
+			},
+		});
+	});
+
 	test('adds artifact guidance only to the first turn of a chat', async () => {
 		const contributions = createBuiltInContributions(disposables, undefined, true);
 		const defaultChat = buildDefaultChatUri(contributions.session);
@@ -1804,6 +1851,39 @@ suite('AgentHostChatContributions', () => {
 		contributions.incomingRequest(incomingRequest());
 
 		assert.deepStrictEqual(calls, ['queued', 'direct']);
+	});
+
+	test('allows direct coordinator turns while keeping worker turns scheduler-controlled', () => {
+		const contributions = createBuiltInContributions(disposables);
+		const coordinatorSession = 'copilotcli:/coordinator';
+		const coordinatorChat = buildDefaultChatUri(coordinatorSession);
+		const workerSession = 'copilotcli:/worker';
+		contributions.rooms.isCoordinatorChat = (session, chat) => session === coordinatorSession && chat === coordinatorChat;
+		contributions.rooms.isCoordinatorAdmittedTurn = (_session, _chat, turnId) => turnId === 'scheduled';
+		let directAvailable = true;
+		contributions.rooms.isCoordinatorDirectTurnAvailable = () => directAvailable;
+		contributions.rooms.isRoomSessionUri = session => session === workerSession;
+		contributions.rooms.isAdmittedTurn = () => false;
+
+		const directCoordinator = contributions.service.incomingRequest(incomingRequest(coordinatorSession, coordinatorChat));
+		directAvailable = false;
+		assert.deepStrictEqual({
+			directCoordinator,
+			directWhileScheduled: contributions.service.incomingRequest(incomingRequest(coordinatorSession, coordinatorChat)).kind,
+			scheduledCoordinator: contributions.service.incomingRequest({
+				...incomingRequest(coordinatorSession, coordinatorChat),
+				turnId: 'scheduled',
+				clientId: undefined,
+			}),
+			queuedCoordinator: contributions.service.incomingRequest(incomingRequest(coordinatorSession, coordinatorChat, 'queued')).kind,
+			directWorker: contributions.service.incomingRequest(incomingRequest(workerSession)).kind,
+		}, {
+			directCoordinator: { kind: 'accept' },
+			directWhileScheduled: 'reject',
+			scheduledCoordinator: { kind: 'accept' },
+			queuedCoordinator: 'reject',
+			directWorker: 'reject',
+		});
 	});
 
 	test('stops at the first non-accept incoming-request disposition in contribution order', () => {
@@ -2324,6 +2404,31 @@ suite('AgentHostChatContributions', () => {
 				title: 'Restored title',
 				draft: { ...draft, model: { id: 'pending-model', config: { thinkingLevel: 'high' } } },
 			},
+		});
+	});
+
+	test('persists and hydrates coordinator model selection through the room model contribution', async () => {
+		const contributions = createBuiltInContributions(disposables);
+		const session = 'copilotcli:/coordinator-model';
+		const chat = buildDefaultChatUri(session);
+		const saved: Message['model'][] = [];
+		contributions.rooms.isCoordinatorChat = (candidateSession, candidateChat) => candidateSession === session && candidateChat === chat;
+		contributions.rooms.setCoordinatorModelForChat = async (_session, _chat, model) => { saved.push(model); };
+		contributions.rooms.getCoordinatorModelForChat = async () => ({ id: 'model-b', config: { thinkingLevel: 'high' } });
+
+		contributions.service.didApplyClientAction(appliedClientAction(chat, session, {
+			type: ActionType.ChatDraftChanged,
+			draft: { text: '', origin: { kind: MessageKind.User }, model: { id: 'model-b', config: { thinkingLevel: 'high' } } },
+		}));
+		await Promise.resolve();
+		const restored = await contributions.service.hydrateChat({ session, chat }, {});
+
+		assert.deepStrictEqual({
+			saved,
+			restored,
+		}, {
+			saved: [{ id: 'model-b', config: { thinkingLevel: 'high' } }],
+			restored: { draft: { text: '', origin: { kind: MessageKind.User }, model: { id: 'model-b', config: { thinkingLevel: 'high' } } } },
 		});
 	});
 });

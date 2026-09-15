@@ -30,7 +30,9 @@ import { IEditorService } from '../../../../../workbench/services/editor/common/
 import { IViewsService } from '../../../../../workbench/services/views/common/viewsService.js';
 import { ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
 import { workbenchInstantiationService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
+import { AbstractChatView } from '../../../../browser/parts/chatView.js';
 import { IAgentHostSessionsProvider, LOCAL_AGENT_HOST_PROVIDER_ID } from '../../../../common/agentHostSessionsProvider.js';
+import { IChatViewFactory } from '../../../../services/chatView/browser/chatViewFactory.js';
 import { ISessionsPartService } from '../../../../services/sessions/browser/sessionsPartService.js';
 import { ISessionsService } from '../../../../services/sessions/browser/sessionsService.js';
 import { ICollaborationRoomCreationDraft, ICollaborationRoomScrollState, ICollaborationRoomViewService } from '../../../../services/collaboration/browser/collaborationRoomView.js';
@@ -39,6 +41,7 @@ import { CollaborationDraft } from '../../../../services/collaboration/common/co
 import { ISessionsProvidersService } from '../../../../services/sessions/browser/sessionsProvidersService.js';
 import { IChat, ISession } from '../../../../services/sessions/common/session.js';
 import { ISessionsProvider } from '../../../../services/sessions/common/sessionsProvider.js';
+import { CollaborationCoordinatorView } from '../../browser/collaborationCoordinatorView.js';
 import { CollaborationRoomWidget } from '../../browser/collaborationRoomWidget.js';
 import { stubCollaborationTestServices } from './collaborationTestServices.js';
 
@@ -103,6 +106,7 @@ suite('CollaborationRoomWidget', () => {
 			override readonly canConfigure = observableValue(this, false);
 			override readonly canSetMemberModel = observableValue(this, true);
 			override readonly canVerifyResults = observableValue(this, true);
+			override readonly canCoordinate = observableValue(this, false);
 			override readonly error = constObservable(undefined);
 			override readonly workspaceTrust = observableValue<ICollaborationWorkspaceTrust>(this, { state: 'trusted' });
 			override readonly requests = observableValue<readonly ICollaborationRequest[]>(this, []);
@@ -241,6 +245,70 @@ suite('CollaborationRoomWidget', () => {
 		container.querySelector<HTMLButtonElement>('.room-member-heading button')!.click();
 		assert.deepStrictEqual(await opened.p, { session: peerSession, chat: peerChat.resource });
 		assert.deepStrictEqual(resolutions, [{ session: 'copilotcli:/member-1', chat: URI.parse('opaque-chat:/member-1/primary?version=2').toString() }]);
+	});
+
+	test('coordinator view binds the resolved session to a standard chat view', async () => {
+		const calls: string[] = [];
+		const chat = new class extends mock<IChat>() {
+			override readonly resource = URI.parse('chat:/coordinator');
+		}();
+		const session = new class extends mock<ISession>() {
+			override readonly resource = URI.parse('session:/coordinator');
+			override readonly sessionId = 'coordinator-session';
+		}();
+		const provider = new class extends mock<IAgentHostSessionsProvider>() {
+			override readonly id = LOCAL_AGENT_HOST_PROVIDER_ID;
+			available = true;
+			override async resolveSessionChat(sessionUri: URI, chatUri: URI | undefined) {
+				calls.push(`resolve:${sessionUri.toString()}:${chatUri?.toString()}`);
+				return this.available ? { session, chat } : undefined;
+			}
+		}();
+		const registeredProviders = new Map<string, ISessionsProvider>([[provider.id, provider]]);
+		const providers = new class extends mock<ISessionsProvidersService>() {
+			override getProvider<T extends ISessionsProvider>(id: string): T | undefined { return registeredProviders.get(id) as T | undefined; }
+		}();
+		const chatView = new class extends mock<AbstractChatView>() {
+			override readonly kind = 'chat';
+			override readonly element = document.createElement('div');
+			override setPrimary(value: boolean): void { calls.push(`primary:${value}`); }
+			override setActive(value: boolean): void { calls.push(`active:${value}`); }
+			override setVisible(value: boolean): void { calls.push(`visible:${value}`); }
+			override setChat(value: IChat, historyKey?: string): void { calls.push(`chat:${value.resource.toString()}:${historyKey}`); }
+			override layout(width: number, height: number, top: number, left: number): void { calls.push(`layout:${width}:${height}:${top}:${left}`); }
+			protected override doLayout(width: number, height: number, top: number, left: number): void { calls.push(`layout:${width}:${height}:${top}:${left}`); }
+			override toJSON(): object { return {}; }
+			override focus(): void { calls.push('focus'); }
+			override dispose(): void { }
+		}();
+		const factory = new class extends mock<IChatViewFactory>() {
+			override createChatView(): AbstractChatView { calls.push('create'); return chatView; }
+		}();
+		const view = disposables.add(new CollaborationCoordinatorView(factory, providers));
+		view.layout(800, 600);
+		await view.setCoordinator('copilotcli:/coordinator', 'copilotcli:/coordinator/chat', 'Coordinator: Room', 0, 'file:///coordinator');
+		view.setVisible(false);
+		view.focus();
+		provider.available = false;
+		await assert.rejects(view.setCoordinator('copilotcli:/another-coordinator', undefined, 'Coordinator: Another Room', 1, 'file:///another-coordinator'));
+		assert.deepStrictEqual({
+			calls,
+			staleChatCleared: view.element.childElementCount === 0,
+		}, {
+			calls: [
+				'resolve:copilotcli:/coordinator:copilotcli:/coordinator/chat',
+				'create',
+				'primary:true',
+				'active:true',
+				'visible:true',
+				'chat:chat:/coordinator:coordinator-session',
+				'layout:800:600:0:0',
+				'visible:false',
+				'focus',
+				'resolve:copilotcli:/another-coordinator:undefined',
+			],
+			staleChatCleared: true,
+		});
 	});
 
 	test('a late peer resolution cannot reopen a disposed room surface', async () => {
@@ -507,6 +575,40 @@ suite('CollaborationRoomWidget', () => {
 		});
 	});
 
+	test('structured paired assignments expose objective, evidence, assignees and state', () => {
+		const { container, facade, widget } = setup();
+		facade.messages.set({
+			hasEarlier: false,
+			hasLater: false,
+			messages: [{
+				id: 'assignment-one', sequence: 1, authorId: 'coordinator', authorName: 'Coordinator', authorKind: 'agent',
+				kind: 'work', text: 'Pair on the parser.', timestamp: 0,
+				mentions: ['member-1', 'member-2'], deliveries: [
+					{ memberId: 'member-1', state: 'pending' },
+					{ memberId: 'member-2', state: 'pending' },
+				],
+				assignment: {
+					assigneeIds: ['member-1', 'member-2'],
+					kind: 'work',
+					description: 'Refactor the parser.',
+					expectedEvidence: ['Focused parser tests', 'Independent review'],
+					note: 'Share ownership and compare both approaches.',
+				},
+			}],
+		}, undefined);
+		assert.deepStrictEqual({
+			card: container.querySelector('.room-assignment')?.textContent,
+			state: container.querySelector('.room-assignment')?.getAttribute('data-state'),
+			accessible: widget.getAccessibleContent().includes('Assigned to: Copilot-1, Copilot-2')
+				&& widget.getAccessibleContent().includes('Expected evidence: Focused parser tests; Independent review')
+				&& widget.getAccessibleContent().includes('Coordination note: Share ownership and compare both approaches.'),
+		}, {
+			card: 'Paired AssignmentPendingRefactor the parser.Coordination note: Share ownership and compare both approaches.Paired agents: Copilot-1, Copilot-2Expected EvidenceFocused parser testsIndependent review',
+			state: 'pending',
+			accessible: true,
+		});
+	});
+
 	test('legacy context-only human posts retain their original undelivered status', () => {
 		const { container, facade, widget } = setup();
 		facade.messages.set({
@@ -618,10 +720,14 @@ suite('CollaborationRoomWidget', () => {
 		assert.strictEqual(loads, 1);
 	});
 
-	test('the room shows only the conversation and publishes its settings to the side panel', () => {
+	test('the room separates coordinator chat from worker activity and publishes settings to the side panel', () => {
 		const { container, panel } = setup('running', 1);
 		const main = container.querySelector<HTMLElement>('.room-main')!;
+		const mainTabs = [...main.querySelectorAll<HTMLElement>('.room-main-tabs .room-tab')];
 		assert.deepStrictEqual({
+			mainTabs: mainTabs.map(tab => tab.textContent),
+			selectedMainTab: mainTabs.find(tab => tab.getAttribute('aria-selected') === 'true')?.textContent,
+			coordinatorPlaceholder: main.querySelector('.room-coordinator-placeholder')?.textContent,
 			mainHasChat: !!main.querySelector('.room-feed'),
 			mainHasComposer: !!main.querySelector('.room-composer'),
 			mainHasRoster: !!main.querySelector('.room-roster'),
@@ -629,7 +735,53 @@ suite('CollaborationRoomWidget', () => {
 			panelHasRoster: !!panel.querySelector('.room-roster'),
 			modelPickers: panel.querySelectorAll('.room-roster .room-model-picker').length,
 			oldPaging: [...container.querySelectorAll('button')].some(button => ['Older Posts', 'Newer Posts'].includes(button.textContent ?? '')),
-		}, { mainHasChat: true, mainHasComposer: true, mainHasRoster: false, panelInRoom: false, panelHasRoster: true, modelPickers: 2, oldPaging: false });
+		}, {
+			mainTabs: ['Coordinator', 'Activity'],
+			selectedMainTab: 'Activity',
+			coordinatorPlaceholder: 'This local agent host does not support a coordinator.',
+			mainHasChat: true,
+			mainHasComposer: true,
+			mainHasRoster: false,
+			panelInRoom: false,
+			panelHasRoster: true,
+			modelPickers: 2,
+			oldPaging: false,
+		});
+	});
+
+	test('Activity badges meaningful unread evidence but not ordinary chatter', () => {
+		const { container, facade } = setup('running', 1);
+		const tab = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('.room-main-tabs .room-tab')]
+			.find(button => button.textContent?.startsWith(label))!;
+		tab('Coordinator').click();
+		tab('Coordinator').focus();
+		const page = facade.messages.get();
+		const append = (message: IAgentHostRoomMessage) => facade.messages.set({ ...page, messages: [...facade.messages.get().messages, message] }, undefined);
+		append({
+			id: 'chatter', sequence: 2, authorId: 'member-1', authorName: 'Copilot-1', authorKind: 'agent',
+			kind: 'message', text: 'Still looking.', timestamp: 0, mentions: [], deliveries: [],
+		});
+		const afterChatter = tab('Activity').querySelector('.room-tab-badge')?.textContent;
+		append({
+			id: 'result', sequence: 3, authorId: 'member-1', authorName: 'Copilot-1', authorKind: 'agent',
+			kind: 'finding', text: 'Found the root cause.', timestamp: 0, mentions: [], deliveries: [],
+		});
+		const activity = tab('Activity');
+		const unread = {
+			badge: activity.querySelector('.room-tab-badge')?.textContent,
+			label: activity.getAttribute('aria-label'),
+			focusPreserved: document.activeElement === tab('Coordinator'),
+		};
+		activity.click();
+		assert.deepStrictEqual({
+			afterChatter,
+			unread,
+			afterOpen: tab('Activity').querySelector('.room-tab-badge')?.textContent,
+		}, {
+			afterChatter: undefined,
+			unread: { badge: '1', label: 'Activity, 1 unread meaningful updates', focusPreserved: true },
+			afterOpen: undefined,
+		});
 	});
 
 	test('the attention action opens the side panel and focuses the failed peer', async () => {
@@ -677,6 +829,7 @@ suite('CollaborationRoomWidget', () => {
 		const draft: ICollaborationRoomCreationDraft = {
 			title: 'Mixed models', goal: 'Review the design', instructions: '', repositoryUri: 'file:///repo',
 			baseRevision: 'HEAD', workerCount: '3', model: '',
+			coordinatorModel: { id: 'model-b' },
 			memberNames: ['chaotic-cyborg', 'disciplined-neuron', 'caffeinated-compiler'],
 			memberModels: [{ id: 'model-a' }, undefined, { id: 'model-b' }],
 		};
@@ -692,12 +845,15 @@ suite('CollaborationRoomWidget', () => {
 			visibleNames,
 			draftNames: viewService.creationDraft.get()?.memberNames,
 			draftModels: viewService.creationDraft.get()?.memberModels,
+			draftCoordinatorModel: viewService.creationDraft.get()?.coordinatorModel,
 			createdNames: (await created.p).memberNames,
 			createdModels: (await created.p).memberModels,
+			createdCoordinatorModel: (await created.p).coordinatorModel,
 			starts,
 		}, {
 			visibleNames: draft.memberNames, draftNames: draft.memberNames, draftModels: draft.memberModels,
-			createdNames: draft.memberNames, createdModels: draft.memberModels, starts: [],
+			draftCoordinatorModel: draft.coordinatorModel,
+			createdNames: draft.memberNames, createdModels: draft.memberModels, createdCoordinatorModel: draft.coordinatorModel, starts: [],
 		});
 	});
 
@@ -852,14 +1008,14 @@ suite('CollaborationRoomWidget', () => {
 	});
 
 	test('arrow keys move between panel tabs without leaving the tablist', () => {
-		const { container } = setup('running', 1);
-		const tabs = [...container.querySelectorAll<HTMLElement>('.room-tab')];
+		const { panel } = setup('running', 1);
+		const tabs = [...panel.querySelectorAll<HTMLElement>('.room-tab')];
 		tabs[0].focus();
-		container.querySelector<HTMLElement>('.room-tabs')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+		panel.querySelector<HTMLElement>('.room-tabs')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
 		const afterRight = document.activeElement;
-		container.querySelector<HTMLElement>('.room-tabs')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+		panel.querySelector<HTMLElement>('.room-tabs')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
 		assert.deepStrictEqual({
-			role: container.querySelector('.room-tabs')!.getAttribute('role'),
+			role: panel.querySelector('.room-tabs')!.getAttribute('role'),
 			right: afterRight === tabs[1], end: document.activeElement === tabs[tabs.length - 1],
 			roving: tabs[0].tabIndex,
 		}, { role: 'tablist', right: true, end: true, roving: -1 });

@@ -12,9 +12,9 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { IActionListDelegate, IActionListItem } from '../../../../../platform/actionWidget/browser/actionList.js';
 import { IActionWidgetService } from '../../../../../platform/actionWidget/browser/actionWidget.js';
 import { ModelSelection, SessionModelInfo } from '../../../../../platform/agentHost/common/state/protocol/state.js';
-import { IAgentHostRoomMember } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoomCoordinator, IAgentHostRoomMember } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { workbenchInstantiationService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
-import { CollaborationModelCatalog, CollaborationModelPicker, getCollaborationMemberModelState } from '../../browser/collaborationModelPicker.js';
+import { CollaborationModelCatalog, CollaborationModelPicker, getCollaborationCoordinatorModelState, getCollaborationMemberModelState } from '../../browser/collaborationModelPicker.js';
 import { stubCollaborationTestServices } from './collaborationTestServices.js';
 
 suite('CollaborationModelPicker', () => {
@@ -134,6 +134,34 @@ suite('CollaborationModelPicker', () => {
 		assert.deepStrictEqual(getCollaborationMemberModelState(member, models, true), {
 			selection: { id: 'model-b', config: { effort: 'high' } }, enabled: true,
 			detail: 'Applies on the next turn. Currently using Model A.', error: undefined,
+		});
+	});
+
+	test('the coordinator model reports its independent pending and applied state', () => {
+		const coordinator: IAgentHostRoomCoordinator = {
+			id: 'coordinator',
+			name: 'Coordinator',
+			sessionUri: 'copilotcli:/coordinator',
+			chatUri: 'copilotcli:/coordinator/chat',
+			worktreeUri: 'file:///coordinator',
+			desiredModel: { id: 'model-b', config: { effort: 'high' } },
+			appliedModel: { id: 'model-a' },
+			pendingModel: { id: 'model-b', config: { effort: 'high' } },
+			state: 'working',
+			initialized: true,
+			cursor: 0,
+			eventSequence: 0,
+			eventCursor: 0,
+			pendingEvents: [],
+		};
+		assert.deepStrictEqual(getCollaborationCoordinatorModelState(coordinator, [
+			{ id: 'model-a', name: 'Model A', provider: 'copilotcli' },
+			{ id: 'model-b', name: 'Model B', provider: 'copilotcli' },
+		], true), {
+			selection: { id: 'model-b', config: { effort: 'high' } },
+			enabled: true,
+			detail: 'Applies on the next coordinator turn. Currently using Model A.',
+			error: undefined,
 		});
 	});
 

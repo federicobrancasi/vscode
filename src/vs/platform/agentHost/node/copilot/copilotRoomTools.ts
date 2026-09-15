@@ -5,7 +5,74 @@
 
 import type { Tool } from '@github/copilot-sdk';
 import { isStringArray } from '../../../../base/common/types.js';
-import { IRoomSessionTools } from '../agentHostRooms.js';
+import { IRoomCoordinatorTools, IRoomSessionTools } from '../agentHostRooms.js';
+
+export function createCopilotRoomCoordinatorTools(sessionId: string, rooms: IRoomCoordinatorTools): Tool[] {
+	return [
+		{
+			name: 'room_coordinator_snapshot',
+			description: 'Read deterministic typed room facts: workers, explicit assignments and pairings, results and verification, blockers and failures, pending human guidance, unowned work, room sequence, and immutable evidence IDs. Status text never creates a pairing.',
+			parameters: { type: 'object', properties: {}, additionalProperties: false },
+			handler: args => {
+				if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length !== 0) {
+					throw new Error('The coordinator snapshot tool takes no arguments');
+				}
+				return rooms.coordinatorSnapshot(sessionId);
+			},
+		},
+		{
+			name: 'room_assign',
+			description: 'Create one immutable structured work or verification assignment for one or more room members. Use supersedes to redirect existing work, resultId for verification requests, expectedEvidence for completion criteria, and note only when a visible coordination message is useful.',
+			parameters: {
+				type: 'object',
+				properties: {
+					id: { type: 'string', description: 'Unique stable assignment ID. Reuse only when retrying the identical assignment.' },
+					assignees: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 10, uniqueItems: true },
+					kind: { type: 'string', enum: ['work', 'verification'] },
+					description: { type: 'string', maxLength: 8000 },
+					expectedEvidence: { type: 'array', items: { type: 'string', maxLength: 2000 }, minItems: 1, maxItems: 20 },
+					resultId: { type: 'string' },
+					supersedes: { type: 'string' },
+					note: { type: 'string', maxLength: 32000 },
+				},
+				required: ['id', 'assignees', 'kind', 'description', 'expectedEvidence'],
+				additionalProperties: false,
+			},
+			handler: args => {
+				const { id, assignees, kind, description, expectedEvidence, resultId, supersedes, note } = readArguments(args);
+				if (typeof id !== 'string' || !isStringArray(assignees)
+					|| (kind !== 'work' && kind !== 'verification')
+					|| typeof description !== 'string' || !isStringArray(expectedEvidence)
+					|| (resultId !== undefined && typeof resultId !== 'string')
+					|| (supersedes !== undefined && typeof supersedes !== 'string')
+					|| (note !== undefined && typeof note !== 'string')) {
+					throw new Error('Invalid room assignment');
+				}
+				return rooms.assign(sessionId, { id, assignees, kind, description, expectedEvidence, resultId, supersedes, note });
+			},
+		},
+		{
+			name: 'room_post',
+			description: 'Post a visible informational note to Activity as the coordinator. Use this only to explain coordination state that should be shared with workers; use room_assign for work, redirection, pairing, or verification. The note does not notify or wake workers.',
+			parameters: {
+				type: 'object',
+				properties: {
+					id: { type: 'string', description: 'Unique stable message ID. Reuse only when retrying the identical note.' },
+					text: { type: 'string', maxLength: 32000 },
+				},
+				required: ['id', 'text'],
+				additionalProperties: false,
+			},
+			handler: args => {
+				const { id, text } = readArguments(args);
+				if (typeof id !== 'string' || typeof text !== 'string') {
+					throw new Error('Invalid room coordination note');
+				}
+				return rooms.postCoordinationNote(sessionId, id, text);
+			},
+		},
+	];
+}
 
 /**
  * Session and author identities come only from the launch binding, never
@@ -86,18 +153,20 @@ export function createCopilotRoomTools(sessionId: string, rooms: IRoomSessionToo
 					outcome: { type: 'string', enum: ['success', 'negative', 'inconclusive', 'blocked'] },
 					evidence: { type: 'array', items: { type: 'string', maxLength: 2000 }, minItems: 1, maxItems: 20 },
 					artifactIds: { type: 'array', items: { type: 'string' }, maxItems: 20, uniqueItems: true },
+					assignmentId: { type: 'string', description: 'Coordinator work assignment satisfied by this result.' },
 				},
 				required: ['id', 'title', 'summary', 'outcome', 'evidence', 'artifactIds'],
 				additionalProperties: false,
 			},
 			handler: args => {
-				const { id, title, summary, outcome, evidence, artifactIds } = readArguments(args);
+				const { id, title, summary, outcome, evidence, artifactIds, assignmentId } = readArguments(args);
 				if (typeof id !== 'string' || typeof title !== 'string' || typeof summary !== 'string'
 					|| (outcome !== 'success' && outcome !== 'negative' && outcome !== 'inconclusive' && outcome !== 'blocked')
-					|| !isStringArray(evidence) || !isStringArray(artifactIds)) {
+					|| !isStringArray(evidence) || !isStringArray(artifactIds)
+					|| (assignmentId !== undefined && typeof assignmentId !== 'string')) {
 					throw new Error('Invalid structured room result');
 				}
-				return rooms.publishResult(sessionId, { id, title, summary, outcome, evidence, artifactIds });
+				return rooms.publishResult(sessionId, { id, title, summary, outcome, evidence, artifactIds, assignmentId });
 			},
 		},
 		{

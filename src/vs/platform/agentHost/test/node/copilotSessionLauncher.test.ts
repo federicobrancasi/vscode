@@ -205,6 +205,72 @@ suite('CopilotSessionLauncher room tools', () => {
 			})),
 		});
 	});
+
+	test('coordinator sessions receive only coordinator tools and deny worker capabilities', async () => {
+		let configuration: ResumeSessionConfig | undefined;
+		const checked: string[] = [];
+		const rooms: IAgentHostRoomsController = {
+			...createNoopRoomsController(),
+			isCoordinatorSessionUri: session => session === testRuntime.configurationResource.toString(),
+			beforeTool: (_sessionId, tool) => {
+				checked.push(tool);
+				if (tool !== 'room_coordinator_snapshot' && tool !== 'room_assign' && tool !== 'room_post') {
+					throw new Error('Coordinator tools only');
+				}
+			},
+		};
+		const sdkSession = upcastPartial<CopilotSession>({
+			sessionId: 'sdk-backing',
+			on: () => () => { },
+			disconnect: async () => { },
+			rpc: upcastPartial<CopilotSession['rpc']>({
+				options: { update: async () => ({ success: true }) },
+			}),
+		});
+		const client = upcastPartial<CopilotClient>({
+			createSession: async config => {
+				configuration = config;
+				reportManagedSettings(config!);
+				return sdkSession;
+			},
+		});
+		const launcher = createTestLauncher(undefined, {}, new NullLogService(), noopSessionOpenTelemetry, undefined, rooms);
+		store.add(await launcher.launch({
+			kind: 'create',
+			client,
+			sessionId: 'sdk-backing',
+			workingDirectory: testWorkingDirectory,
+			model: undefined,
+			resolvedAgentName: undefined,
+			snapshot: { tools: [], plugins: [], mcpServers: {} },
+			activeClientToolSet: new ActiveClientToolSet(),
+			shellManager: undefined,
+			githubCredentials: CopilotGitHubSessionCredentials.fromToken(undefined),
+		}, testRuntime));
+		const allowed = await configuration!.hooks?.onPreToolUse?.({
+			sessionId: 'sdk-backing', timestamp: new Date(0), workingDirectory: testWorkingDirectory.fsPath,
+			toolName: 'room_assign', toolArgs: {},
+		}, { sessionId: 'sdk-backing' });
+		const deniedTools = ['bash', 'task', 'ask_user', 'deleteComments'];
+		const denied = await Promise.all(deniedTools.map(toolName => configuration!.hooks?.onPreToolUse?.({
+			sessionId: 'sdk-backing', timestamp: new Date(0), workingDirectory: testWorkingDirectory.fsPath,
+			toolName, toolArgs: {},
+		}, { sessionId: 'sdk-backing' })));
+
+		assert.deepStrictEqual({
+			tools: configuration!.tools?.map(tool => tool.name),
+			availableTools: configuration!.availableTools,
+			allowed: allowed?.permissionDecision,
+			denied: denied.map(result => result?.permissionDecision),
+			checked,
+		}, {
+			tools: ['room_coordinator_snapshot', 'room_assign', 'room_post'],
+			availableTools: ['room_coordinator_snapshot', 'room_assign', 'room_post'],
+			allowed: undefined,
+			denied: deniedTools.map(() => 'deny'),
+			checked: ['room_assign', ...deniedTools],
+		});
+	});
 });
 
 suite('CopilotSessionLauncher sandbox policy', () => {

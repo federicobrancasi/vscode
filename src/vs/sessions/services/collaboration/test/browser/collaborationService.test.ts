@@ -12,7 +12,7 @@ import { isWeb } from '../../../../../base/common/platform.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsCapabilities, IAgentHostRoomsService, IAgentHostRoomVerifyResultOptions } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomCoordinator, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsCapabilities, IAgentHostRoomsService, IAgentHostRoomVerifyResultOptions } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { GITHUB_COPILOT_PROTECTED_RESOURCE, IAgentHostService } from '../../../../../platform/agentHost/common/agentService.js';
 import { IAgentSubscription } from '../../../../../platform/agentHost/common/state/agentSubscription.js';
 import { PolicyState, RootState } from '../../../../../platform/agentHost/common/state/protocol/state.js';
@@ -43,7 +43,7 @@ suite('CollaborationService', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 	const desktopTest = isWeb ? test.skip : test;
 
-	function setup(enabled = true, aiDisabled = false) {
+	function setup(enabled = true, aiDisabled = false, coordinatorSupported = false) {
 		const starts: { roomId: string; limits: IAgentHostRoomLimits }[] = [];
 		const verifications: { roomId: string; options: IAgentHostRoomVerifyResultOptions }[] = [];
 		const changed = disposables.add(new Emitter<IAgentHostRoom>());
@@ -65,6 +65,7 @@ suite('CollaborationService', () => {
 					supportsMemberModels: true,
 					supportsStructuredResults: true,
 					supportsResultVerification: true,
+					supportsCoordinator: coordinatorSupported,
 				};
 			}
 			override async listRooms(): Promise<readonly IAgentHostRoom[]> { return [room('a'), room('b')]; }
@@ -546,6 +547,64 @@ suite('CollaborationService', () => {
 		});
 	});
 
+	desktopTest('preparing a coordinator trusts its exact worktree and persists its independent model', async () => {
+		const { service, api, authenticationService, trustGrants } = setup(true, false, true);
+		const coordinator: IAgentHostRoomCoordinator = {
+			id: 'coordinator',
+			name: 'Coordinator',
+			sessionUri: 'copilotcli:/coordinator',
+			chatUri: 'copilotcli:/coordinator/chat',
+			worktreeUri: 'file:///rooms/a/coordinator',
+			state: 'idle',
+			initialized: true,
+			cursor: 0,
+			eventSequence: 0,
+			eventCursor: 0,
+			pendingEvents: [],
+		};
+		let prepared = false;
+		let selectedModel: string | undefined;
+		const selectedRoom = (): IAgentHostRoom => ({
+			...room('a', selectedModel ? 3 : prepared ? 2 : 1),
+			members: [1, 2].map(index => ({
+				id: `member-${index}`,
+				name: `member-${index}`,
+				sessionUri: `copilotcli:/member-${index}`,
+				worktreeUri: `file:///rooms/a/member-${index}`,
+				state: 'idle' as const,
+				turns: 0,
+			})),
+			...(prepared ? { coordinator: { ...coordinator, desiredModel: selectedModel ? { id: selectedModel } : undefined } } : {}),
+		});
+		api.listRooms = async () => [selectedRoom(), room('b')];
+		api.getRoom = async () => selectedRoom();
+		api.ensureCoordinator = async () => {
+			prepared = true;
+			return coordinator;
+		};
+		api.setCoordinatorModel = async (_roomId, model) => {
+			selectedModel = model?.id;
+			return selectedRoom().coordinator!;
+		};
+		await waitForState(service.availability, state => state === 'available');
+		await service.selectRoom('a');
+		authenticationService.getSessions = async () => [authenticationSession];
+		await service.ensureCoordinator();
+		await service.setCoordinatorModel({ id: 'allowed' });
+		assert.deepStrictEqual({
+			canCoordinate: service.canCoordinate.get(),
+			trustGrants,
+			coordinatorModel: service.activeRoom.get()?.coordinator?.desiredModel,
+		}, {
+			canCoordinate: true,
+			trustGrants: [
+				['file:///rooms/a/member-1', 'file:///rooms/a/member-2'],
+				['file:///rooms/a/coordinator'],
+			],
+			coordinatorModel: { id: 'allowed' },
+		});
+	});
+
 	desktopTest('steering without mentions delegates the broadcast roster to the host', async () => {
 		const { service, api, authenticationService } = setup();
 		await waitForState(service.availability, state => state === 'available');
@@ -726,7 +785,7 @@ suite('CollaborationService', () => {
 		await service.startRoom();
 		assert.deepStrictEqual({
 			prompts: trustPrompts.map(prompt => prompt.uri.toString()),
-			separateWorktreesExplained: trustPrompts[0]?.message?.includes('Every peer uses a separate local worktree'),
+			separateWorktreesExplained: trustPrompts[0]?.message?.includes('The coordinator and each worker use separate local worktrees'),
 			grants: trustGrants,
 			starts: starts.length,
 		}, {

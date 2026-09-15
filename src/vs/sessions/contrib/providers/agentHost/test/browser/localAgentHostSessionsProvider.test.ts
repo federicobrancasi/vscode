@@ -2528,6 +2528,73 @@ suite('LocalAgentHostSessionsProvider', () => {
 		assert.deepStrictEqual({ resolved, sessions: agentHost.createdSessionUris, chats: agentHost.createdChats }, { resolved: undefined, sessions: [], chats: [] });
 	});
 
+	test('resolveSessionChat refreshes an authoritative backend session missing from the initialized cache', async () => {
+		agentHost.addSession(createSession('existing', { summary: 'Existing' }));
+		const provider = createProvider(disposables, agentHost);
+		const initialized = Event.toPromise(provider.onDidChangeSessions);
+		provider.getSessions();
+		await initialized;
+		const backend = AgentSession.uri('copilotcli', 'coordinator');
+		const defaultChat = buildDefaultChatUri(backend);
+		agentHost.addSession(createSession('coordinator', { summary: 'Coordinator' }));
+		agentHost.setSessionState('coordinator', 'copilotcli', {
+			provider: 'copilotcli',
+			title: 'Coordinator',
+			status: ProtocolSessionStatus.Idle,
+			lifecycle: SessionLifecycle.Ready,
+			activeClients: [],
+			defaultChat,
+			chats: [{ resource: defaultChat, title: 'Coordinator', status: ProtocolSessionStatus.Idle, modifiedAt: '2025-01-01T00:00:00.000Z' }],
+		});
+		const resolved = await provider.resolveSessionChat(backend, URI.parse(defaultChat), CancellationToken.None);
+		assert.deepStrictEqual({
+			resolved: !!resolved,
+			chat: resolved && provider.getBackendChatResource(resolved.chat.resource)?.toString(),
+			createdSessions: agentHost.createdSessionUris,
+			createdChats: agentHost.createdChats,
+		}, {
+			resolved: true,
+			chat: defaultChat,
+			createdSessions: [],
+			createdChats: [],
+		});
+	});
+
+	test('resolveSessionChat adopts a verified reserved session whose provider backing is deferred', async () => {
+		const provider = createProvider(disposables, agentHost);
+		const backend = AgentSession.uri('copilotcli', 'reserved-coordinator');
+		const defaultChat = buildDefaultChatUri(backend);
+		const worktree = URI.file('/rooms/coordinator');
+		agentHost.setSessionState('reserved-coordinator', 'copilotcli', {
+			provider: 'copilotcli',
+			title: 'Coordinator',
+			status: ProtocolSessionStatus.Idle,
+			lifecycle: SessionLifecycle.Creating,
+			activeClients: [],
+			workingDirectories: [worktree.toString()],
+			defaultChat,
+			chats: [{ resource: defaultChat, title: 'Coordinator', status: ProtocolSessionStatus.Idle, modifiedAt: '2025-01-01T00:00:00.000Z' }],
+		});
+		const resolved = await provider.resolveSessionChat(backend, URI.parse(defaultChat), CancellationToken.None, {
+			title: 'Coordinator: Room',
+			createdAt: 1,
+			worktreeUri: worktree,
+		});
+		assert.deepStrictEqual({
+			resolved: !!resolved,
+			chat: resolved && provider.getBackendChatResource(resolved.chat.resource)?.toString(),
+			sessions: provider.getSessions().map(session => session.title.get()),
+			createdSessions: agentHost.createdSessionUris,
+			createdChats: agentHost.createdChats,
+		}, {
+			resolved: true,
+			chat: defaultChat,
+			sessions: ['Coordinator: Room'],
+			createdSessions: [],
+			createdChats: [],
+		});
+	});
+
 	test('resolveSessionChat never replaces an unprepared reserved member session or placeholder chat', async () => {
 		const provider = createProvider(disposables, agentHost);
 		const backend = AgentSession.uri('copilotcli', 'reserved-member');

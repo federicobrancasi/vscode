@@ -7,10 +7,11 @@ import '../../chat/browser/media/chatInput.css';
 import './media/collaborationRoom.css';
 import { $, addDisposableListener, EventType, getActiveElement, getWindow, isAncestor, isHTMLElement, trackFocus } from '../../../../base/browser/dom.js';
 import { status } from '../../../../base/browser/ui/aria/aria.js';
+import { disposableTimeout } from '../../../../base/common/async.js';
 import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { CancellationError, isCancellationError } from '../../../../base/common/errors.js';
-import { Disposable, DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { autorun, observableValue } from '../../../../base/common/observable.js';
 import { equals } from '../../../../base/common/objects.js';
 import { Schemas } from '../../../../base/common/network.js';
@@ -39,22 +40,25 @@ import { ICollaborationRoomScrollState, ICollaborationRoomView, ICollaborationRo
 import { CollaborationRoomFocusedContext, ICollaborationRequest, ICollaborationService } from '../../../services/collaboration/common/collaboration.js';
 import { getCollaborationMentionQuery, ICollaborationMentionQuery } from '../../../services/collaboration/common/collaborationMentions.js';
 import { ISessionsProvidersService } from '../../../services/sessions/browser/sessionsProvidersService.js';
-import { deliveryStateLabel, memberStateLabel, resultOutcomeLabel, roomStateLabel, verificationStateLabel, verificationVerdictLabel } from './collaborationRoomLabels.js';
+import { coordinatorStateLabel, deliveryStateLabel, memberStateLabel, resultOutcomeLabel, roomStateLabel, verificationStateLabel, verificationVerdictLabel } from './collaborationRoomLabels.js';
 import { CollaborationArtifactProvider } from './collaborationArtifactProvider.js';
 import { CollaborationRequestWidget } from './collaborationRequestWidget.js';
 import { CollaborationConfigurationPicker } from './collaborationConfigurationPicker.js';
 import { CollaborationConversation } from './collaborationConversation.js';
+import { CollaborationCoordinatorSessionNotReadyError, CollaborationCoordinatorView } from './collaborationCoordinatorView.js';
 import { CollaborationHome } from './collaborationHome.js';
 import { CollaborationTabs } from './collaborationTabs.js';
 import { COLLABORATION_SETTINGS_CONTAINER_ID } from './collaborationSettingsView.js';
 import { CollaborationRoomLayout } from './collaborationRoomLayout.js';
-import { CollaborationModelCatalog, CollaborationModelPicker, getCollaborationMemberModelState } from './collaborationModelPicker.js';
+import { CollaborationModelCatalog, CollaborationModelPicker, getCollaborationCoordinatorModelState, getCollaborationMemberModelState } from './collaborationModelPicker.js';
 import { collaborationAuthorAccent } from './collaborationColors.js';
 
 const RUN_TAB = 'run';
 const AGENTS_TAB = 'agents';
 const RULES_TAB = 'rules';
 const APPROVALS_TAB = 'approvals';
+const COORDINATOR_TAB = 'coordinator';
+const ACTIVITY_TAB = 'activity';
 
 const unsupportedMemberModelsMessage = localize('room.memberModelsUnavailable', "Reconnect or update the local agent host to choose a model for each peer.");
 
@@ -106,7 +110,17 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private readonly runControls: HTMLElement;
 	private lastHeight = 0;
 	private readonly tabs: CollaborationTabs;
+	private readonly mainTabs: CollaborationTabs;
+	private readonly mainTabsHeader: HTMLElement;
+	private readonly mainTabContent: HTMLElement;
+	private readonly coordinatorPanel: HTMLElement;
+	private readonly coordinatorPlaceholder: HTMLElement;
+	private readonly coordinatorView: CollaborationCoordinatorView;
+	private readonly activityPanel: HTMLElement;
 	private readonly agentsPanel: HTMLElement;
+	private readonly coordinatorSettings: HTMLElement;
+	private readonly coordinatorSettingsState: HTMLElement;
+	private readonly coordinatorModelPicker: CollaborationModelPicker;
 	private readonly addMemberButton: HTMLButtonElement;
 	private readonly runPanel: HTMLElement;
 	private readonly rulesPanel: HTMLElement;
@@ -124,6 +138,14 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	private suggestionMembers: readonly IAgentHostRoomMember[] = [];
 	private suggestionIndex = 0;
 	private mentionQuery: ICollaborationMentionQuery | undefined;
+	private coordinatorLoadVersion = 0;
+	private coordinatorLoadKey: string | undefined;
+	private coordinatorRetryKey: string | undefined;
+	private coordinatorRetryAttempts = 0;
+	private readonly coordinatorRetry = this._register(new MutableDisposable());
+	private coordinatorAutoSelectedRoomId: string | undefined;
+	private readonly activitySeenEvents = new Map<string, ReadonlySet<string>>();
+	private readonly announcedAssignmentFailures = new Set<string>();
 	private followingLatest = true;
 	private pendingScroll: ICollaborationRoomScrollState | undefined;
 	private initialSelection = true;
@@ -167,6 +189,29 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.subtitle = headingContainer.appendChild($('.room-subtitle'));
 		this.layoutWidget = this._register(instantiationService.createInstance(CollaborationRoomLayout, this.element,
 			() => this.conversation?.layout(this.feed.clientWidth, this.feed.clientHeight)));
+		this.mainTabsHeader = this.layoutWidget.main.appendChild($('.room-main-tabs-header'));
+		this.mainTabs = this._register(new CollaborationTabs(
+			this.mainTabsHeader,
+			id => this.onMainTabChanged(id),
+			localize('room.mainTabsLabel', "Collaboration room views"),
+		));
+		this.mainTabs.element.classList.add('room-main-tabs');
+		this.mainTabContent = this.layoutWidget.main.appendChild($('.room-main-tab-content'));
+		this.coordinatorPanel = this.mainTabContent.appendChild($('.room-main-tab-panel.room-coordinator-panel'));
+		this.coordinatorPlaceholder = this.coordinatorPanel.appendChild($('.room-coordinator-placeholder'));
+		this.coordinatorPlaceholder.textContent = localize('room.coordinatorPreparing', "Preparing the coordinator...");
+		this.coordinatorView = this._register(instantiationService.createInstance(CollaborationCoordinatorView));
+		this.coordinatorView.element.hidden = true;
+		this.coordinatorPanel.appendChild(this.coordinatorView.element);
+		this.activityPanel = this.mainTabContent.appendChild($('.room-main-tab-panel.room-activity-panel'));
+		this.mainTabs.registerPanel(COORDINATOR_TAB, this.coordinatorPanel);
+		this.mainTabs.registerPanel(ACTIVITY_TAB, this.activityPanel);
+		this.mainTabs.setTabs([
+			{ id: COORDINATOR_TAB, label: localize('room.tabCoordinator', "Coordinator") },
+			{ id: ACTIVITY_TAB, label: localize('room.tabActivity', "Activity") },
+		]);
+		// Activity remains the fallback until the coordinator chat has resolved.
+		this.mainTabs.select(ACTIVITY_TAB);
 		this.tabs = this._register(new CollaborationTabs(this.layoutWidget.panelHeader, () => this.updateTabPanels()));
 		const tabContent = this.layoutWidget.panelContent.appendChild($('.room-tab-content'));
 		this.runPanel = tabContent.appendChild($('.room-tab-panel'));
@@ -202,6 +247,17 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.localError.set(toErrorMessage(error), undefined);
 		}));
 		this.agentsPanel = tabContent.appendChild($('.room-tab-panel'));
+		this.coordinatorSettings = this.agentsPanel.appendChild($('section.room-coordinator-settings'));
+		const coordinatorHeading = this.coordinatorSettings.appendChild($('.room-coordinator-settings-heading'));
+		coordinatorHeading.appendChild($('h3')).textContent = localize('room.coordinator', "Coordinator");
+		this.coordinatorSettingsState = coordinatorHeading.appendChild($('span.room-member-state'));
+		this.coordinatorModelPicker = this._register(instantiationService.createInstance(
+			CollaborationModelPicker,
+			this.coordinatorSettings,
+			localize('room.coordinator', "Coordinator"),
+			this.modelCatalog,
+			model => this.collaborationService.setCoordinatorModel(model),
+		));
 		this.roster = this.agentsPanel.appendChild($('.room-roster'));
 		this.roster.setAttribute('role', 'list');
 		this.roster.setAttribute('aria-label', localize('room.participants', "Copilot peers and current activity"));
@@ -218,9 +274,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.goalContent = this.rulesPanel.appendChild($('dl.room-goal'));
 		this.tabs.registerPanel(RULES_TAB, this.rulesPanel);
 
-		this.notice = this.layoutWidget.main.appendChild($('.room-notice'));
+		this.notice = this.activityPanel.appendChild($('.room-notice'));
 		this.notice.setAttribute('role', 'status');
-		this.retryLoad = this.button(this.layoutWidget.main, localize('room.reload', "Retry Loading"), async () => {
+		this.retryLoad = this.button(this.activityPanel, localize('room.reload', "Retry Loading"), async () => {
 			if (this.collaborationService.availability.get() === 'available') {
 				await this.collaborationService.loadMessages();
 				if (!this.followingLatest && this.conversation.scrollTop < 120 && this.collaborationService.messages.get().hasEarlier) {
@@ -235,10 +291,10 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.trustMessage = this.trustNotice.appendChild($('p'));
 		this.trustMessage.setAttribute('role', 'status');
 		const trustDetails = this.trustNotice.appendChild($('details'));
-		trustDetails.appendChild($('summary')).textContent = localize('room.trustDirectories', "Source repository and peer worktrees");
+		trustDetails.appendChild($('summary')).textContent = localize('room.trustDirectories', "Source repository and participant worktrees");
 		this.trustDirectories = trustDetails.appendChild($('pre'));
 		this.trustDirectories.tabIndex = 0;
-		this.trustDirectories.setAttribute('aria-label', localize('room.trustDirectories', "Source repository and peer worktrees"));
+		this.trustDirectories.setAttribute('aria-label', localize('room.trustDirectories', "Source repository and participant worktrees"));
 		this.trustButton = this.button(this.trustNotice, localize('room.trustWorkspace', "Trust Room Workspace"), () => this.collaborationService.requestWorkspaceTrust(), this._store, false);
 		this.requestsSection = this.attention.appendChild($('section.room-requests'));
 		this.requestsSection.appendChild($('h3')).textContent = localize('room.requestsHeading', "Approvals and questions");
@@ -256,6 +312,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				return {
 					goal: draft?.goal ?? '', folder: draft?.repositoryUri ? URI.parse(draft.repositoryUri).fsPath : '',
 					count: draft?.workerCount ?? '3', instructions: draft?.instructions ?? '', baseRevision: draft?.baseRevision ?? '',
+					coordinatorModel: draft?.coordinatorModel,
 					memberNames: draft?.memberNames ?? [],
 					memberModels: draft?.memberModels ?? (draft?.model ? Array.from({ length: MAX_ROOM_WORKERS }, () => ({ id: draft.model })) : []),
 				};
@@ -264,7 +321,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				title: '', goal: draft.goal, instructions: draft.instructions,
 				repositoryUri: draft.folder ? URI.file(draft.folder).toString() : undefined,
 				baseRevision: draft.baseRevision, workerCount: draft.count, model: '',
-				memberNames: draft.memberNames, memberModels: draft.memberModels,
+				coordinatorModel: draft.coordinatorModel, memberNames: draft.memberNames, memberModels: draft.memberModels,
 			}),
 		}));
 
@@ -272,9 +329,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		this.runControls.insertBefore(this.startButton, this.pauseButton);
 		this.startButton.classList.add('primary');
 
-		this.historyStatus = this.layoutWidget.main.appendChild($('.room-history-status'));
+		this.historyStatus = this.activityPanel.appendChild($('.room-history-status'));
 		this.historyStatus.setAttribute('role', 'status');
-		this.feed = this.layoutWidget.main.appendChild($('.room-feed'));
+		this.feed = this.activityPanel.appendChild($('.room-feed'));
 		this.conversation = this._register(instantiationService.createInstance(CollaborationConversation, this.feed, {
 			reply: message => {
 				if (message.authorKind === 'agent' && !this.input.value.trim()) {
@@ -288,7 +345,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			reviewResult: message => { void this.perform(() => this.reviewResult(message)); },
 			retry: messageId => { void this.perform(() => this.collaborationService.retryMessage(messageId)); },
 		}));
-		this.historyControls = this.layoutWidget.main.appendChild($('.room-history-controls'));
+		this.historyControls = this.activityPanel.appendChild($('.room-history-controls'));
 		this.latest = this.button(this.historyControls, localize('room.latest', "Jump to Latest"), async () => {
 			this.followingLatest = true;
 			await this.collaborationService.loadMessages();
@@ -307,7 +364,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			}
 		}));
 
-		this.composer = this.layoutWidget.main.appendChild($('.room-composer'));
+		this.composer = this.activityPanel.appendChild($('.room-composer'));
 		this.replyLabel = this.composer.appendChild($('.room-hint'));
 		this.cancelReply = this.button(this.composer, localize('room.cancelReply', "Cancel Reply"), () => {
 			this.updateDraft(undefined);
@@ -387,6 +444,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.initialSelection = false;
 			if (id !== this.previousRoomId) {
 				this.previousRoomId = id;
+				this.mainTabs.select(id ? ACTIVITY_TAB : undefined);
 				this.memberDisposables.clear();
 				this.memberElements.clear();
 				this.roster.replaceChildren();
@@ -394,6 +452,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 				this.followingLatest = scrollState && scrollState.roomId === id ? scrollState.followingLatest : true;
 				this.pendingScroll = scrollState && scrollState.roomId === id ? scrollState : undefined;
 				this.lastAnnouncedSequence = 0;
+				this.announcedAssignmentFailures.clear();
 				this.localError.set(undefined, undefined);
 				this.hideMentions();
 				this.updateReply();
@@ -406,9 +465,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			const requests = this.collaborationService.requests.read(reader);
 			this.trustNotice.hidden = !room || trust.state === 'trusted';
 			const message = trust.error ?? (trust.state === 'requesting'
-				? localize('room.trustRequesting', "Confirm workspace trust for the source repository. Each peer uses its own separate local worktree.")
+				? localize('room.trustRequesting', "Confirm workspace trust for the source repository. The coordinator and each worker use separate local worktrees.")
 				: trust.state === 'checking' ? localize('room.trustChecking', "Checking trust for the room workspace...")
-					: localize('room.trustNotice', "Trust the source repository before sending messages, starting, resuming, retrying, steering, or allowing peers. One decision covers only this room's exact local peer worktrees. You can still read the conversation."));
+					: localize('room.trustNotice', "Trust the source repository before running agents or sending direct worker guidance. One decision covers only this room's exact local participant worktrees. You can still read Activity."));
 			if (this.trustMessage.textContent !== message) {
 				this.trustMessage.textContent = message;
 			}
@@ -437,6 +496,8 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			const room = this.collaborationService.activeRoom.read(reader);
 			const roomId = this.collaborationService.activeRoomId.read(reader);
 			const available = this.collaborationService.availability.read(reader) === 'available';
+			const canCoordinate = this.collaborationService.canCoordinate.read(reader);
+			const trust = this.collaborationService.workspaceTrust.read(reader);
 			const busy = this.busy.read(reader);
 			const creationBusy = busy || this.collaborationService.creating.read(reader);
 			// The home card carries its own title, so the header stays empty until a room is open.
@@ -449,6 +510,8 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.subtitle.title = room ? localize('room.repositorySummary', "{0}\nGoal: {1}", room.repositoryUri, room.goal) : '';
 			this.renderRoomRules(room);
 			this.home.element.hidden = !!roomId;
+			this.mainTabsHeader.hidden = !room;
+			this.mainTabContent.hidden = !room;
 			this.roster.hidden = !room;
 			this.historyControls.hidden = !room;
 			this.feed.hidden = !roomId;
@@ -457,7 +520,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			// has nothing to offer until a room is open.
 			this.panelButton.hidden = !room;
 			this.layoutWidget.element.classList.toggle('room-no-panel', !room);
+			void this.loadCoordinator(room, canCoordinate, available && trust.state === 'trusted');
 			this.startButton.textContent = room?.state === 'created' ? localize('room.start', "Start") : localize('room.resume', "Resume");
+			this.updateMainTabs(room, this.collaborationService.messages.read(reader).messages);
 			this.startButton.hidden = !room || room.state === 'running' || room.state === 'stopping';
 			const canStart = !!room && ['created', 'idle', 'paused', 'stopped', 'interrupted'].includes(room.state);
 			this.startButton.disabled = busy || !available || !canStart;
@@ -483,10 +548,19 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.input.disabled = !available;
 			const supportsModels = this.collaborationService.canSetMemberModel.read(reader);
 			const models = this.collaborationService.models.read(reader);
+			const coordinator = room?.coordinator;
+			this.coordinatorSettings.hidden = !room || !canCoordinate;
+			this.coordinatorSettingsState.textContent = coordinator ? coordinatorStateLabel(coordinator.state) : localize('room.coordinatorNotPrepared', "Not prepared");
+			if (coordinator) {
+				this.coordinatorModelPicker.state.set(getCollaborationCoordinatorModelState(coordinator, models, !busy && available), undefined);
+			} else {
+				this.coordinatorModelPicker.state.set({ selection: undefined, enabled: false, detail: localize('room.coordinatorNotPreparedDetail', "Prepared after the room is trusted.") }, undefined);
+			}
 			this.home.setDisabled(creationBusy || !available, supportsModels ? undefined : unsupportedMemberModelsMessage);
 			if (room) {
 				this.renderRoster(room, busy || !available, models);
 			}
+
 		}));
 		this._register(autorun(reader => {
 			const page = this.collaborationService.messages.read(reader);
@@ -495,8 +569,33 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			const loadingEarlier = this.collaborationService.loadingEarlier.read(reader);
 			this.historyStatus.hidden = !loadingEarlier;
 			this.historyStatus.textContent = loadingEarlier ? localize('room.loadingEarlier', "Loading earlier messages...") : '';
+			this.updateMainTabs(room, page.messages);
 			this.updateLatestPostsButton(page, room);
-			this.conversation.setMessages(page.messages, room, canVerifyResults);
+			if (this.mainTabs.activeTab === ACTIVITY_TAB) {
+				this.conversation.setMessages(page.messages, room, canVerifyResults);
+			}
+			let assignmentFailure: { assignment: IAgentHostRoomMessage; memberName: string; error: string | undefined } | undefined;
+			for (const message of page.messages) {
+				if (!message.assignment) {
+					continue;
+				}
+				for (const delivery of message.deliveries.filter(delivery => delivery.state === 'failed')) {
+					const key = `${room?.id}:${message.id}:${delivery.memberId}:${delivery.error ?? ''}`;
+					if (!this.announcedAssignmentFailures.has(key)) {
+						this.announcedAssignmentFailures.add(key);
+						assignmentFailure ??= {
+							assignment: message,
+							memberName: room?.members.find(member => member.id === delivery.memberId)?.name ?? delivery.memberId,
+							error: delivery.error,
+						};
+					}
+				}
+			}
+			if (assignmentFailure && this.lastAnnouncedSequence > 0 && this.roomViewService.visible.read(reader)) {
+				status(localize('room.assignmentDeliveryFailed', "Assignment delivery to {0} failed: {1}. {2}",
+					assignmentFailure.memberName, assignmentFailure.assignment.assignment!.description,
+					assignmentFailure.error ?? localize('room.noFailureDetail', "No failure detail was provided")));
+			}
 			this.restoreScrollPosition();
 			const last = page.messages.at(-1);
 			if (last && last.sequence > this.lastAnnouncedSequence) {
@@ -522,6 +621,135 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			this.retryLoad.hidden = !error && availability !== 'error' && availability !== 'unavailable';
 			this.element.setAttribute('aria-busy', String(loading));
 		}));
+	}
+
+	private onMainTabChanged(id: string): void {
+		const coordinatorVisible = id === COORDINATOR_TAB;
+		const room = this.collaborationService.activeRoom.get();
+		if (id === ACTIVITY_TAB && room) {
+			const messages = this.collaborationService.messages.get().messages;
+			this.activitySeenEvents.set(room.id, this.meaningfulActivityEvents(room, messages));
+			this.updateMainTabs(room, messages);
+			this.conversation?.setMessages(messages, room, this.collaborationService.canVerifyResults.get());
+		}
+		this.coordinatorView.setVisible(coordinatorVisible);
+		this.coordinatorView.layout(this.coordinatorPanel.clientWidth, this.coordinatorPanel.clientHeight);
+		this.conversation?.layout(this.feed?.clientWidth ?? 0, this.feed?.clientHeight ?? 0);
+	}
+
+	private updateMainTabs(room: IAgentHostRoom | undefined, messages: readonly IAgentHostRoomMessage[]): void {
+		let unread = 0;
+		if (room) {
+			const current = this.meaningfulActivityEvents(room, messages);
+			const seen = this.activitySeenEvents.get(room.id) ?? current;
+			if (!this.activitySeenEvents.has(room.id) || this.mainTabs.activeTab === ACTIVITY_TAB) {
+				this.activitySeenEvents.set(room.id, current);
+			} else {
+				unread = [...current].filter(event => !seen.has(event)).length;
+			}
+		}
+		this.mainTabs.setTabs([
+			{ id: COORDINATOR_TAB, label: localize('room.tabCoordinator', "Coordinator") },
+			{
+				id: ACTIVITY_TAB,
+				label: localize('room.tabActivity', "Activity"),
+				badge: unread || undefined,
+				badgeLabel: unread ? localize('room.activityUnread', "Activity, {0} unread meaningful updates", unread) : undefined,
+			},
+		]);
+	}
+
+	private meaningfulActivityEvents(room: IAgentHostRoom, messages: readonly IAgentHostRoomMessage[]): ReadonlySet<string> {
+		const events = new Set<string>();
+		for (const member of room.members) {
+			events.add(`member:${member.id}:${member.removed ? 'removed' : 'present'}`);
+			if (member.error || member.modelError || ['blocked', 'failed', 'needsInput'].includes(member.state)) {
+				events.add(`member:${member.id}:${member.state}:${member.error ?? member.modelError ?? ''}`);
+			}
+		}
+		for (const message of messages) {
+			if (message.assignment || message.result || message.verification || message.kind === 'finding' || message.kind === 'artifact' || message.kind === 'work') {
+				events.add(`message:${message.id}`);
+			}
+			for (const delivery of message.assignment?.assigneeIds.flatMap(assigneeId =>
+				message.deliveries.filter(candidate => candidate.memberId === assigneeId && candidate.state === 'failed')) ?? []) {
+				events.add(`assignment:${message.id}:${delivery.memberId}:failed:${delivery.error ?? ''}`);
+			}
+		}
+		return events;
+	}
+
+	private async loadCoordinator(room: IAgentHostRoom | undefined, canCoordinate: boolean, authorized: boolean): Promise<void> {
+		const coordinatorIdentity = room?.coordinator?.initialized
+			? `${room.coordinator.sessionUri}\n${room.coordinator.chatUri}`
+			: 'uninitialized';
+		const loadKey = `${room?.id ?? 'none'}:${canCoordinate}:${authorized}:${coordinatorIdentity}`;
+		if (this.coordinatorLoadKey === loadKey) {
+			return;
+		}
+		if (this.coordinatorRetryKey !== loadKey) {
+			this.coordinatorRetryKey = loadKey;
+			this.coordinatorRetryAttempts = 0;
+			this.coordinatorRetry.clear();
+		}
+		this.coordinatorLoadKey = loadKey;
+		const version = ++this.coordinatorLoadVersion;
+		if (!room || !canCoordinate) {
+			this.coordinatorView.clear();
+			this.coordinatorView.element.hidden = true;
+			this.coordinatorPlaceholder.hidden = false;
+			this.coordinatorPlaceholder.textContent = room
+				? localize('room.coordinatorUnsupported', "This local agent host does not support a coordinator.")
+				: localize('room.coordinatorPreparing', "Preparing the coordinator...");
+			return;
+		}
+		if (!authorized) {
+			this.coordinatorView.clear();
+			this.coordinatorView.element.hidden = true;
+			this.coordinatorPlaceholder.hidden = false;
+			this.coordinatorPlaceholder.textContent = localize('room.coordinatorNeedsTrust', "Trust the room from Approvals to prepare the coordinator.");
+			return;
+		}
+		this.coordinatorPlaceholder.hidden = false;
+		this.coordinatorPlaceholder.textContent = localize('room.coordinatorPreparing', "Preparing the coordinator...");
+		try {
+			const coordinator = room.coordinator?.initialized ? room.coordinator : await this.collaborationService.ensureCoordinator();
+			await this.coordinatorView.setCoordinator(coordinator.sessionUri, coordinator.chatUri, localize('room.coordinatorChatTitle', "Coordinator: {0}", room.title), room.createdAt, coordinator.worktreeUri);
+			if (version !== this.coordinatorLoadVersion || room.id !== this.collaborationService.activeRoomId.get()) {
+				return;
+			}
+			this.coordinatorLoadKey = `${room.id}:true:true:${coordinator.sessionUri}\n${coordinator.chatUri}`;
+			this.coordinatorRetryKey = this.coordinatorLoadKey;
+			this.coordinatorRetryAttempts = 0;
+			this.coordinatorRetry.clear();
+			this.coordinatorPlaceholder.hidden = true;
+			this.coordinatorView.element.hidden = false;
+			if (this.coordinatorAutoSelectedRoomId !== room.id) {
+				this.coordinatorAutoSelectedRoomId = room.id;
+				this.mainTabs.select(COORDINATOR_TAB);
+			}
+			this.coordinatorView.layout(this.coordinatorPanel.clientWidth, this.coordinatorPanel.clientHeight);
+		} catch (error) {
+			if (version !== this.coordinatorLoadVersion || isCancellationError(error)) {
+				return;
+			}
+			this.coordinatorLoadKey = undefined;
+			if (error instanceof CollaborationCoordinatorSessionNotReadyError && this.coordinatorRetryAttempts < 20) {
+				this.coordinatorRetryAttempts++;
+				this.coordinatorPlaceholder.hidden = false;
+				this.coordinatorPlaceholder.textContent = localize('room.coordinatorPreparing', "Preparing the coordinator...");
+				this.coordinatorRetry.value = disposableTimeout(() => {
+					if (!this._store.isDisposed && room.id === this.collaborationService.activeRoomId.get()) {
+						void this.loadCoordinator(room, canCoordinate, authorized);
+					}
+				}, 500);
+				return;
+			}
+			this.coordinatorView.element.hidden = true;
+			this.coordinatorPlaceholder.hidden = false;
+			this.coordinatorPlaceholder.textContent = localize('room.coordinatorFailed', "Coordinator unavailable: {0}. Activity continues.", toErrorMessage(error));
+			this.mainTabs.select(ACTIVITY_TAB);
+		}
 	}
 
 	private get currentDraft() {
@@ -1030,7 +1258,9 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 	}
 
 	focus(): void {
-		if (this.collaborationService.activeRoomId.get() && !this.input.disabled) {
+		if (this.mainTabs.activeTab === COORDINATOR_TAB) {
+			this.coordinatorView.focus();
+		} else if (this.collaborationService.activeRoomId.get() && !this.input.disabled) {
 			this.input.focus();
 		} else if (!this.collaborationService.activeRoomId.get()) {
 			this.home.focus();
@@ -1056,6 +1286,7 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		// also observing it would let any content that cannot shrink lock the size in.
 		this.lastHeight = height;
 		this.layoutWidget.layout(width, Math.max(0, height - this.header.offsetHeight));
+		this.coordinatorView.layout(this.coordinatorPanel.clientWidth, this.coordinatorPanel.clientHeight);
 		this.restoreScrollPosition();
 	}
 
@@ -1108,6 +1339,10 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 		return [
 			localize('room.accessibleTitle', "{0}. {1}.", room.title, roomStateLabel(room.state)),
 			localize('room.accessibleGoal', "Goal: {0}\nRules: {1}\nRepository: {2}\nPinned base: {3}", room.goal, room.instructions, room.repositoryUri, room.baseRevision),
+			...(room.coordinator ? [localize('room.accessibleCoordinator', "Coordinator: {0}. Selected model: {1}. Last room sequence read: {2}. Evidence records: {3}. Worktree: {4}.",
+				coordinatorStateLabel(room.coordinator.state), room.coordinator.desiredModel?.id ?? room.coordinator.appliedModel?.id ?? localize('room.hostDefault', "Copilot host default"),
+				room.coordinator.cursor, this.collaborationService.messages.get().messages.filter(message => message.assignment || message.result || message.verification).map(message => message.id).join(', ') || localize('room.noEvidenceRecords', "None"),
+				room.coordinator.worktreeUri)] : []),
 			...room.members.map(member => {
 				const model = getCollaborationMemberModelState(member, this.collaborationService.models.get(), this.collaborationService.canSetMemberModel.get());
 				return localize('room.accessibleMember', "{0}: {1}. Activity: {2}. Selected model: {3}. {4} {5} Worktree: {6}. {7}",
@@ -1139,6 +1374,19 @@ export class CollaborationRoomWidget extends Disposable implements ICollaboratio
 			return localize('room.accessibleVerification', "{0}, {1}. Result verification: {2} result {3}. {4}\nEvidence: {5}",
 				message.authorName, new Date(message.timestamp).toLocaleString(), verificationVerdictLabel(message.verification.verdict),
 				message.verification.resultId, metadata, message.verification.evidence.join('; '));
+		}
+		if (message.assignment) {
+			const assignment = message.assignment;
+			const assignees = assignment.assigneeIds.map(id => room.members.find(member => member.id === id)?.name ?? id).join(', ');
+			const superseded = this.collaborationService.messages.get().messages.some(candidate => candidate.assignment?.supersedes === message.id);
+			const completed = assignment.kind === 'work'
+				? assignment.assigneeIds.every(id => this.collaborationService.messages.get().messages.some(candidate => candidate.authorId === id && candidate.result?.assignmentId === message.id))
+				: assignment.assigneeIds.every(id => this.collaborationService.messages.get().messages.some(candidate => candidate.authorId === id && candidate.verification?.resultId === assignment.resultId));
+			const state = superseded ? localize('room.assignmentSuperseded', "Superseded") : completed ? localize('room.assignmentCompleted', "Completed") : localize('room.assignmentPending', "Pending");
+			return localize('room.accessibleAssignment', "{0}, {1}. {2} assignment, {3}. Assigned to: {4}.\nObjective: {5}\nExpected evidence: {6}\nSupersedes: {7}\nResult to verify: {8}\nCoordination note: {9}",
+				message.authorName, new Date(message.timestamp).toLocaleString(), assignment.kind === 'verification' ? localize('room.verificationAssignment', "Verification") : localize('room.workAssignment', "Work"),
+				state, assignees, assignment.description, assignment.expectedEvidence.join('; '), assignment.supersedes ?? localize('room.none', "None"),
+				assignment.resultId ?? localize('room.none', "None"), assignment.note ?? localize('room.none', "None"));
 		}
 		return localize('room.accessibleMessage', "{0}, {1}: {2}{3}\n{4}",
 			message.authorName, new Date(message.timestamp).toLocaleString(), message.replyTo ? localize('room.accessibleReply', "Reply to {0}. ", message.replyTo) : '',

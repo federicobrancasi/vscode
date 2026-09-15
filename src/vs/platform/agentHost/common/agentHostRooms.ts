@@ -17,12 +17,16 @@ export const NewCollaborationRoomCommandId = 'workbench.action.collaboration.new
 
 export type AgentHostRoomState = 'created' | 'running' | 'idle' | 'paused' | 'stopping' | 'stopped' | 'interrupted';
 export type AgentHostRoomMemberState = 'pending' | 'starting' | 'working' | 'idle' | 'blocked' | 'needsInput' | 'stopping' | 'stopped' | 'failed' | 'interrupted';
+export type AgentHostRoomCoordinatorState = 'pending' | 'starting' | 'working' | 'idle' | 'needsInput' | 'failed' | 'offline' | 'interrupted';
+export type AgentHostRoomCoordinatorEventKind = 'result' | 'verification' | 'blocked' | 'failed' | 'needsInput' | 'assignmentCreated' | 'assignmentSuperseded' | 'assignmentCompleted' | 'memberAdded' | 'memberRemoved';
 export type AgentHostRoomMessageKind = 'message' | 'work' | 'finding' | 'result' | 'verification' | 'artifact' | 'system';
 export type AgentHostRoomMessageMode = 'message' | 'steer';
 export type AgentHostRoomDeliveryState = 'pending' | 'submitted' | 'steering' | 'delivered' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 export type AgentHostRoomResultOutcome = 'success' | 'negative' | 'inconclusive' | 'blocked';
 export type AgentHostRoomVerificationVerdict = 'verified' | 'rejected';
 export type AgentHostRoomVerificationState = 'pending' | AgentHostRoomVerificationVerdict;
+export type AgentHostRoomAssignmentKind = 'work' | 'verification';
+export type AgentHostRoomAssignmentState = 'pending' | 'completed' | 'superseded';
 export type IAgentHostRoomModelSelection = ModelSelection;
 
 export interface IAgentHostRoomConfiguration {
@@ -84,6 +88,31 @@ export interface IAgentHostRoomMember {
 	readonly configuration?: IAgentHostRoomConfiguration;
 }
 
+export interface IAgentHostRoomCoordinator {
+	readonly id: string;
+	readonly name: string;
+	readonly sessionUri: string;
+	readonly chatUri: string;
+	readonly worktreeUri: string;
+	readonly desiredModel?: ModelSelection;
+	readonly appliedModel?: ModelSelection;
+	readonly pendingModel?: ModelSelection;
+	readonly modelError?: string;
+	readonly state: AgentHostRoomCoordinatorState;
+	readonly initialized: boolean;
+	/** Latest room message sequence projected into an outgoing coordinator turn. */
+	readonly cursor: number;
+	/** Monotonic sequence for meaningful coordinator scheduling events. */
+	readonly eventSequence: number;
+	/** Event sequence completed by the coordinator. */
+	readonly eventCursor: number;
+	readonly pendingEvents: readonly AgentHostRoomCoordinatorEventKind[];
+	readonly turnId?: string;
+	readonly activeEventSequence?: number;
+	readonly activeEvents?: readonly AgentHostRoomCoordinatorEventKind[];
+	readonly error?: string;
+}
+
 export interface IAgentHostRoomRun {
 	readonly id: string;
 	readonly startedAt: number;
@@ -115,6 +144,8 @@ export interface IAgentHostRoom {
 	readonly state: AgentHostRoomState;
 	/** Keep admitting turns for idle members that have no explicit next step. Absent on legacy rooms. */
 	readonly continuous?: boolean;
+	/** Persistent logical coordinator. Absent in journals written before coordinator support. */
+	readonly coordinator?: IAgentHostRoomCoordinator;
 	readonly members: readonly IAgentHostRoomMember[];
 	readonly artifacts: readonly IAgentHostRoomArtifact[];
 	readonly latestMessageSequence: number;
@@ -135,8 +166,20 @@ export interface IAgentHostRoomResult {
 	readonly outcome: AgentHostRoomResultOutcome;
 	readonly evidence: readonly string[];
 	readonly artifactIds: readonly string[];
+	/** Explicit coordinator assignment satisfied by this result. */
+	readonly assignmentId?: string;
 	/** Derived by the host from verification messages; absent in persisted and legacy records. */
 	readonly verificationState?: AgentHostRoomVerificationState;
+}
+
+export interface IAgentHostRoomAssignment {
+	readonly assigneeIds: readonly string[];
+	readonly kind: AgentHostRoomAssignmentKind;
+	readonly description: string;
+	readonly expectedEvidence: readonly string[];
+	readonly resultId?: string;
+	readonly supersedes?: string;
+	readonly note?: string;
 }
 
 export interface IAgentHostRoomVerification {
@@ -159,6 +202,7 @@ export interface IAgentHostRoomMessage {
 	readonly mentions: readonly string[];
 	readonly replyTo?: string;
 	readonly artifactId?: string;
+	readonly assignment?: IAgentHostRoomAssignment;
 	readonly result?: IAgentHostRoomResult;
 	readonly verification?: IAgentHostRoomVerification;
 	readonly deliveries: readonly IAgentHostRoomDelivery[];
@@ -193,6 +237,8 @@ export interface IAgentHostRoomCreateOptions {
 	readonly memberNames?: readonly string[];
 	/** Ordered by worker index. An undefined entry uses the legacy model option, or the provider default. */
 	readonly memberModels?: readonly (ModelSelection | undefined)[];
+	/** Initial coordinator model. The coordinator identity is separate from the worker roster. */
+	readonly coordinatorModel?: ModelSelection;
 }
 
 export interface IAgentHostRoomPostOptions {
@@ -213,6 +259,18 @@ export interface IAgentHostRoomPublishResultOptions {
 	readonly outcome: AgentHostRoomResultOutcome;
 	readonly evidence: readonly string[];
 	readonly artifactIds: readonly string[];
+	readonly assignmentId?: string;
+}
+
+export interface IAgentHostRoomAssignOptions {
+	readonly id: string;
+	readonly assignees: readonly string[];
+	readonly kind: AgentHostRoomAssignmentKind;
+	readonly description: string;
+	readonly expectedEvidence: readonly string[];
+	readonly resultId?: string;
+	readonly supersedes?: string;
+	readonly note?: string;
 }
 
 export interface IAgentHostRoomVerifyResultOptions {
@@ -231,6 +289,87 @@ export interface IAgentHostRoomsCapabilities {
 	readonly supportsMemberModels?: boolean;
 	readonly supportsStructuredResults?: boolean;
 	readonly supportsResultVerification?: boolean;
+	readonly supportsCoordinator?: boolean;
+}
+
+export interface IAgentHostRoomCoordinatorWorkerSnapshot {
+	readonly id: string;
+	readonly name: string;
+	readonly state: AgentHostRoomMemberState;
+	readonly removed: boolean;
+	readonly turns: number;
+	readonly work?: IAgentHostRoomWork;
+	/** Derived only from current assignment assignees, never from status text. */
+	readonly pairedWith: readonly string[];
+	readonly assignmentIds: readonly string[];
+	readonly evidenceIds: readonly string[];
+}
+
+export interface IAgentHostRoomCoordinatorAssignmentSnapshot {
+	readonly id: string;
+	readonly sequence: number;
+	readonly kind: AgentHostRoomAssignmentKind;
+	readonly description: string;
+	readonly assigneeIds: readonly string[];
+	readonly expectedEvidence: readonly string[];
+	readonly resultId?: string;
+	readonly supersedes?: string;
+	readonly state: AgentHostRoomAssignmentState;
+	readonly completedAssigneeIds: readonly string[];
+	readonly evidenceIds: readonly string[];
+}
+
+export interface IAgentHostRoomCoordinatorResultSnapshot {
+	readonly id: string;
+	readonly sequence: number;
+	readonly authorId: string;
+	readonly assignmentId?: string;
+	readonly title: string;
+	readonly summary: string;
+	readonly outcome: AgentHostRoomResultOutcome;
+	readonly verificationState: AgentHostRoomVerificationState;
+	readonly verificationIds: readonly string[];
+	readonly evidence: readonly string[];
+	readonly evidenceIds: readonly string[];
+}
+
+export interface IAgentHostRoomCoordinatorIssueSnapshot {
+	readonly memberId: string;
+	readonly kind: 'blocked' | 'failed' | 'needsInput';
+	readonly description?: string;
+	readonly evidenceIds: readonly string[];
+}
+
+export interface IAgentHostRoomCoordinatorHumanGuidanceSnapshot {
+	readonly id: string;
+	readonly sequence: number;
+	readonly text: string;
+	readonly evidenceIds: readonly string[];
+}
+
+export interface IAgentHostRoomCoordinatorUnownedWorkSnapshot {
+	readonly id: string;
+	readonly description: string;
+	readonly memberId?: string;
+	readonly evidenceIds: readonly string[];
+}
+
+export interface IAgentHostRoomCoordinatorSnapshot {
+	readonly room: {
+		readonly id: string;
+		readonly title: string;
+		readonly goal: string;
+		readonly state: AgentHostRoomState;
+		readonly sequence: number;
+	};
+	readonly coordinator: IAgentHostRoomCoordinator;
+	readonly workers: readonly IAgentHostRoomCoordinatorWorkerSnapshot[];
+	readonly assignments: readonly IAgentHostRoomCoordinatorAssignmentSnapshot[];
+	readonly results: readonly IAgentHostRoomCoordinatorResultSnapshot[];
+	readonly issues: readonly IAgentHostRoomCoordinatorIssueSnapshot[];
+	readonly pendingHumanGuidance: readonly IAgentHostRoomCoordinatorHumanGuidanceSnapshot[];
+	readonly unownedWork: readonly IAgentHostRoomCoordinatorUnownedWorkSnapshot[];
+	readonly evidenceIds: readonly string[];
 }
 
 export const IAgentHostRoomsService = createDecorator<IAgentHostRoomsService>('agentHostRoomsService');
@@ -249,6 +388,10 @@ export interface IAgentHostRoomsService {
 	listRooms(): Promise<readonly IAgentHostRoom[]>;
 	getRoom(roomId: string): Promise<IAgentHostRoom>;
 	createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom>;
+	ensureCoordinator(roomId: string): Promise<IAgentHostRoomCoordinator>;
+	getCoordinator(roomId: string): Promise<IAgentHostRoomCoordinator | undefined>;
+	setCoordinatorModel(roomId: string, model: ModelSelection | undefined): Promise<IAgentHostRoomCoordinator>;
+	getCoordinatorSnapshot(roomId: string): Promise<IAgentHostRoomCoordinatorSnapshot>;
 	getMessages(roomId: string, query?: IAgentHostRoomMessageQuery): Promise<IAgentHostRoomMessagePage>;
 	postMessage(roomId: string, message: IAgentHostRoomPostOptions): Promise<IAgentHostRoomMessage>;
 	verifyResult(roomId: string, verification: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage>;

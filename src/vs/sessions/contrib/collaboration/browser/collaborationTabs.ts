@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, addDisposableListener, EventType } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, EventType, getActiveElement } from '../../../../base/browser/dom.js';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
@@ -13,6 +13,7 @@ export interface ICollaborationTab {
 	readonly label: string;
 	/** Rendered next to the label when the tab needs the human's attention. */
 	readonly badge?: number;
+	readonly badgeLabel?: string;
 	readonly accent?: string;
 }
 
@@ -29,13 +30,13 @@ export class CollaborationTabs extends Disposable {
 	private tabs: readonly ICollaborationTab[] = [];
 	private active: string | undefined;
 
-	constructor(parent: HTMLElement, private readonly onDidChangeTab: (id: string) => void) {
+	constructor(parent: HTMLElement, private readonly onDidChangeTab: (id: string) => void, ariaLabel = localize('room.tabsLabel', "Room panels")) {
 		super();
 		// The shared modern editor-tab hooks own the pill geometry and states, exactly
 		// as the Agents window composite bar adopts them; this widget supplies layout.
 		this.element = parent.appendChild($('.room-tabs.modern-ui-editor-tab-group.modern-ui-editor-tab-group-active'));
 		this.element.setAttribute('role', 'tablist');
-		this.element.setAttribute('aria-label', localize('room.tabsLabel', "Room panels"));
+		this.element.setAttribute('aria-label', ariaLabel);
 		this._register(addDisposableListener(this.element, EventType.KEY_DOWN, event => this.onKeyDown(event)));
 	}
 
@@ -49,7 +50,7 @@ export class CollaborationTabs extends Disposable {
 	setTabs(tabs: readonly ICollaborationTab[]): void {
 		const unchanged = tabs.length === this.tabs.length
 			&& tabs.every((tab, index) => tab.id === this.tabs[index].id && tab.label === this.tabs[index].label
-				&& tab.badge === this.tabs[index].badge && tab.accent === this.tabs[index].accent);
+				&& tab.badge === this.tabs[index].badge && tab.badgeLabel === this.tabs[index].badgeLabel && tab.accent === this.tabs[index].accent);
 		this.tabs = tabs;
 		if (!unchanged) {
 			this.render();
@@ -81,6 +82,7 @@ export class CollaborationTabs extends Disposable {
 	}
 
 	private render(): void {
+		const focusedTab = [...this.buttons].find(([, button]) => button === getActiveElement())?.[0];
 		this.tabStore.clear();
 		this.buttons.clear();
 		this.element.textContent = '';
@@ -94,12 +96,15 @@ export class CollaborationTabs extends Disposable {
 
 			if (tab.badge) {
 				button.appendChild($('span.room-tab-badge')).textContent = String(tab.badge);
-				button.setAttribute('aria-label', localize('room.tabWithBadge', "{0}, {1} need attention", tab.label, tab.badge));
+				button.setAttribute('aria-label', tab.badgeLabel ?? localize('room.tabWithBadge', "{0}, {1} need attention", tab.label, tab.badge));
 			}
 			this.tabStore.add(addDisposableListener(button, EventType.CLICK, () => this.select(tab.id)));
 			this.buttons.set(tab.id, button);
 		}
 		this.applySelection();
+		if (focusedTab) {
+			this.buttons.get(focusedTab)?.focus();
+		}
 	}
 
 	private applySelection(): void {

@@ -21,6 +21,17 @@ export class RoomTurnAdmissionContribution extends Disposable implements IAgentH
 	}
 
 	onIncomingRequest(request: IIncomingRequest): IncomingRequestDisposition | undefined {
+		if (this.rooms.isCoordinatorChat(request.session, request.chat)) {
+			if (request.source === 'direct' && (request.clientId !== undefined
+				? this.rooms.isCoordinatorDirectTurnAvailable(request.session, request.chat)
+				: this.rooms.isCoordinatorAdmittedTurn(request.session, request.chat, request.turnId))) {
+				return undefined;
+			}
+			return {
+				kind: 'reject', stage: 'validation',
+				error: { errorType: 'roomControlled', message: localize('rooms.controlledCoordinatorTurn', "Send coordinator messages directly or wait for the room coordinator scheduler.") },
+			};
+		}
 		if (this.rooms.isRoomSessionUri(request.session)
 			&& (request.clientId !== undefined || request.source !== 'direct' || !this.rooms.isAdmittedTurn(request.session, request.chat, request.turnId))) {
 			return {

@@ -60,6 +60,52 @@
 	overflow: hidden;
 }
 
+.collaboration-room .room-main-tabs-header {
+	flex: 0 0 auto;
+	padding: var(--vscode-spacing-size40) var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-main-tabs {
+	justify-content: flex-start;
+}
+
+.collaboration-room .room-main-tab-content {
+	display: flex;
+	flex: 1 1 auto;
+	min-height: 0;
+	min-width: 0;
+	overflow: hidden;
+}
+
+.collaboration-room .room-main-tab-panel {
+	display: flex;
+	flex: 1 1 auto;
+	min-height: 0;
+	min-width: 0;
+	overflow: hidden;
+}
+
+.collaboration-room .room-main-tab-panel[hidden] {
+	display: none;
+}
+
+.collaboration-room .room-activity-panel {
+	flex-direction: column;
+}
+
+.collaboration-room .room-coordinator-placeholder {
+	align-self: center;
+	margin: auto;
+	color: var(--vscode-descriptionForeground);
+}
+
+.collaboration-room .room-coordinator-chat {
+	flex: 1 1 auto;
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
+}
+
 .collaboration-room.room-side-panel {
 	box-sizing: border-box;
 	width: 100%;
@@ -161,6 +207,28 @@
 	gap: var(--vscode-spacing-size60);
 	padding-bottom: var(--vscode-spacing-size120);
 	border-bottom: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+}
+
+.collaboration-room .room-coordinator-settings {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size80);
+	padding-bottom: var(--vscode-spacing-size160);
+	margin-bottom: var(--vscode-spacing-size160);
+	border-bottom: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+}
+
+.collaboration-room .room-coordinator-settings-heading {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-coordinator-settings-heading h3 {
+	margin: 0;
+	font-size: var(--vscode-fontSize-heading3);
+	font-weight: var(--vscode-fontWeight-semiBold);
 }
 
 .collaboration-room .room-member-heading {
@@ -320,6 +388,7 @@
 }
 
 .collaboration-room .room-result,
+.collaboration-room .room-assignment,
 .collaboration-room .room-verification {
 	display: flex;
 	flex-direction: column;
@@ -330,7 +399,8 @@
 	background: var(--vscode-textBlockQuote-background, transparent);
 }
 
-.collaboration-room .room-result-heading {
+.collaboration-room .room-result-heading,
+.collaboration-room .room-assignment-heading {
 	display: flex;
 	align-items: baseline;
 	flex-wrap: wrap;
@@ -338,6 +408,9 @@
 }
 
 .collaboration-room .room-result-title,
+.collaboration-room .room-assignment-title,
+.collaboration-room .room-assignment-assignees,
+.collaboration-room .room-assignment-evidence-heading,
 .collaboration-room .room-verification-verdict,
 .collaboration-room .room-result-evidence-heading {
 	font-weight: var(--vscode-fontWeight-semiBold);
@@ -345,19 +418,25 @@
 
 .collaboration-room .room-result-outcome,
 .collaboration-room .room-result-verification,
+.collaboration-room .room-assignment-state,
+.collaboration-room .room-assignment-link,
 .collaboration-room .room-verification-result {
 	color: var(--vscode-descriptionForeground);
 	font-size: var(--vscode-fontSize-label1);
 }
 
 .collaboration-room .room-result-summary,
-.collaboration-room .room-result-evidence {
+.collaboration-room .room-result-evidence,
+.collaboration-room .room-assignment-objective,
+.collaboration-room .room-assignment-note,
+.collaboration-room .room-assignment-evidence {
 	margin: var(--vscode-spacing-sizeNone);
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
 }
 
-.collaboration-room .room-result-evidence {
+.collaboration-room .room-result-evidence,
+.collaboration-room .room-assignment-evidence {
 	padding-left: var(--vscode-spacing-size200);
 }
 

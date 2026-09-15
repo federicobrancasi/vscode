@@ -10,8 +10,21 @@ import { ResolveSessionConfigResult } from '../common/state/protocol/commands.js
 import { ModelSelection } from '../common/state/sessionState.js';
 
 export const roomExcludedTools = ['task', 'search_code_subagent', 'runSubagent', 'run_subagent', 'run_agent', 'run_factory', 'create_session', 'send_message', 'delete_session', 'rubber_duck', 'fleet'];
+export const roomCoordinatorTools = ['room_coordinator_snapshot', 'room_assign', 'room_post'] as const;
+export const roomCoordinatorExclusiveTools = ['room_coordinator_snapshot', 'room_assign'] as const;
 
 export type RoomContentValidator = (relativePaths: readonly string[]) => Promise<void>;
+
+export interface IRoomSessionParticipant {
+	readonly id: string;
+	readonly sessionUri: string;
+	readonly chatUri?: string;
+	readonly worktreeUri?: string;
+	readonly model?: string;
+	readonly modelSelection?: ModelSelection;
+	readonly pendingModel?: ModelSelection | null;
+	readonly configuration?: IAgentHostRoomConfiguration;
+}
 
 export interface IRoomMemberExecution {
 	readonly memberId: string;
@@ -37,7 +50,7 @@ export interface IRoomStorage {
 	isRepository(folderUri: string): Promise<boolean>;
 	resolveRepository(repositoryUri: string, revision?: string, initialize?: boolean): Promise<{ repositoryUri: string; baseRevision: string }>;
 	worktreeUri(roomId: string, memberId: string): string;
-	ensureWorktree(room: IAgentHostRoom, member: IAgentHostRoomMember, requireExisting?: boolean): Promise<void>;
+	ensureWorktree(room: IAgentHostRoom, participant: IRoomSessionParticipant, requireExisting?: boolean): Promise<void>;
 	publishPatch(room: IAgentHostRoom, member: IAgentHostRoomMember, title: string, validateContent?: RoomContentValidator): Promise<IAgentHostRoomArtifact>;
 	readArtifact(room: IAgentHostRoom, artifact: IAgentHostRoomArtifact, validateContent?: RoomContentValidator): Promise<string>;
 }
@@ -53,12 +66,12 @@ export interface IRoomRuntimeEvent {
 export interface IRoomRuntime extends IDisposable {
 	readonly onDidChange: Event<IRoomRuntimeEvent>;
 	validateModel(model: ModelSelection): void;
-	getModel(member: IAgentHostRoomMember): ModelSelection | undefined;
-	publishModel(member: IAgentHostRoomMember): void;
-	applyModel(member: IAgentHostRoomMember, model: ModelSelection): Promise<void>;
-	resolveConfiguration(member: IAgentHostRoomMember, configuration?: IAgentHostRoomConfiguration): Promise<ResolveSessionConfigResult>;
-	applyConfiguration(member: IAgentHostRoomMember, requested?: Partial<IAgentHostRoomConfiguration>): Promise<void>;
-	prepare(room: IAgentHostRoom, member: IAgentHostRoomMember, initialized: boolean): Promise<void>;
+	getModel(participant: IRoomSessionParticipant): ModelSelection | undefined;
+	publishModel(participant: IRoomSessionParticipant): void;
+	applyModel(participant: IRoomSessionParticipant, model: ModelSelection): Promise<void>;
+	resolveConfiguration(participant: IRoomSessionParticipant, configuration?: IAgentHostRoomConfiguration): Promise<ResolveSessionConfigResult>;
+	applyConfiguration(participant: IRoomSessionParticipant, requested?: Partial<IAgentHostRoomConfiguration>): Promise<void>;
+	prepare(room: IAgentHostRoom, participant: IRoomSessionParticipant, initialized: boolean): Promise<void>;
 	isIdle(sessionUri: string): boolean;
 	hasTurn(sessionUri: string, turnId: string): boolean;
 	submit(sessionUri: string, turnId: string, prompt: string): void;

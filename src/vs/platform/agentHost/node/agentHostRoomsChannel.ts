@@ -15,6 +15,7 @@ export function createAgentHostRoomsChannel(rooms: IAgentHostRoomsService, dispo
 		'getCapabilities', 'isRepository', 'listRooms', 'getRoom', 'createRoom', 'getMessages', 'postMessage', 'verifyResult', 'retryMessage',
 		'startRoom', 'pauseRoom', 'stopRoom', 'addMember', 'removeMember', 'stopMember', 'retryMember', 'getArtifact',
 		'getRoomConfiguration', 'setRoomConfiguration', 'setMemberModel',
+		'ensureCoordinator', 'getCoordinator', 'setCoordinatorModel', 'getCoordinatorSnapshot',
 	] satisfies (keyof IAgentHostRoomsService)[]);
 	return {
 		call: (context, command, args) => {

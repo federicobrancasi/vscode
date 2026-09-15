@@ -9,6 +9,7 @@ import { constObservable } from '../../../../base/common/observable.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IChannelClient, IChannelServer, IServerChannel } from '../../../../base/parts/ipc/common/ipc.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
+import { upcastPartial } from '../../../../base/test/common/mock.js';
 import { IConfigurationService } from '../../../configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../configuration/test/common/testConfigurationService.js';
 import { IEnvironmentService } from '../../../environment/common/environment.js';
@@ -26,8 +27,9 @@ import { AGENT_HOST_CLIENT_BYOK_LM_CHANNEL, AgentHostClientByokLmChannel } from 
 import { AgentHostClientType, editorWindowAgentHostClientInfo } from '../../common/agentHostClientInfo.js';
 import { AgentHostStartupTelemetry } from '../../common/agentHostStartupTelemetry.js';
 import { AgentHostClientConnectionKind } from '../../common/agentHostTelemetry.js';
+import { IAgentHostRoomCoordinator, IAgentHostRoomCoordinatorSnapshot, IAgentHostRoomsService } from '../../common/agentHostRooms.js';
 import { ProtocolError } from '../../common/state/sessionProtocol.js';
-import { LocalAgentHostManagementConnection, LocalAgentHostServiceClient, registerAgentHostClientChannels } from '../../electron-browser/localAgentHostService.js';
+import { createLocalAgentHostRoomsService, LocalAgentHostManagementConnection, LocalAgentHostServiceClient, registerAgentHostClientChannels } from '../../electron-browser/localAgentHostService.js';
 
 class CapturingNotificationService extends TestNotificationService {
 	readonly errors: (string | Error)[] = [];
@@ -90,6 +92,27 @@ suite('registerAgentHostClientChannels', () => {
 		const { server, registered } = fakeChannelServer();
 		registerAgentHostClientChannels(server, fakeInstantiationService(false), new NullLogService());
 		assert.deepStrictEqual(registered, [AGENT_HOST_CLIENT_PROXY_CHANNEL, AGENT_HOST_CLIENT_BYOK_LM_CHANNEL]);
+	});
+
+	test('forwards coordinator methods through the local room proxy', async () => {
+		const calls: string[] = [];
+		const coordinator = upcastPartial<IAgentHostRoomCoordinator>({ id: 'coordinator' });
+		const snapshot = upcastPartial<IAgentHostRoomCoordinatorSnapshot>({ coordinator });
+		const proxy = upcastPartial<IAgentHostRoomsService>({
+			ensureCoordinator: async roomId => { calls.push(`ensure:${roomId}`); return coordinator; },
+			getCoordinator: async roomId => { calls.push(`get:${roomId}`); return coordinator; },
+			setCoordinatorModel: async (roomId, model) => { calls.push(`model:${roomId}:${model?.id}`); return coordinator; },
+			getCoordinatorSnapshot: async roomId => { calls.push(`snapshot:${roomId}`); return snapshot; },
+		});
+		const rooms = createLocalAgentHostRoomsService(Event.None, () => proxy);
+
+		assert.deepStrictEqual([
+			await rooms.ensureCoordinator('room'),
+			await rooms.getCoordinator('room'),
+			await rooms.setCoordinatorModel('room', { id: 'model-a' }),
+			await rooms.getCoordinatorSnapshot('room'),
+			calls,
+		], [coordinator, coordinator, coordinator, snapshot, ['ensure:room', 'get:room', 'model:room:model-a', 'snapshot:room']]);
 	});
 
 	test('classifies only utility process validation errors as fatal', () => {

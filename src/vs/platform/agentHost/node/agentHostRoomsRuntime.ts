@@ -9,7 +9,7 @@ import { equals } from '../../../base/common/objects.js';
 import { URI } from '../../../base/common/uri.js';
 import { hasKey } from '../../../base/common/types.js';
 import { localize } from '../../../nls.js';
-import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomMember } from '../common/agentHostRooms.js';
+import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomConfiguration } from '../common/agentHostRooms.js';
 import { AgentHostAutoApprovePolicyRestrictedConfigKey, platformRootSchema, platformSessionSchema } from '../common/agentHostSchema.js';
 import { IAgentService } from '../common/agentService.js';
 import { SessionConfigKey } from '../common/sessionConfigKeys.js';
@@ -21,7 +21,7 @@ import { IAgentConfigurationService } from './agentConfigurationService.js';
 import { IAgentHostProviderService } from './agentHostProviderService.js';
 import { AgentHostStateManager } from './agentHostStateManager.js';
 import { IAgentHostTurnService } from './agentHostTurnService.js';
-import { IRoomRuntime, IRoomRuntimeEvent } from './agentHostRoomsTypes.js';
+import { IRoomRuntime, IRoomRuntimeEvent, IRoomSessionParticipant } from './agentHostRoomsTypes.js';
 import { roomConfigurationKeys, validateRoomConfigurationChange } from './agentHostRoomsConfiguration.js';
 import { getRoomMemberModel, validateRoomModelSelection } from './agentHostRoomsModels.js';
 
@@ -98,20 +98,20 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 		validateRoomModelSelection(model, provider?.models.get() ?? []);
 	}
 
-	getModel(member: IAgentHostRoomMember): ModelSelection | undefined {
-		const chat = member.chatUri ?? buildDefaultChatUri(member.sessionUri);
+	getModel(participant: IRoomSessionParticipant): ModelSelection | undefined {
+		const chat = participant.chatUri ?? buildDefaultChatUri(participant.sessionUri);
 		if (!this._stateManager.getChatState(chat)) {
 			return undefined;
 		}
-		return this._providers.getProviderForSession(member.sessionUri)?.chats.getModel?.(
-			URI.parse(chat), createAgentChatContext(this._stateManager, member.sessionUri, chat),
+		return this._providers.getProviderForSession(participant.sessionUri)?.chats.getModel?.(
+			URI.parse(chat), createAgentChatContext(this._stateManager, participant.sessionUri, chat),
 		);
 	}
 
-	publishModel(member: IAgentHostRoomMember): void {
-		const chat = member.chatUri ?? buildDefaultChatUri(member.sessionUri);
+	publishModel(participant: IRoomSessionParticipant): void {
+		const chat = participant.chatUri ?? buildDefaultChatUri(participant.sessionUri);
 		const state = this._stateManager.getChatState(chat);
-		const model = getRoomMemberModel(member);
+		const model = getRoomMemberModel(participant);
 		if (state && !equals(state.draft?.model, model)) {
 			this._stateManager.dispatchServerAction(chat, {
 				type: ActionType.ChatDraftChanged,
@@ -120,37 +120,37 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 		}
 	}
 
-	async applyModel(member: IAgentHostRoomMember, model: ModelSelection): Promise<void> {
-		const chat = member.chatUri ?? buildDefaultChatUri(member.sessionUri);
-		await this._subscribeMember(member);
-		this._assertMemberSession(member);
-		if (!this.isIdle(member.sessionUri)) {
+	async applyModel(participant: IRoomSessionParticipant, model: ModelSelection): Promise<void> {
+		const chat = participant.chatUri ?? buildDefaultChatUri(participant.sessionUri);
+		await this._subscribeParticipant(participant);
+		this._assertParticipantSession(participant);
+		if (!this.isIdle(participant.sessionUri)) {
 			throw new Error(localize('rooms.modelWhileBusy', "The room member's model can only be applied between turns."));
 		}
 		this.validateModel(model);
-		const provider = this._providers.getProviderForSession(member.sessionUri);
+		const provider = this._providers.getProviderForSession(participant.sessionUri);
 		if (!provider) {
 			throw new Error(localize('rooms.modelProviderUnavailable', "The room provider is not available to change models."));
 		}
-		if (equals(this._appliedModels.get(chat), model) && equals(this.getModel(member), model)) {
+		if (equals(this._appliedModels.get(chat), model) && equals(this.getModel(participant), model)) {
 			return;
 		}
-		await provider.chats.changeModel(URI.parse(chat), model, createAgentChatContext(this._stateManager, member.sessionUri, chat));
-		const applied = this.getModel(member);
+		await provider.chats.changeModel(URI.parse(chat), model, createAgentChatContext(this._stateManager, participant.sessionUri, chat));
+		const applied = this.getModel(participant);
 		if (applied && !equals(applied, model)) {
 			throw new Error(localize('rooms.modelNotApplied', "The provider did not apply the requested model '{0}'.", model.id));
 		}
 		this._appliedModels.set(chat, model);
 	}
 
-	async resolveConfiguration(member: IAgentHostRoomMember, configuration?: IAgentHostRoomConfiguration): Promise<ResolveSessionConfigResult> {
-		const provider = this._providers.getProviderForSession(member.sessionUri) ?? this._providers.resolveProvider('copilotcli');
+	async resolveConfiguration(participant: IRoomSessionParticipant, configuration?: IAgentHostRoomConfiguration): Promise<ResolveSessionConfigResult> {
+		const provider = this._providers.getProviderForSession(participant.sessionUri) ?? this._providers.resolveProvider('copilotcli');
 		if (!provider) {
 			throw new Error(localize('rooms.configurationUnavailable', "The room provider is not available to resolve configuration."));
 		}
-		const selected = { ...defaultAgentHostRoomConfiguration, ...member.configuration };
+		const selected = { ...defaultAgentHostRoomConfiguration, ...participant.configuration };
 		if (!configuration) {
-			const current = this._configurationService.getSessionConfigValues(member.sessionUri);
+			const current = this._configurationService.getSessionConfigValues(participant.sessionUri);
 			for (const key of roomConfigurationKeys) {
 				const value = current?.[key];
 				if (platformSessionSchema.validate(key, value)) {
@@ -159,12 +159,12 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 			}
 		}
 		const result = await provider.resolveChatConfig({
-			provider: 'copilotcli', workingDirectory: URI.parse(member.worktreeUri!),
+			provider: 'copilotcli', workingDirectory: URI.parse(participant.worktreeUri!),
 			config: { ...(configuration ?? selected) },
 		});
 		const properties: Record<string, SessionConfigPropertySchema> = {};
 		const values: Record<string, unknown> = {};
-		const policy = this._configurationService.getSessionSandboxPolicy(member.sessionUri);
+		const policy = this._configurationService.getSessionSandboxPolicy(participant.sessionUri);
 		for (const key of roomConfigurationKeys) {
 			const property = result.schema.properties[key];
 			if (!property) {
@@ -187,24 +187,24 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 		return { schema: { type: 'object', properties }, values };
 	}
 
-	async applyConfiguration(member: IAgentHostRoomMember, requested?: Partial<IAgentHostRoomConfiguration>): Promise<void> {
-		let state = this._stateManager.getSessionState(member.sessionUri);
+	async applyConfiguration(participant: IRoomSessionParticipant, requested?: Partial<IAgentHostRoomConfiguration>): Promise<void> {
+		let state = this._stateManager.getSessionState(participant.sessionUri);
 		if (!state) {
-			if (!(await this._lifecycle.listSessions()).some(session => session.session.toString() === member.sessionUri)) {
+			if (!(await this._lifecycle.listSessions()).some(session => session.session.toString() === participant.sessionUri)) {
 				return;
 			}
-			await this._subscribeMember(member);
-			state = this._stateManager.getSessionState(member.sessionUri);
+			await this._subscribeParticipant(participant);
+			state = this._stateManager.getSessionState(participant.sessionUri);
 		}
-		const chat = member.chatUri ?? buildDefaultChatUri(member.sessionUri);
-		if (state?.defaultChat !== chat || state.workingDirectories?.length !== 1 || state.workingDirectories[0] !== member.worktreeUri) {
+		const chat = participant.chatUri ?? buildDefaultChatUri(participant.sessionUri);
+		if (state?.defaultChat !== chat || state.workingDirectories?.length !== 1 || state.workingDirectories[0] !== participant.worktreeUri) {
 			throw new Error(localize('rooms.configurationIdentityChanged', "The room member's preserved chat or working directory has changed."));
 		}
-		const provider = this._providers.getProviderForSession(member.sessionUri);
+		const provider = this._providers.getProviderForSession(participant.sessionUri);
 		if (!provider?.chats.applyConfiguration) {
 			throw new Error(localize('rooms.configurationApplicationUnavailable', "The room provider cannot apply configuration to this session."));
 		}
-		const resolved = await this.resolveConfiguration(member, member.configuration ?? defaultAgentHostRoomConfiguration);
+		const resolved = await this.resolveConfiguration(participant, participant.configuration ?? defaultAgentHostRoomConfiguration);
 		if (requested) {
 			validateRoomConfigurationChange(requested, resolved);
 		}
@@ -212,58 +212,58 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 		for (const key of roomConfigurationKeys) {
 			previous[key] = state.config?.values[key] ?? defaultAgentHostRoomConfiguration[key];
 		}
-		this._configurationService.updateSessionConfig(member.sessionUri, resolved.values);
+		this._configurationService.updateSessionConfig(participant.sessionUri, resolved.values);
 		try {
-			await provider.chats.applyConfiguration(URI.parse(chat), createAgentChatContext(this._stateManager, member.sessionUri, chat));
+			await provider.chats.applyConfiguration(URI.parse(chat), createAgentChatContext(this._stateManager, participant.sessionUri, chat));
 			if (requested) {
-				validateRoomConfigurationChange(requested, await this.resolveConfiguration(member));
+				validateRoomConfigurationChange(requested, await this.resolveConfiguration(participant));
 			}
 		} catch (error) {
-			this._configurationService.updateSessionConfig(member.sessionUri, previous);
+			this._configurationService.updateSessionConfig(participant.sessionUri, previous);
 			try {
-				await provider.chats.applyConfiguration(URI.parse(chat), createAgentChatContext(this._stateManager, member.sessionUri, chat));
+				await provider.chats.applyConfiguration(URI.parse(chat), createAgentChatContext(this._stateManager, participant.sessionUri, chat));
 			} finally {
-				await this.abort(member.sessionUri);
+				await this.abort(participant.sessionUri);
 			}
 			throw error;
 		}
 	}
 
-	async prepare(_room: IAgentHostRoom, member: IAgentHostRoomMember, initialized: boolean): Promise<void> {
-		const chat = member.chatUri ?? buildDefaultChatUri(member.sessionUri);
-		const session = URI.parse(member.sessionUri);
-		if (!initialized && !this._stateManager.getSessionState(member.sessionUri)) {
-			const existing = (await this._lifecycle.listSessions()).some(candidate => candidate.session.toString() === member.sessionUri);
+	async prepare(_room: IAgentHostRoom, participant: IRoomSessionParticipant, initialized: boolean): Promise<void> {
+		const chat = participant.chatUri ?? buildDefaultChatUri(participant.sessionUri);
+		const session = URI.parse(participant.sessionUri);
+		if (!initialized && !this._stateManager.getSessionState(participant.sessionUri)) {
+			const existing = (await this._lifecycle.listSessions()).some(candidate => candidate.session.toString() === participant.sessionUri);
 			if (!existing) {
-				const configuration = await this.resolveConfiguration(member, member.configuration ?? defaultAgentHostRoomConfiguration);
+				const configuration = await this.resolveConfiguration(participant, participant.configuration ?? defaultAgentHostRoomConfiguration);
 				const created = await this._lifecycle.createSession({
-					provider: 'copilotcli', session, workingDirectories: [URI.parse(member.worktreeUri!)],
-					model: getRoomMemberModel(member),
+					provider: 'copilotcli', session, workingDirectories: [URI.parse(participant.worktreeUri!)],
+					model: getRoomMemberModel(participant),
 					config: { isolation: 'folder', ...configuration.values },
 				});
-				if (created.toString() !== member.sessionUri) {
+				if (created.toString() !== participant.sessionUri) {
 					throw new Error(localize('rooms.changedSessionIdentity', "The provider did not preserve the room member session identity."));
 				}
 			}
 		}
-		await this._subscribeMember(member);
-		this._assertMemberSession(member);
-		this._sessionsByChat.set(chat, member.sessionUri);
+		await this._subscribeParticipant(participant);
+		this._assertParticipantSession(participant);
+		this._sessionsByChat.set(chat, participant.sessionUri);
 	}
 
-	private _assertMemberSession(member: IAgentHostRoomMember): void {
-		const chat = member.chatUri ?? buildDefaultChatUri(member.sessionUri);
-		const state = this._stateManager.getSessionState(member.sessionUri);
+	private _assertParticipantSession(participant: IRoomSessionParticipant): void {
+		const chat = participant.chatUri ?? buildDefaultChatUri(participant.sessionUri);
+		const state = this._stateManager.getSessionState(participant.sessionUri);
 		if (state?.defaultChat !== chat) {
 			throw new Error(localize('rooms.changedDefaultChat', "The preserved room session does not contain its recorded default chat."));
 		}
-		if (state.workingDirectories?.length !== 1 || state.workingDirectories[0] !== member.worktreeUri) {
+		if (state.workingDirectories?.length !== 1 || state.workingDirectories[0] !== participant.worktreeUri) {
 			throw new Error(localize('rooms.changedWorktree', "The preserved room session points to a different working directory. Restore its original worktree before retrying."));
 		}
 	}
 
-	private async _subscribeMember(member: IAgentHostRoomMember): Promise<void> {
-		for (const resource of [member.sessionUri, member.chatUri ?? buildDefaultChatUri(member.sessionUri)]) {
+	private async _subscribeParticipant(participant: IRoomSessionParticipant): Promise<void> {
+		for (const resource of [participant.sessionUri, participant.chatUri ?? buildDefaultChatUri(participant.sessionUri)]) {
 			if (!this._subscriptions.has(resource)) {
 				await this._lifecycle.subscribe(URI.parse(resource), this._clientId);
 				this._subscriptions.add(resource);

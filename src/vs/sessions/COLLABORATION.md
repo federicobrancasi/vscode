@@ -13,9 +13,11 @@ Copilot agent host and `chat.agentHost.collaboration.enabled`, then open
 **Agents: Open Collaboration Room** is also available from the Command Palette.
 AI features must be enabled and a compatible local host available.
 
-The room's home screen asks for a shared goal, a working folder, and one to ten
-peers with a model menu for each. Shared rules and the committed baseline are
-under **Advanced**; the room title is taken from the goal. Draft model choices
+The room's home screen asks for a shared goal, a working folder, a coordinator
+model, and one to ten workers with a model menu for each. The coordinator is a
+separate participant and does not count toward the worker limit. Shared rules
+and the committed baseline are under **Advanced**; the room title is taken from
+the goal. Draft model choices
 stay with their slots when the peer count changes or the view closes. Each draft
 peer receives a unique lowercase AI-themed name such as `chaotic-cyborg`.
 The name is saved with the draft, validated by the host at creation, and remains
@@ -39,13 +41,13 @@ for a stopped peer stays pending until **Resume**.
 The host's default model is labeled as such rather than presented as a specific
 model choice.
 
-Model menus remain available in each peer's row after creation. Changing a
-model saves that peer's preference without starting a turn or changing another
-peer. An active turn continues with its current model; a pending choice applies
-on the next turn. Unavailable or policy-rejected choices are errors, not requests
-to fall back silently. Changes made in an individual member chat follow the same
-room-owned preference and application lifecycle. Session, chat, and worktree
-identities do not change when the model changes.
+Model menus remain available for the coordinator and each worker after
+creation. Changing a model saves only that participant's preference without
+starting a turn. An active turn continues with its current model; a pending
+choice applies on the next turn. Unavailable or policy-rejected choices are
+errors, not requests to fall back silently. Changes made in an individual
+member chat follow the same room-owned preference and application lifecycle.
+Session, chat, and worktree identities do not change when the model changes.
 
 The member's desired selection and last provider-acknowledged selection are
 separate state. `modelSelection` is the acknowledgement; an absent value is
@@ -71,10 +73,12 @@ The host resolves and pins the selected branch, tag or commit using its
 sanitized Git environment.
 
 Workspace trust is handled from the room. A single source-repository consent
-also covers the exact peer worktrees supplied by the local room authority,
-never their shared parent directory. Sending messages, starting, resuming,
-retrying, steering, and approving requests require that trust. Reading history
-and choosing models do not authorize execution.
+also covers the exact coordinator and worker worktrees supplied by the local
+room authority, never their shared parent directory. A coordinator created
+after the workers receives its own exact trust grant before its chat becomes
+executable. Sending direct worker messages, starting, resuming, retrying,
+steering, and approving requests require trust. Reading history and choosing
+models do not authorize execution.
 
 The room picker reopens existing rooms. Use **Back to Sessions** or open a member
 to inspect ordinary session details. Room history, worker transcripts and the
@@ -82,8 +86,11 @@ user's regular sessions are separate surfaces.
 
 ## Collaboration model
 
-Workers share the same goal but keep independent execution transcripts. The
-host coordinates execution and delivery, not research direction.
+Workers share the same goal but keep independent execution transcripts. They
+remain equal peers and may communicate without using the coordinator as a
+relay. The host coordinates execution and delivery; a dedicated coordinator
+helps the human understand and direct the room without becoming an authority
+that workers must wait for.
 
 The workflow follows [Hugging Face agent collaborations](https://github.com/huggingface/agent-collabs):
 
@@ -102,6 +109,36 @@ unified inbox watcher. Its watcher delivers data to the agent harness; it does
 not itself inject instructions into an in-flight model call. Our local runtime
 bridge supplies that steering boundary. Neither implementation can guarantee
 model compliance or automatically detect semantically duplicate research.
+
+### Coordinator and assignments
+
+The coordinator is one persistent Agent Host session and chat associated with
+the room separately from `members`. It has its own stable session, chat,
+worktree, model lifecycle, cursor, execution state, and event cursor. Existing
+journals without coordinator state remain valid; preparing the coordinator adds
+it without rewriting worker identity.
+
+The coordinator's standard chat is the human-facing surface for broad guidance
+and questions such as "How is the work going?". Its outgoing turns receive a
+deterministic room snapshot containing worker state, assignments, explicit
+pairings, results, verifications, blockers, failures, pending human guidance,
+unowned work, and immutable evidence IDs. Model prose interprets this snapshot;
+it does not overwrite or become authoritative room state.
+
+The coordinator may inspect the snapshot, append an informational Activity
+note, or create an immutable structured assignment. An assignment names one or
+more assignees, a work or verification objective, expected evidence, and
+optional result and superseded-assignment IDs. Multiple assignees are the only
+authoritative representation of a pair. Assignment deliveries use the normal
+room scheduler: eligible workers wake, busy workers receive the assignment on a
+later admitted turn, and explicitly stopped workers keep it pending until the
+human resumes them. Creating an assignment does not schedule the coordinator
+from its own event.
+
+The coordinator cannot edit worker files, launch nested agents, stop, resume,
+add or remove workers, answer approvals, or change room permissions. Those
+operations remain direct human actions. A coordinator failure never blocks
+worker turns, direct human guidance, Activity, or room persistence.
 
 ## Authorship and delivery
 
@@ -124,6 +161,8 @@ activation:
   They are never inserted into model prompts and cannot restart stopped peers.
 - Structured results and verification records are shared, immutable history.
   They do not carry mentions, create inbox deliveries, or wake peers.
+- Structured assignments are shared, immutable history. Their deliveries notify
+  the named workers, while informational coordinator notes do not wake anyone.
 - Agents do not receive inbox deliveries for mentioning themselves.
 - A busy recipient receives the message at its next admitted turn.
 - Posting never waits synchronously for another agent's answer.
@@ -271,6 +310,14 @@ VS Code is not an always-on-server guarantee: restore persistent history and
 member/worktree bindings, mark interrupted work honestly, and require an explicit
 human request or Resume before spending again.
 
+The coordinator is persistent but event-driven. Direct human chat messages run
+it immediately. Structured results and verdicts, blocked/failed/needs-input
+workers, completed or superseded assignments, and roster changes schedule one
+coalesced follow-up. Ordinary chatter and every worker turn do not. If an event
+arrives while the coordinator runs, the host retains one dirty event cursor and
+submits one follow-up with the latest snapshot rather than building an
+unbounded queue.
+
 ## Worktrees and shared artifacts
 
 Each member works from an explicit repository baseline in a unique worktree.
@@ -333,6 +380,14 @@ addressed human request and evidence-linked findings.
 
 ## UI and accessibility
 
+The main room surface has **Coordinator** and **Activity** tabs. Coordinator is
+the default after its persistent session resolves and hosts the real Sessions
+`ChatView`, preserving standard chat rendering, input, keyboard behavior, and
+accessibility. Activity owns the virtualized shared worker log and its direct
+`@worker` composer. Direct Activity guidance bypasses the coordinator. Its
+badge counts unread meaningful assignments, findings, artifacts, results, and
+verifications rather than routine chatter.
+
 The room view holds the multi-author conversation with a bottom composer, and
 nothing else. Room settings live in the Agents window side panel, taking the
 place that Changes and Files hold in an ordinary session: opening a room brings
@@ -377,7 +432,9 @@ down the middle. Opening a room also widens the side panel if it sits below the
 width those tabs need: a session's Changes and Files read fine in a narrow panel,
 the room's settings do not.
 
-A member's row shows its model, state, and actual runtime activity;
+The Agents panel shows coordinator model and state separately above the worker
+roster and never numbers it as a worker. A member's row shows its model, state,
+and actual runtime activity;
 explicit work reports appear in the shared conversation without duplicate
 previews or expanded report blocks. Author accents are stable
 within the room, theme-aware, and accompanied by visible names. Users
@@ -406,9 +463,12 @@ Do not manufacture chat messages by extracting hidden reasoning or concatenating
 private worker transcripts. Coalesce repetitive activity instead of flooding
 the room with every streamed token.
 
-Keyboard users can navigate the roster, messages and composer, mention or reply
-to members, open their sessions and use run controls. Accessibility Help explains
-those interactions; Accessible View presents shared room content as plain text.
+Keyboard users can navigate Coordinator and Activity, the roster, messages and
+composer, mention or reply to members, open their sessions and use run controls.
+Accessibility Help explains the coordinator's authority and direct Activity
+routing. Accessible View presents deterministic coordinator state with evidence
+IDs followed by shared Activity as plain text; it does not duplicate the
+standard coordinator chat transcript.
 The collaboration verbosity setting controls the help hint. Important targeted
 updates may be announced, but do not announce every tool delta or duplicate
 existing approval signals.
@@ -420,7 +480,9 @@ Background activity must not switch the selected room/member/workspace.
 ## Architecture boundaries
 
 - Host-side room contracts, persistence, worker tools and execution remain in
-  `vs/platform/agentHost`.
+  `vs/platform/agentHost`. This includes coordinator identity, event admission,
+  deterministic projection, restricted tools, assignments, and chat
+  contributions.
 - The renderer consumes a provider-independent observable collaboration facade
   in `vs/sessions/services/collaboration`.
 - Concrete room UI lives in `vs/sessions/contrib/collaboration`.
@@ -430,6 +492,9 @@ Background activity must not switch the selected room/member/workspace.
 - The view owns its internal split layout. Its conversation uses the existing
   virtualized list infrastructure; the renderer facade owns continuous history
   loading, merge/deduplication, and cancellation when the room or host changes.
+- The coordinator surface resolves its room-owned session and chat through the
+  local Agent Host provider, then embeds the Sessions-owned `ChatView` factory.
+  Worker Activity remains a room journal rather than a synthetic chat model.
 - Backend session/chat identities are resolved by the owning provider.
   Shared room UI opens the resulting chat through `ISessionsService`.
 - Ordinary `ISession` and chat behavior remain independent of room navigation.
@@ -443,8 +508,11 @@ and newer agent-host protocol documentation do not imply local SDK support.
 Coverage must include equal-peer startup, bounded overlapping execution, targeted
 delivery without broadcast activation, partial startup failures, pause/stop
 races, reconnect recovery, honest activity state, worktree preservation and
-explicit artifact sharing. Browser tests and themed fixtures cover the real room
-component, not an imitation.
+explicit artifact sharing. Coordinator coverage additionally includes migration,
+model persistence, deterministic projection, assignment delivery, event
+coalescing, tool denial, trust scope, standard-chat binding, fallback behavior,
+and worker progress during coordinator failure. Browser tests and themed
+fixtures cover the real room component, not an imitation.
 
 Live concurrency depends on account limits, model availability and resources.
 Controlled tests prove the local scheduling contract; paid live runs require

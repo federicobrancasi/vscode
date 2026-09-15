@@ -11,7 +11,7 @@ import { isWeb } from '../../../../base/common/platform.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
-import { AgentHostRoomMessageMode, AgentHostRoomVerificationVerdict, IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomCreateOptions, IAgentHostRoomMessagePage, IAgentHostRoomsService } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { AgentHostRoomMessageMode, AgentHostRoomVerificationVerdict, IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomCoordinator, IAgentHostRoomCoordinatorSnapshot, IAgentHostRoomCreateOptions, IAgentHostRoomMessagePage, IAgentHostRoomsService } from '../../../../platform/agentHost/common/agentHostRooms.js';
 import { ResolveSessionConfigResult } from '../../../../platform/agentHost/common/state/protocol/commands.js';
 import { IAgentHostService } from '../../../../platform/agentHost/common/agentService.js';
 import { ModelSelection, PolicyState, SessionModelInfo } from '../../../../platform/agentHost/common/state/protocol/state.js';
@@ -48,6 +48,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 	readonly canConfigure = observableValue(this, false);
 	readonly canSetMemberModel = observableValue(this, false);
 	readonly canVerifyResults = observableValue(this, false);
+	readonly canCoordinate = observableValue(this, false);
 	readonly error = observableValue<string | undefined>(this, undefined);
 	readonly workspaceTrust: IObservable<ICollaborationWorkspaceTrust>;
 	readonly requests: IObservable<readonly ICollaborationRequest[]>;
@@ -117,6 +118,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 				this.canConfigure.set(false, tx);
 				this.canSetMemberModel.set(false, tx);
 				this.canVerifyResults.set(false, tx);
+				this.canCoordinate.set(false, tx);
 				this.loading.set(false, tx);
 				this.loadingEarlier.set(false, tx);
 			});
@@ -143,6 +145,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 		this.canConfigure.set(false, undefined);
 		this.canSetMemberModel.set(false, undefined);
 		this.canVerifyResults.set(false, undefined);
+		this.canCoordinate.set(false, undefined);
 		this.loadingEarlier.set(false, undefined);
 		if (!this.enabled || !this.host.rooms) {
 			transaction(tx => {
@@ -215,6 +218,7 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 				this.canConfigure.set(capabilities.supportsConfiguration === true, tx);
 				this.canSetMemberModel.set(capabilities.supportsMemberModels === true, tx);
 				this.canVerifyResults.set(capabilities.supportsResultVerification === true, tx);
+				this.canCoordinate.set(capabilities.supportsCoordinator === true, tx);
 			});
 		} catch (error) {
 			if (generation === this.hostGeneration && !this._store.isDisposed) {
@@ -400,6 +404,43 @@ export class CollaborationService extends Disposable implements ICollaborationSe
 			throw new Error(localize('room.memberModelsUnavailable', "The local agent host does not support per-peer model selection. Reconnect or update the host."));
 		}
 		await this.mutate((api, roomId) => api.setMemberModel(roomId, memberId, model));
+	}
+
+	async ensureCoordinator(): Promise<IAgentHostRoomCoordinator> {
+		if (!this.canCoordinate.get()) {
+			throw new Error(localize('room.coordinatorUnavailable', "The local agent host does not support a room coordinator. Reconnect or update the host."));
+		}
+		const roomId = this.roomId;
+		const generation = this.hostGeneration;
+		const selection = this.selectionGeneration;
+		await this.ensureExecutionAuthorized();
+		if (generation !== this.hostGeneration || selection !== this.selectionGeneration || roomId !== this.activeRoomId.get() || this._store.isDisposed) {
+			throw new CancellationError();
+		}
+		const coordinator = await this.api.ensureCoordinator(roomId);
+		if (generation === this.hostGeneration && selection === this.selectionGeneration && roomId === this.activeRoomId.get() && !this._store.isDisposed) {
+			this.acceptRoom(await this.api.getRoom(roomId));
+			await this.ensureExecutionAuthorized();
+		}
+		return coordinator;
+	}
+
+	async setCoordinatorModel(model: ModelSelection | undefined): Promise<void> {
+		if (!this.canCoordinate.get()) {
+			throw new Error(localize('room.coordinatorUnavailable', "The local agent host does not support a room coordinator. Reconnect or update the host."));
+		}
+		const roomId = this.roomId;
+		await this.api.setCoordinatorModel(roomId, model);
+		if (roomId === this.activeRoomId.get() && !this._store.isDisposed) {
+			this.acceptRoom(await this.api.getRoom(roomId));
+		}
+	}
+
+	async getCoordinatorSnapshot(): Promise<IAgentHostRoomCoordinatorSnapshot> {
+		if (!this.canCoordinate.get()) {
+			throw new Error(localize('room.coordinatorUnavailable', "The local agent host does not support a room coordinator. Reconnect or update the host."));
+		}
+		return this.api.getCoordinatorSnapshot(this.roomId);
 	}
 
 	getDraft(roomId: string): CollaborationDraft {

@@ -5,10 +5,10 @@
 
 import { localize } from '../../../nls.js';
 import { IAgentModelInfo } from '../common/agent.js';
-import { IAgentHostRoomMember } from '../common/agentHostRooms.js';
 import { schemaProperty } from '../common/agentHostSchema.js';
 import { ModelSelection, PolicyState } from '../common/state/sessionState.js';
 import { JsonPrimitive } from '../common/state/protocol/state.js';
+import { IRoomSessionParticipant } from './agentHostRoomsTypes.js';
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -59,7 +59,7 @@ export function validateRoomModelSelection(selection: ModelSelection, models: re
 	}
 }
 
-export function getRoomMemberModel(member: IAgentHostRoomMember): ModelSelection | undefined {
+export function getRoomMemberModel(member: IRoomSessionParticipant): ModelSelection | undefined {
 	if (member.pendingModel !== undefined) {
 		return member.pendingModel ?? { id: 'auto' };
 	}

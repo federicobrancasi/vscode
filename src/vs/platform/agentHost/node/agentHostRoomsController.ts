@@ -7,10 +7,10 @@ import { URI } from '../../../base/common/uri.js';
 import { localize } from '../../../nls.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { ILogService } from '../../log/common/log.js';
-import { IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomsService } from '../common/agentHostRooms.js';
+import { IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomCoordinatorSnapshot, IAgentHostRoomsService } from '../common/agentHostRooms.js';
 import { ModelSelection } from '../common/state/sessionState.js';
 import { IAgentConfigurationService } from './agentConfigurationService.js';
-import { AgentHostRooms, IRoomSessionTools } from './agentHostRooms.js';
+import { AgentHostRooms, IRoomCoordinatorTools, IRoomSessionTools } from './agentHostRooms.js';
 import { AgentHostRoomsRuntime, IRoomSessionLifecycle } from './agentHostRoomsRuntime.js';
 import { AgentHostRoomsStorage } from './agentHostRoomsStorage.js';
 import { IRoomRecord, IRoomStorage } from './agentHostRoomsTypes.js';
@@ -21,12 +21,19 @@ import { IAgentHostTurnService } from './agentHostTurnService.js';
 export const IAgentHostRoomsController = createDecorator<IAgentHostRoomsController>('agentHostRoomsController');
 
 /** Internal authority; SDK tools never receive the human room-control surface. */
-export interface IAgentHostRoomsController extends IAgentHostRoomsService, IRoomSessionTools {
+export interface IAgentHostRoomsController extends IAgentHostRoomsService, IRoomSessionTools, IRoomCoordinatorTools {
 	setMemberConfiguration(session: string, configuration: Partial<IAgentHostRoomConfiguration>, onApplied?: () => void): Promise<void>;
 	getMemberModelForChat(session: string, chat: string): Promise<ModelSelection | undefined>;
 	setMemberModelForChat(session: string, chat: string, model: ModelSelection): Promise<void>;
 	isRoomSessionUri(session: string): boolean;
 	isAdmittedTurn(session: string, chat: string, turnId: string): boolean;
+	getCoordinatorModelForChat(session: string, chat: string): Promise<ModelSelection | undefined>;
+	setCoordinatorModelForChat(session: string, chat: string, model: ModelSelection): Promise<void>;
+	isCoordinatorSessionUri(session: string): boolean;
+	isCoordinatorChat(session: string, chat: string): boolean;
+	isCoordinatorAdmittedTurn(session: string, chat: string, turnId: string): boolean;
+	isCoordinatorDirectTurnAvailable(session: string, chat: string): boolean;
+	getCoordinatorTurnSnapshot(session: string, chat: string, turnId: string): Promise<IAgentHostRoomCoordinatorSnapshot | undefined>;
 	shutdown(): Promise<void>;
 }
 
