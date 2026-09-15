@@ -1267,15 +1267,14 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 				assignment,
 				deliveries: assigneeIds.map(memberId => ({ memberId, state: 'pending' })),
 			};
-			record = this._wakeHumanRecipients({
+			record = {
 				...record,
 				room: { ...record.room, latestMessageSequence: message.sequence },
 				messages: [...record.messages, message],
-			}, assigneeIds);
+			};
 			await this._save(record);
 			return message;
 		});
-		this._schedule(roomId);
 		return message;
 	}
 
@@ -1996,7 +1995,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			const finished = event.state === 'idle' || event.state === 'failed' || event.state === 'stopped';
 			const completed = event.state === 'idle';
 			const state = event.state === 'stopped' ? 'interrupted' : event.state;
-			const updated: IAgentHostRoomCoordinator = {
+			const updatedCoordinator: IAgentHostRoomCoordinator = {
 				...coordinator,
 				state,
 				turnId: finished ? undefined : event.turnId ?? coordinator.turnId,
@@ -2010,14 +2009,24 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					: coordinator.eventCursor,
 				error: event.error,
 			};
-			applyPendingModel = finished && updated.pendingModel !== undefined;
-			await this._save({ ...record, room: { ...record.room, coordinator: updated } });
+			applyPendingModel = finished && updatedCoordinator.pendingModel !== undefined;
+			let updatedRecord: IRoomRecord = { ...record, room: { ...record.room, coordinator: updatedCoordinator } };
+			if (finished) {
+				const assignmentRecipients = record.messages.flatMap(message => message.assignment
+					? message.deliveries.filter(delivery => delivery.state === 'pending').map(delivery => delivery.memberId)
+					: []);
+				updatedRecord = this._wakeHumanRecipients(updatedRecord, assignmentRecipients);
+			}
+			await this._save(updatedRecord);
 		});
 		if (applyPendingModel) {
 			void this.ensureCoordinator(roomId).catch(error => this._logService.warn('[AgentHostRooms] Coordinator model application failed', error));
 		}
 		if (event.state === 'idle') {
 			this._scheduleCoordinator(roomId);
+		}
+		if (event.state === 'idle' || event.state === 'failed' || event.state === 'stopped') {
+			this._schedule(roomId);
 		}
 	}
 

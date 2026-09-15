@@ -130,10 +130,12 @@ note, or create an immutable structured assignment. An assignment names one or
 more assignees, a work or verification objective, expected evidence, and
 optional result and superseded-assignment IDs. Multiple assignees are the only
 authoritative representation of a pair. Assignment deliveries use the normal
-room scheduler: eligible workers wake, busy workers receive the assignment on a
-later admitted turn, and explicitly stopped workers keep it pending until the
-human resumes them. Creating an assignment does not schedule the coordinator
-from its own event.
+room scheduler. Assignments created in one coordinator turn are admitted as a
+batch when that turn finishes, so several distinct role assignments can start
+together without the first targeted assignment retiring the others. Eligible
+workers wake, busy workers receive the assignment on a later admitted turn, and
+explicitly stopped workers keep it pending until the human resumes them.
+Creating an assignment does not schedule the coordinator from its own event.
 
 The coordinator cannot edit worker files, launch nested agents, stop, resume,
 add or remove workers, answer approvals, or change room permissions. Those

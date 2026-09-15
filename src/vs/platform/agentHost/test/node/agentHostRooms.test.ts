@@ -386,6 +386,7 @@ suite('AgentHostRooms', () => {
 			id: 'coordination-note',
 			text: 'The parser pair is active.',
 		}, { sessionId: 'forged', toolCallId: 'note', toolName: 'room_post', arguments: {} });
+		runtime.finish(coordinator.sessionUri);
 		await runtime.whenSubmitted(2);
 		const assignmentPost = (await rooms.getMessages(room.id)).messages.find(message => message.id === 'pair-parser')!;
 		const coordinationNote = (await rooms.getMessages(room.id)).messages.find(message => message.id === 'coordination-note')!;
@@ -401,14 +402,13 @@ suite('AgentHostRooms', () => {
 			artifactIds: [],
 			assignmentId: 'pair-parser',
 		});
+		await runtime.whenSubmitted(3);
 		const eventSequence = (await rooms.getCoordinator(room.id))!.eventSequence;
 		await rooms.post(second, { id: 'ordinary-chatter', kind: 'message', text: 'I am reading the parser result.', mentions: [] });
 		const toolSnapshot = await tools.find(tool => tool.name === 'room_coordinator_snapshot')!.handler!(
 			{}, { sessionId: 'forged', toolCallId: 'snapshot', toolName: 'room_coordinator_snapshot', arguments: {} });
 		const snapshot = await rooms.coordinatorSnapshot(AgentSession.id(coordinator.sessionUri));
 		assert.deepStrictEqual(toolSnapshot, snapshot);
-		runtime.finish(coordinator.sessionUri);
-		await runtime.whenSubmitted(3);
 		const followUps = runtime.submitted.filter(submission => submission.sessionUri === coordinator.sessionUri);
 		runtime.finish(coordinator.sessionUri, 'failed');
 		await whenRoom(rooms, room.id, value => value.coordinator?.state === 'failed');
@@ -515,6 +515,46 @@ suite('AgentHostRooms', () => {
 		});
 		runtime.finish(coordinator.sessionUri);
 		runtime.finish(room.members[0].sessionUri);
+	});
+
+	test('sequential coordinator assignments wake their workers as one batch', async () => {
+		const { rooms, runtime } = setup(3);
+		const room = await rooms.createRoom({
+			title: 'Batched assignments',
+			goal: 'Give every worker a distinct role',
+			repositoryUri: 'file:///repository',
+			workerCount: 3,
+			continuous: false,
+		});
+		const coordinator = await rooms.ensureCoordinator(room.id);
+		runtime.active.set(coordinator.sessionUri, 'human-coordinator-turn');
+		runtime.emit({ sessionUri: coordinator.sessionUri, turnId: 'human-coordinator-turn', state: 'working' });
+		await whenRoom(rooms, room.id, value => value.coordinator?.turnId === 'human-coordinator-turn');
+		const sessionId = AgentSession.id(coordinator.sessionUri);
+		for (const [index, member] of room.members.entries()) {
+			await rooms.assign(sessionId, {
+				id: `role-${index}`,
+				assignees: [member.id],
+				kind: 'work',
+				description: `Own role ${index}.`,
+				expectedEvidence: [`Evidence ${index}`],
+			});
+		}
+		const submissionsBeforeCompletion = runtime.submitted.length;
+		runtime.finish(coordinator.sessionUri);
+		await runtime.whenSubmitted(3);
+		assert.deepStrictEqual({
+			submissionsBeforeCompletion,
+			recipients: runtime.submitted.map(submission => submission.sessionUri),
+			states: (await rooms.getRoom(room.id)).members.map(member => member.state),
+		}, {
+			submissionsBeforeCompletion: 0,
+			recipients: room.members.map(member => member.sessionUri),
+			states: ['starting', 'starting', 'starting'],
+		});
+		for (const member of room.members) {
+			runtime.finish(member.sessionUri);
+		}
 	});
 
 	test('coordinator issues cite only the worker record that describes the blocker', async () => {
