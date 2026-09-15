@@ -35,6 +35,7 @@ export interface IRoomMemberExecution {
 	readonly turnId?: string;
 	readonly runId?: string;
 	readonly readSequence?: number;
+	readonly nextAction?: 'continue' | 'wait';
 }
 
 export interface IRoomRecord {

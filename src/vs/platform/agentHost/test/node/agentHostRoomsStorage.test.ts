@@ -69,7 +69,7 @@ suite('AgentHostRoomsStorage', function () {
 				id: 'message-two', sequence: 2, authorId: 'member-one', authorName: 'Worker', authorKind: 'agent',
 				kind: 'finding', text: 'Inspecting', timestamp: 2, mentions: [], replyTo: 'message-one', deliveries: [],
 			}],
-			executions: [{ memberId: 'member-one', initialized: true, needsTurn: false, turnId: 'turn-two', runId: 'run-one', readSequence: 2 }],
+			executions: [{ memberId: 'member-one', initialized: true, needsTurn: false, turnId: 'turn-two', runId: 'run-one', readSequence: 2, nextAction: 'continue' }],
 		};
 	}
 

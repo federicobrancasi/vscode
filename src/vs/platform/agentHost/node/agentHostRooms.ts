@@ -32,6 +32,7 @@ export interface IRoomSessionTools {
 	read(sessionId: string, query?: IAgentHostRoomMessageQuery): Promise<IRoomContext>;
 	readArtifact(sessionId: string, artifactId: string, offset?: number): Promise<IRoomArtifactContent>;
 	post(sessionId: string, options: IRoomAgentPost): Promise<IAgentHostRoomMessage>;
+	yieldTurn(sessionId: string, action: 'continue' | 'wait', reason: string): Promise<{ readonly action: 'continue' | 'wait'; readonly reason: string }>;
 	publishResult(sessionId: string, options: IAgentHostRoomPublishResultOptions): Promise<IAgentHostRoomMessage>;
 	reviewResult(sessionId: string, options: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage>;
 	sharePatch(sessionId: string, title: string): Promise<IAgentHostRoomArtifact>;
@@ -64,12 +65,13 @@ export interface IRoomArtifactContent {
 	readonly nextOffset?: number;
 }
 
-const CONTINUE_ROOM_PROMPT = 'Continue working in the existing collaboration room.';
+const ROOM_YIELD_PROMPT = 'Before ending this turn, call room_yield exactly once. Choose continue only when concrete work can proceed immediately, with the next step as its reason. Choose wait when work depends on another result, input, approval, or there is no actionable next step. Waiting is correct; never request another turn merely to poll room_read.';
+const CONTINUE_ROOM_PROMPT = ['Continue working in the existing collaboration room.', ROOM_YIELD_PROMPT].join('\n\n');
 const MAX_ACTIVE_COORDINATOR_ASSIGNMENTS = 20;
 const CONTINUE_AFTER_TURN_PROMPT = [
 	'Share meaningful completed work with room_publish_result, including evidence, and publish changed code with room_share_patch. Use room_post for focused questions and conversational replies.',
 	'Call room_read with after set to the latest sequence you saw, review peer ideas and feedback, and independently verify a useful peer result when appropriate. Never verify your own result.',
-	'Ask a focused question in the room if you need help.',
+	ROOM_YIELD_PROMPT,
 ].join('\n\n');
 
 function buildHumanGuidancePrompt(messages: readonly IAgentHostRoomMessage[]): string {
@@ -77,6 +79,7 @@ function buildHumanGuidancePrompt(messages: readonly IAgentHostRoomMessage[]): s
 		'New human guidance for your current collaboration work:',
 		...messages.map(message => `[${message.id}] ${message.authorName}: ${message.text}`),
 		'Prioritize the human request. Call room_read for the shared context, then continue from the existing work without restarting the original task.',
+		ROOM_YIELD_PROMPT,
 	].join('\n\n');
 }
 
@@ -122,6 +125,7 @@ function buildRoomTurnPrompt(room: IAgentHostRoom, member: IAgentHostRoomMember,
 		'After meaningful implementation or investigation, publish a structured result with room_publish_result, including evidence, and share a Git patch when code changed. Use room_post for focused questions and conversational replies.',
 		'After publishing, read newer room entries and independently verify a useful peer result when appropriate. Never verify your own result.',
 		'Use useful peer evidence or reply when that improves the result. If peer ideas are not useful, continue improving your own approach. Human guidance has priority; peer messages are optional evidence.',
+		ROOM_YIELD_PROMPT,
 		'For a shared patch, inspect it with room_read_artifact, then use your normal approved shell tools to check and explicitly apply it ONLY inside your own worktree. Never copy files directly out of another peer workspace. Do not apply or merge into the original repository.',
 		'Do not spawn nested agents, factories, or hidden teams. Preserve normal approvals and content exclusions.',
 		'An earlier turn may have been interrupted. Inspect existing work before retrying any action; never assume an interrupted delivery or external operation completed.',
@@ -638,7 +642,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		const room: IAgentHostRoom = {
 			id, title: options.title.trim(), goal: options.goal.trim(), instructions: options.instructions ?? '',
 			...repository, createdAt: now, updatedAt: now, revision: 1, state: 'created',
-			coordinator, members, artifacts: [], latestMessageSequence: 0,
+			continuous: options.continuous ?? true, coordinator, members, artifacts: [], latestMessageSequence: 0,
 		};
 		const record: IRoomRecord = {
 			version: 1, room, messages: [],
@@ -825,6 +829,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 			},
 			executions: record.executions.map(execution => ({
 				...execution,
+				nextAction: targets.has(execution.memberId) ? undefined : execution.nextAction,
 				needsTurn: targets.has(execution.memberId) || this._joinedMidRoom(record, this._member(record, execution.memberId))
 					? true
 					: freshRun ? false : execution.needsTurn,
@@ -890,7 +895,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 					run: { id: generateUuid(), startedAt: now, deadline: limits.timeoutMinutes === undefined ? undefined : now + Math.ceil(limits.timeoutMinutes * 60000), limits: { ...limits }, admittedTurns: 0 },
 					members: record.room.members.map(member => ({ ...member, state: 'idle', error: undefined })),
 				},
-				executions: record.executions.map(execution => ({ ...execution, needsTurn: true })),
+				executions: record.executions.map(execution => ({ ...execution, needsTurn: true, nextAction: undefined })),
 			})).room;
 		});
 		for (const memberId of resumedMembers) {
@@ -1392,6 +1397,31 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		return this._post(binding.roomId, binding.memberId, options);
 	}
 
+	async yieldTurn(sessionId: string, action: 'continue' | 'wait', reason: string): Promise<{ readonly action: 'continue' | 'wait'; readonly reason: string }> {
+		await this._ready;
+		this.beforeTool(sessionId, 'room_yield');
+		if (action !== 'continue' && action !== 'wait') {
+			throw new Error(localize('rooms.invalidYieldAction', "Choose to continue concrete work or wait for new work."));
+		}
+		this._text(reason, 2000);
+		const binding = this._binding(sessionId);
+		return this._queue.queue(binding.roomId, async () => {
+			const record = this._record(binding.roomId);
+			this._assertMemberTurn(record, binding.memberId);
+			await this._save({
+				...record,
+				room: {
+					...record.room,
+					members: record.room.members.map(member => member.id === binding.memberId && member.work
+						? { ...member, work: { ...member.work, nextStep: action === 'continue' ? reason : undefined } }
+						: member),
+				},
+				executions: record.executions.map(execution => execution.memberId === binding.memberId ? { ...execution, nextAction: action } : execution),
+			});
+			return { action, reason };
+		});
+	}
+
 	async publishResult(sessionId: string, options: IAgentHostRoomPublishResultOptions): Promise<IAgentHostRoomMessage> {
 		await this._ready;
 		const binding = this._binding(sessionId);
@@ -1793,7 +1823,7 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 		record = await this._save({
 			...record,
 			room: { ...record.room, run: { ...run, admittedTurns: run.admittedTurns + ready.length }, members: record.room.members.map(member => turns.has(member.id) ? { ...member, turns: member.turns + 1, state: 'starting', work: member.work ? { ...member.work, nextStep: undefined } : undefined } : member) },
-			executions: record.executions.map(execution => turns.has(execution.memberId) ? { ...execution, turnId: turns.get(execution.memberId), runId: run.id, needsTurn: false } : execution),
+			executions: record.executions.map(execution => turns.has(execution.memberId) ? { ...execution, turnId: turns.get(execution.memberId), runId: run.id, needsTurn: false, nextAction: undefined } : execution),
 			messages: record.messages.map(message => ({ ...message, deliveries: message.deliveries.map(delivery => turns.has(delivery.memberId) && delivery.state === 'pending' ? { ...delivery, state: 'submitted', turnId: turns.get(delivery.memberId) } : delivery) })),
 		});
 		for (const member of ready) {
@@ -1981,7 +2011,13 @@ export class AgentHostRooms extends Disposable implements IAgentHostRoomsService
 						...item, state: event.state === 'idle' && item.work?.blocked ? 'blocked' : event.state, activity: event.activity, error: event.error,
 					} : item),
 				},
-				executions: record.executions.map(item => item.memberId === member.id && finished ? { ...item, turnId: undefined, runId: undefined, needsTurn: event.state === 'idle' && !member.work?.blocked } : item),
+				executions: record.executions.map(item => item.memberId === member.id && finished ? {
+					...item,
+					turnId: undefined,
+					runId: undefined,
+					needsTurn: event.state === 'idle' && !member.work?.blocked && record.room.continuous !== false && item.nextAction === 'continue',
+					nextAction: undefined,
+				} : item),
 				messages: finished ? record.messages.map(message => ({
 					...message, deliveries: message.deliveries.map(delivery => delivery.memberId === member.id && delivery.turnId === execution.turnId && ['submitted', 'delivered'].includes(delivery.state)
 						? { ...delivery, state: event.state === 'idle' ? 'completed' : event.state === 'stopped' ? 'cancelled' : 'failed', error: event.error } : delivery),

@@ -34,8 +34,8 @@ runs `git init` with a baseline commit. It is never initialized silently, and a
 folder that is already inside a repository resolves to that repository.
 
 **Create** records the room; it does not by itself authorize model execution.
-**Start** runs the team continuously until the human pauses or stops it, a
-member is blocked or fails, or the host shuts down. **Send** addresses every peer
+**Start** runs the team until workers explicitly wait, the human pauses or stops
+it, a member is blocked or fails, or the host shuts down. **Send** addresses every peer
 when no `@mentions` are present, or only the mentioned peers otherwise. Guidance
 for a stopped peer stays pending until **Resume**.
 The host's default model is labeled as such rather than presented as a specific
@@ -274,11 +274,14 @@ Pending human guidance takes precedence over both prompts. It uses the
 human-guidance prompt either inside the active turn or as the next turn. Peer
 messages never become prompt blocks.
 
-Every room keeps admitting turns after ordinary idle completion. A member
-chooses what to work on next, not whether the room should stop. If peer evidence
-is useful it may build on it; otherwise it continues improving its own approach.
-Pause, Stop, removal, a genuine blocked or failed state, and host shutdown stop
-admission. This is a scheduling rule, not a promise of useful work.
+Before ending a turn, a worker uses `room_yield` to choose **Continue** with a
+concrete next step that can proceed immediately, or **Wait** when work depends
+on another result, input, or approval, or nothing actionable remains. Wait is
+the default when no decision was recorded. A waiting worker does not receive
+poll-only turns; a later assignment or human delivery wakes it through the
+normal scheduler. Pause, Stop, removal, a genuine blocked or failed state, and
+host shutdown also stop admission. This preserves multi-turn private work
+without treating model completion itself as a request to spend another turn.
 
 A room's roster is not fixed at creation. **Add Agent** gives it one more peer,
 with its own session and worktree; a peer added to a room that has already run
@@ -304,7 +307,8 @@ session, worktree, and pending human guidance.
   room. Human guidance remains pending until Resume.
 
 Workers read the room after publishing meaningful work; they do not consume
-turns only to poll for messages. Already-running external processes may have a
+turns only to poll for messages. `room_yield` must never choose Continue merely
+to call `room_read` again. Already-running external processes may have a
 separate termination lifecycle.
 
 Closing the room view does not delete the room or stop the live host. Quitting

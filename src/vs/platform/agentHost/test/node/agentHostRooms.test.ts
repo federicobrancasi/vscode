@@ -34,11 +34,12 @@ import { createTestAgentService, getTestAgentHostRoomsController, getTestAgentSe
 import { ActionEnvelope, ActionType } from '../../common/state/sessionActions.js';
 import { buildChatUri, buildDefaultChatUri, MessageKind, ModelSelection, PendingMessageKind, PolicyState, ResponsePartKind, ToolCallConfirmationReason, ToolCallStatus } from '../../common/state/sessionState.js';
 
-const continueRoomPrompt = 'Continue working in the existing collaboration room.';
+const roomYieldPrompt = 'Before ending this turn, call room_yield exactly once. Choose continue only when concrete work can proceed immediately, with the next step as its reason. Choose wait when work depends on another result, input, approval, or there is no actionable next step. Waiting is correct; never request another turn merely to poll room_read.';
+const continueRoomPrompt = ['Continue working in the existing collaboration room.', roomYieldPrompt].join('\n\n');
 const continueAfterTurnPrompt = [
 	'Share meaningful completed work with room_publish_result, including evidence, and publish changed code with room_share_patch. Use room_post for focused questions and conversational replies.',
 	'Call room_read with after set to the latest sequence you saw, review peer ideas and feedback, and independently verify a useful peer result when appropriate. Never verify your own result.',
-	'Ask a focused question in the room if you need help.',
+	roomYieldPrompt,
 ].join('\n\n');
 
 const roomModelCatalog: readonly IAgentModelInfo[] = [
@@ -877,9 +878,11 @@ suite('AgentHostRooms', () => {
 			const { rooms, runtime, storage } = setup(1);
 			const initial = { id: 'model-a' };
 			const next = { id: 'model-b', config: { thinkingLevel: 'high' } };
-			const room = await rooms.createRoom({ title: 'Busy', goal: 'Finish the current turn', repositoryUri: 'file:///repository', workerCount: 1, memberModels: [initial], continuous: false });
+			const room = await rooms.createRoom({ title: 'Busy', goal: 'Finish the current turn', repositoryUri: 'file:///repository', workerCount: 1, memberModels: [initial], continuous: true });
 			await rooms.startRoom(room.id, { maxTurns: 2 });
 			await runtime.whenSubmitted(1);
+			const sessionId = AgentSession.id(room.members[0].sessionUri);
+			await rooms.read(sessionId);
 			const executions = storage.records.get(room.id)!.executions;
 			const pending = await rooms.setMemberModel(room.id, room.members[0].id, next);
 			assert.deepStrictEqual({
@@ -887,6 +890,7 @@ suite('AgentHostRooms', () => {
 				current: runtime.appliedModels.get(room.members[0].sessionUri),
 				executions: storage.records.get(room.id)!.executions, changes: runtime.modelChanges.length, submits: runtime.submitted.length,
 			}, { applied: initial, pending: next, current: initial, executions, changes: 1, submits: 1 });
+			await rooms.yieldTurn(sessionId, 'continue', 'Apply the saved model on the next concrete step.');
 			runtime.finish(room.members[0].sessionUri);
 			await runtime.whenSubmitted(2);
 			const current = (await rooms.getRoom(room.id)).members[0];
@@ -1729,14 +1733,16 @@ suite('AgentHostRooms', () => {
 
 	test('reading deferred guidance acknowledges delivery and does not start a duplicate follow-up', async () => {
 		const { rooms, runtime, storage, create } = setup(1);
-		const room = await create();
+		const room = await create(true);
 		await rooms.startRoom(room.id, {});
 		await runtime.whenSubmitted(1);
 		runtime.steeringAccepted = false;
 		await rooms.postMessage(room.id, { id: 'read-guidance', text: 'Inspect the existing patch', mode: 'steer', mentions: [] });
 		await whenRoom(rooms, room.id, () => storage.records.get(room.id)!.messages[0].deliveries[0].state === 'pending'
 			&& !!storage.records.get(room.id)!.messages[0].deliveries[0].turnId);
-		await rooms.read(AgentSession.id(room.members[0].sessionUri));
+		const sessionId = AgentSession.id(room.members[0].sessionUri);
+		await rooms.read(sessionId);
+		await rooms.yieldTurn(sessionId, 'continue', 'Inspect the existing patch.');
 		runtime.finish(room.members[0].sessionUri);
 		await runtime.whenSubmitted(2);
 		assert.deepStrictEqual({
@@ -2099,25 +2105,59 @@ suite('AgentHostRooms', () => {
 		assert.deepStrictEqual(runtime.submitted.map(turn => turn.sessionUri), [room.members[1].sessionUri]);
 	});
 
-	test('ordinary completion keeps admitting turns without a saved next step', async () => {
+	test('continuous work requires an explicit concrete next step for each new turn', async () => {
 		const { rooms, runtime, create } = setup(1);
-		const room = await create();
+		const room = await create(true);
 		await rooms.startRoom(room.id, {});
 		await runtime.whenSubmitted(1);
+		const sessionId = AgentSession.id(room.members[0].sessionUri);
+		await rooms.read(sessionId);
 		for (let turn = 1; turn < 8; turn++) {
-			const session = room.members[0].sessionUri;
-			runtime.finish(session);
+			await rooms.yieldTurn(sessionId, 'continue', `Concrete implementation step ${turn}`);
+			runtime.finish(room.members[0].sessionUri);
 			await runtime.whenSubmitted(turn + 1);
 		}
 		const runId = (await rooms.getRoom(room.id)).run?.id;
 		runtime.finish(room.members[0].sessionUri);
-		await runtime.whenSubmitted(9);
+		await whenRoom(rooms, room.id, room => room.state === 'idle');
 		assert.deepStrictEqual({
 			runId: (await rooms.getRoom(room.id)).run?.id,
 			limits: (await rooms.getRoom(room.id)).run?.limits,
 			turns: runtime.submitted.length,
-		}, { runId, limits: {}, turns: 9 });
+			nextStep: (await rooms.getRoom(room.id)).members[0].work?.nextStep,
+		}, { runId, limits: {}, turns: 8, nextStep: undefined });
 		await rooms.stopRoom(room.id);
+	});
+
+	test('a waiting worker stays idle until new guidance wakes it', async () => {
+		const { rooms, runtime, create } = setup(1);
+		const room = await create(true);
+		await rooms.startRoom(room.id);
+		await runtime.whenSubmitted(1);
+		const sessionId = AgentSession.id(room.members[0].sessionUri);
+		await rooms.read(sessionId);
+		await rooms.yieldTurn(sessionId, 'wait', 'The accepted baseline is not available yet.');
+		runtime.finish(room.members[0].sessionUri);
+		await whenRoom(rooms, room.id, room => room.state === 'idle');
+		const turnsBeforeGuidance = runtime.submitted.length;
+		await rooms.postMessage(room.id, {
+			id: 'baseline-ready',
+			text: 'The accepted baseline is ready.',
+			mentions: [room.members[0].id],
+		});
+		await runtime.whenSubmitted(2);
+		assert.deepStrictEqual({
+			turnsBeforeGuidance,
+			recipient: runtime.submitted[1].sessionUri,
+			hasGuidance: runtime.submitted[1].prompt.includes('The accepted baseline is ready.'),
+			requiresYield: runtime.submitted[1].prompt.includes('call room_yield exactly once'),
+		}, {
+			turnsBeforeGuidance: 1,
+			recipient: room.members[0].sessionUri,
+			hasGuidance: true,
+			requiresYield: true,
+		});
+		runtime.finish(room.members[0].sessionUri);
 	});
 
 	test('retrying a pending human delivery does not duplicate its post', async () => {
@@ -2221,11 +2261,17 @@ suite('AgentHostRooms', () => {
 
 	test('ordinary completion asks members to share, review peers and keep improving', async () => {
 		const { rooms, runtime } = setup(1);
-		const room = await rooms.createRoom({ title: 'Open ended', goal: 'Keep improving the result', repositoryUri: 'file:///repository', workerCount: 1, continuous: false });
+		const room = await rooms.createRoom({ title: 'Open ended', goal: 'Keep improving the result', repositoryUri: 'file:///repository', workerCount: 1, continuous: true });
 		await rooms.startRoom(room.id, { maxTurns: 3 });
 		const member = room.members[0];
+		const sessionId = AgentSession.id(member.sessionUri);
+		await runtime.whenSubmitted(1);
+		await rooms.read(sessionId);
 		for (let turn = 1; turn <= 3; turn++) {
 			await runtime.whenSubmitted(turn);
+			if (turn < 3) {
+				await rooms.yieldTurn(sessionId, 'continue', `Concrete next step ${turn}`);
+			}
 			runtime.finish(member.sessionUri);
 		}
 		await whenRoom(rooms, room.id, room => room.state === 'idle');
@@ -2256,14 +2302,18 @@ suite('AgentHostRooms', () => {
 		await rooms.startRoom(room.id, { maxTurns: 4 });
 		await runtime.whenSubmitted(2);
 		const first = AgentSession.id(room.members[0].sessionUri);
+		const second = AgentSession.id(room.members[1].sessionUri);
 		await rooms.read(first);
+		await rooms.read(second);
 		await rooms.post(first, { id: 'peer-result', kind: 'finding', text: 'The parser path is faster', mentions: [room.members[1].id] });
+		await rooms.yieldTurn(first, 'continue', 'Measure the next parser candidate.');
+		await rooms.yieldTurn(second, 'continue', 'Inspect the new peer result.');
 		for (const member of room.members) {
 			runtime.finish(member.sessionUri);
 		}
 		await runtime.whenSubmitted(4);
 		const secondContinuation = runtime.submitted.find((submission, index) => index >= 2 && submission.sessionUri === room.members[1].sessionUri)!;
-		const secondContext = await rooms.read(AgentSession.id(room.members[1].sessionUri));
+		const secondContext = await rooms.read(second);
 		assert.deepStrictEqual({
 			prompt: secondContinuation.prompt,
 			inbox: secondContext.inbox.map(message => message.id),
@@ -2272,7 +2322,7 @@ suite('AgentHostRooms', () => {
 
 	test('one initial room read permits private work across continuation turns', async () => {
 		const { rooms, runtime, create } = setup(1);
-		const room = await create();
+		const room = await create(true);
 		await rooms.startRoom(room.id, { maxTurns: 2, timeoutMinutes: 1 });
 		await runtime.whenSubmitted(1);
 		const member = room.members[0];
@@ -2285,6 +2335,7 @@ suite('AgentHostRooms', () => {
 		assert.throws(() => rooms.beforeTool(sessionId, 'search_code_subagent'), /nested agents/);
 		assert.throws(() => rooms.beforeTool(sessionId, 'room_assign'), /Only the room coordinator/);
 		await rooms.post(sessionId, { id: 'finding', kind: 'finding', text: 'The baseline is 20ms', mentions: [] });
+		await rooms.yieldTurn(sessionId, 'continue', 'Implement the measured improvement.');
 		runtime.finish(member.sessionUri);
 		await runtime.whenSubmitted(2);
 		assert.doesNotThrow(() => rooms.beforeTool(sessionId, 'bash'));
@@ -2565,6 +2616,10 @@ suite('AgentHostRooms', () => {
 			artifactIds: [],
 			authorId: 'forged',
 		}, invocation);
+		const yielded = await firstTools.find(tool => tool.name === 'room_yield')!.handler!({
+			action: 'wait',
+			reason: 'Wait for independent verification.',
+		}, { ...invocation, toolName: 'room_yield' });
 		await rooms.read(secondSession, { after: 0 });
 		await secondTools.find(tool => tool.name === 'room_verify_result')!.handler!({
 			id: 'tool-verification',
@@ -2575,9 +2630,11 @@ suite('AgentHostRooms', () => {
 		}, { ...invocation, toolName: 'room_verify_result' });
 		assert.deepStrictEqual({
 			tools: firstTools.map(tool => tool.name),
+			yielded,
 			authors: (await rooms.getMessages(room.id)).messages.map(message => message.authorId),
 		}, {
-			tools: ['room_read', 'room_read_artifact', 'room_post', 'room_publish_result', 'room_verify_result', 'room_share_patch'],
+			tools: ['room_read', 'room_read_artifact', 'room_post', 'room_yield', 'room_publish_result', 'room_verify_result', 'room_share_patch'],
+			yielded: { action: 'wait', reason: 'Wait for independent verification.' },
 			authors: [room.members[0].id, room.members[1].id],
 		});
 	});

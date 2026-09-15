@@ -144,7 +144,7 @@ export interface IAgentHostRoom {
 	readonly createdAt: number;
 	readonly updatedAt: number;
 	readonly state: AgentHostRoomState;
-	/** Keep admitting turns for idle members that have no explicit next step. Absent on legacy rooms. */
+	/** Allow workers to request another turn with an explicit concrete next step. Absent on legacy rooms. */
 	readonly continuous?: boolean;
 	/** Persistent logical coordinator. Absent in journals written before coordinator support. */
 	readonly coordinator?: IAgentHostRoomCoordinator;

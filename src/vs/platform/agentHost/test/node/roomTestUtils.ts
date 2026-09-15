@@ -55,6 +55,7 @@ export function createNoopRoomsController(): IAgentHostRoomsController {
 		read: unavailable,
 		readArtifact: unavailable,
 		post: unavailable,
+		yieldTurn: unavailable,
 		publishResult: unavailable,
 		reviewResult: unavailable,
 		sharePatch: unavailable,

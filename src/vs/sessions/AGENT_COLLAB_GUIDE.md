@@ -114,8 +114,9 @@ and a native Agents Window interface:
   edits, commits, or merges into the human's original working tree.
 - **Shared conversation:** completed findings, replies, mentions, delivery
   status, and published patch references.
-- **Always-running work:** ordinary turn completion schedules another turn until
-  the human pauses or stops, or the member blocks or fails.
+- **Explicit continuation:** each worker requests another turn only with a
+  concrete actionable next step; otherwise it waits for guidance or assignments
+  instead of polling.
 - **One Send:** a post reaches a working peer as human guidance during its
   current or next turn. Guidance for a stopped peer is saved until Resume.
 - **Independent model choices:** compact, searchable menus before creation and
@@ -204,10 +205,12 @@ cannot reach an authenticated host can be read and stopped, but not started.
    directory.
 9. Select **Start**.
 
-Rooms keep working continuously. Each peer receives the full room brief once.
-When an ordinary turn finishes, the next prompt tells the peer to share
-completed work, read newer peer ideas and feedback, continue improving, and ask
-the room if help is needed. Only **Resume** or **Retry** sends
+Rooms support multi-turn work without forcing endless turns. Each peer receives
+the full room brief once. Before ending a turn it uses `room_yield`: Continue
+requires a concrete next step that can proceed immediately, while Wait yields
+until new guidance or an assignment arrives. The next continuation prompt tells
+the peer to share completed work and read newer evidence without polling. Only
+**Resume** or **Retry** sends
 `Continue working in the existing collaboration room.` Pending human guidance
 uses its own prompt instead. Agents stop when you select **Pause** or **Stop**,
 or when a member is blocked or fails.
@@ -520,7 +523,7 @@ For detailed ownership and lifecycle rules, use
 
 Automated coverage exercises concurrency, stable identities, model persistence,
 real IPC serialization, failed provisioning, one-time bootstrap delivery,
-always-running continuation, sequence-cursor reads, Stop/Resume races, pending
+explicit continue/wait admission, sequence-cursor reads, Stop/Resume races, pending
 human guidance, and idempotent delivery. Renderer
 coverage checks model-menu isolation, approvals, draft retention, history
 merging, scroll anchors, long-message wrapping, and accessibility.

@@ -402,7 +402,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 		check(executions.length === room.members.length, 'execution count does not match members');
 		const executionIds = new Set<string>();
 		for (const value of executions) {
-			const execution = object(value, 'execution', ['memberId', 'initialized', 'briefed', 'briefingTurnId', 'needsTurn', 'turnId', 'runId', 'readSequence', 'announced']);
+			const execution = object(value, 'execution', ['memberId', 'initialized', 'briefed', 'briefingTurnId', 'needsTurn', 'turnId', 'runId', 'readSequence', 'announced', 'nextAction']);
 			identifier(execution.memberId, 'execution.memberId');
 			check(memberIds.has(execution.memberId), 'execution member does not exist');
 			unique(executionIds, execution.memberId, 'execution.memberId');
@@ -414,6 +414,10 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 			optional(execution.turnId, identifier, 'execution.turnId');
 			optional(execution.runId, identifier, 'execution.runId');
 			optional(execution.announced, boolean, 'execution.announced');
+			if (execution.nextAction !== undefined) {
+				enumValue(execution.nextAction, ['continue', 'wait'], 'execution.nextAction');
+				check(execution.turnId !== undefined, 'execution next action has no active turn');
+			}
 			if (execution.readSequence !== undefined) {
 				count(execution.readSequence, 'execution.readSequence');
 				check(execution.readSequence <= room.latestMessageSequence, 'execution.readSequence exceeds messages');

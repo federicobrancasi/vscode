@@ -142,6 +142,26 @@ export function createCopilotRoomTools(sessionId: string, rooms: IRoomSessionToo
 			},
 		},
 		{
+			name: 'room_yield',
+			description: 'Choose whether the room should admit another turn for you after this one. Use continue only when you have a concrete next step that can proceed immediately. Use wait when you depend on another result, input, or approval, or have no actionable work; a later assignment or human message will wake you. Call exactly once before ending every turn. Never continue merely to poll room_read.',
+			parameters: {
+				type: 'object',
+				properties: {
+					action: { type: 'string', enum: ['continue', 'wait'] },
+					reason: { type: 'string', maxLength: 2000, description: 'Concrete next step for continue, or the dependency/reason for wait.' },
+				},
+				required: ['action', 'reason'],
+				additionalProperties: false,
+			},
+			handler: args => {
+				const { action, reason } = readArguments(args);
+				if ((action !== 'continue' && action !== 'wait') || typeof reason !== 'string') {
+					throw new Error('Invalid room yield decision');
+				}
+				return rooms.yieldTurn(sessionId, action, reason);
+			},
+		},
+		{
 			name: 'room_publish_result',
 			description: 'Publish an immutable structured result after meaningful implementation or investigation. Include reproducible evidence and reference only patches you already published with room_share_patch. The result starts pending independent verification and does not notify or wake peers.',
 			parameters: {
