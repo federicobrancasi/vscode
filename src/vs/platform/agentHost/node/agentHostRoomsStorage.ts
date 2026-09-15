@@ -472,7 +472,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 			const pendingEvents = array(coordinator.pendingEvents, 'coordinator.pendingEvents');
 			const eventKinds = new Set<string>();
 			for (const event of pendingEvents) {
-				enumValue(event, ['result', 'verification', 'blocked', 'failed', 'needsInput', 'assignmentCreated', 'assignmentSuperseded', 'assignmentCompleted', 'memberAdded', 'memberRemoved'], 'coordinator.pendingEvent');
+				enumValue(event, ['activity', 'result', 'verification', 'blocked', 'failed', 'needsInput', 'assignmentCreated', 'assignmentSuperseded', 'assignmentCompleted', 'memberAdded', 'memberRemoved'], 'coordinator.pendingEvent');
 				unique(eventKinds, String(event), 'coordinator.pendingEvent');
 			}
 			if (coordinator.nextEventTurnAt !== undefined) {
@@ -488,7 +488,7 @@ export class AgentHostRoomsStorage implements IRoomStorage {
 				const activeEvents = array(coordinator.activeEvents, 'coordinator.activeEvents');
 				const activeEventKinds = new Set<string>();
 				for (const event of activeEvents) {
-					enumValue(event, ['result', 'verification', 'blocked', 'failed', 'needsInput', 'assignmentCreated', 'assignmentSuperseded', 'assignmentCompleted', 'memberAdded', 'memberRemoved'], 'coordinator.activeEvent');
+					enumValue(event, ['activity', 'result', 'verification', 'blocked', 'failed', 'needsInput', 'assignmentCreated', 'assignmentSuperseded', 'assignmentCompleted', 'memberAdded', 'memberRemoved'], 'coordinator.activeEvent');
 					unique(activeEventKinds, String(event), 'coordinator.activeEvent');
 				}
 				check(coordinator.activeEventSequence !== undefined, 'coordinator active events have no sequence');

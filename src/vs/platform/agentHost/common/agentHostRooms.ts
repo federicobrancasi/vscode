@@ -18,7 +18,7 @@ export const NewCollaborationRoomCommandId = 'workbench.action.collaboration.new
 export type AgentHostRoomState = 'created' | 'running' | 'idle' | 'paused' | 'stopping' | 'stopped' | 'interrupted';
 export type AgentHostRoomMemberState = 'pending' | 'starting' | 'working' | 'idle' | 'blocked' | 'needsInput' | 'stopping' | 'stopped' | 'failed' | 'interrupted';
 export type AgentHostRoomCoordinatorState = 'pending' | 'starting' | 'working' | 'idle' | 'needsInput' | 'failed' | 'offline' | 'interrupted';
-export type AgentHostRoomCoordinatorEventKind = 'result' | 'verification' | 'blocked' | 'failed' | 'needsInput' | 'assignmentCreated' | 'assignmentSuperseded' | 'assignmentCompleted' | 'memberAdded' | 'memberRemoved';
+export type AgentHostRoomCoordinatorEventKind = 'activity' | 'result' | 'verification' | 'blocked' | 'failed' | 'needsInput' | 'assignmentCreated' | 'assignmentSuperseded' | 'assignmentCompleted' | 'memberAdded' | 'memberRemoved';
 export type AgentHostRoomMessageKind = 'message' | 'work' | 'finding' | 'result' | 'verification' | 'artifact' | 'system';
 export type AgentHostRoomMessageMode = 'message' | 'steer';
 export type AgentHostRoomDeliveryState = 'pending' | 'submitted' | 'steering' | 'delivered' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
@@ -107,7 +107,7 @@ export interface IAgentHostRoomCoordinator {
 	/** Event sequence completed by the coordinator. */
 	readonly eventCursor: number;
 	readonly pendingEvents: readonly AgentHostRoomCoordinatorEventKind[];
-	/** Earliest time at which pending meaningful events may start one coalesced proactive turn. */
+	/** @deprecated Retained only to read journals written by the interval-based prototype. */
 	readonly nextEventTurnAt?: number;
 	readonly turnId?: string;
 	readonly activeEventSequence?: number;

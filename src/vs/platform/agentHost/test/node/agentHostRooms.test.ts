@@ -232,7 +232,7 @@ suite('AgentHostRooms', () => {
 
 	function setup(workerCount = 2, storage = new MemoryRoomStorage(), now?: () => number) {
 		const runtime = new RoomRuntime();
-		const rooms = disposables.add(new AgentHostRooms(storage, runtime, new NullLogService(), now, 0));
+		const rooms = disposables.add(new AgentHostRooms(storage, runtime, new NullLogService(), now));
 		// These suites describe wind-down semantics; continuous rooms are covered separately.
 		const create = (continuous = false) => rooms.createRoom({ title: 'Shared work', goal: 'Measure before changing code', repositoryUri: 'file:///repository', workerCount, continuous });
 		return { storage, runtime, rooms, create };
@@ -402,9 +402,9 @@ suite('AgentHostRooms', () => {
 			artifactIds: [],
 			assignmentId: 'pair-parser',
 		});
-		await runtime.whenSubmitted(3);
 		const eventSequence = (await rooms.getCoordinator(room.id))!.eventSequence;
 		await rooms.post(second, { id: 'ordinary-chatter', kind: 'message', text: 'I am reading the parser result.', mentions: [] });
+		await runtime.whenSubmitted(3);
 		const toolSnapshot = await tools.find(tool => tool.name === 'room_coordinator_snapshot')!.handler!(
 			{}, { sessionId: 'forged', toolCallId: 'snapshot', toolName: 'room_coordinator_snapshot', arguments: {} });
 		const snapshot = await rooms.coordinatorSnapshot(AgentSession.id(coordinator.sessionUri));
@@ -435,7 +435,7 @@ suite('AgentHostRooms', () => {
 			result: snapshot.results.map(result => ({ id: result.id, assignmentId: result.assignmentId, verification: result.verificationState })),
 			followUps: followUps.map(submission => submission.prompt),
 			coordinatorState: (await rooms.getCoordinator(room.id))!.state,
-			pendingEventsAfterFailure: (await rooms.getCoordinator(room.id))!.pendingEvents,
+			pendingEventsAfterFailure: [...(await rooms.getCoordinator(room.id))!.pendingEvents].sort(),
 			roomState: (await rooms.getRoom(room.id)).state,
 		}, {
 			tools: ['room_coordinator_snapshot', 'room_assign', 'room_post'],
@@ -448,7 +448,7 @@ suite('AgentHostRooms', () => {
 				mentions: room.members.map(member => member.id),
 				deliveries: room.members.map(member => member.id),
 			},
-			eventSequenceAfterChatter: eventSequence,
+			eventSequenceAfterChatter: eventSequence + 1,
 			pairings: [
 				[room.members[0].id, [room.members[1].id]],
 				[room.members[1].id, [room.members[0].id]],
@@ -462,7 +462,7 @@ suite('AgentHostRooms', () => {
 			result: [{ id: 'parser-result', assignmentId: 'pair-parser', verification: 'pending' }],
 			followUps: ['Review the new meaningful room events and coordinate the next explicit assignments.'],
 			coordinatorState: 'failed',
-			pendingEventsAfterFailure: ['result'],
+			pendingEventsAfterFailure: ['activity', 'result'],
 			roomState: 'running',
 		});
 		for (const member of room.members) {
@@ -470,29 +470,47 @@ suite('AgentHostRooms', () => {
 		}
 	});
 
-	test('meaningful events wait in one fifteen-minute coordinator window', async () => {
-		const now = 1_000;
-		const runtime = new RoomRuntime();
-		const rooms = disposables.add(new AgentHostRooms(new MemoryRoomStorage(), runtime, new NullLogService(), () => now, 15 * 60 * 1000));
+	test('three of five distinct worker authors trigger one coordinator review', async () => {
+		const { rooms, runtime } = setup(5);
 		const room = await rooms.createRoom({
-			title: 'Coordinator interval',
-			goal: 'Coalesce status reviews',
+			title: 'Coordinator quorum',
+			goal: 'Review after half the workers report',
 			repositoryUri: 'file:///repository',
-			workerCount: 1,
+			workerCount: 5,
 			continuous: false,
 		});
 		await rooms.ensureCoordinator(room.id);
-		await rooms.addMember(room.id);
+		await rooms.startRoom(room.id, { maxTurns: 5 });
+		await runtime.whenSubmitted(5);
+		for (const member of room.members) {
+			await rooms.read(AgentSession.id(member.sessionUri));
+		}
+		await rooms.post(AgentSession.id(room.members[0].sessionUri), { id: 'first-a', kind: 'message', text: 'First report', mentions: [] });
+		await rooms.post(AgentSession.id(room.members[0].sessionUri), { id: 'second-a', kind: 'finding', text: 'Another report from the same worker', mentions: [] });
+		await rooms.post(AgentSession.id(room.members[1].sessionUri), { id: 'first-b', kind: 'message', text: 'Second worker report', mentions: [] });
+		const submissionsBeforeQuorum = runtime.submitted.length;
+		await rooms.post(AgentSession.id(room.members[2].sessionUri), { id: 'first-c', kind: 'message', text: 'Third worker report', mentions: [] });
+		await runtime.whenSubmitted(6);
 		const coordinator = await rooms.getCoordinator(room.id);
 		assert.deepStrictEqual({
-			pendingEvents: coordinator?.pendingEvents,
-			nextEventTurnAt: coordinator?.nextEventTurnAt,
-			submissions: runtime.submitted,
+			submissionsBeforeQuorum,
+			coordinatorSubmission: runtime.submitted.at(-1),
+			activeEvents: coordinator?.activeEvents,
+			cursor: coordinator?.cursor,
 		}, {
-			pendingEvents: ['memberAdded'],
-			nextEventTurnAt: now + 15 * 60 * 1000,
-			submissions: [],
+			submissionsBeforeQuorum: 5,
+			coordinatorSubmission: {
+				sessionUri: coordinator?.sessionUri,
+				turnId: coordinator?.turnId,
+				prompt: 'Review the new meaningful room events and coordinate the next explicit assignments.',
+			},
+			activeEvents: ['activity'],
+			cursor: 0,
 		});
+		runtime.finish(coordinator!.sessionUri);
+		for (const member of room.members) {
+			runtime.finish(member.sessionUri);
+		}
 	});
 
 	test('superseding assignments remain idempotent', async () => {

@@ -182,7 +182,6 @@ suite('AgentHostRoomsStorage', function () {
 			eventSequence: 1,
 			eventCursor: 0,
 			pendingEvents: ['result'] as const,
-			nextEventTurnAt: 900_000,
 		};
 		const assignment = {
 			id: 'assignment-one',

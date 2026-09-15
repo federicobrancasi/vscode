@@ -314,11 +314,13 @@ human request or Resume before spending again.
 
 The coordinator is persistent but event-driven. Direct human chat messages run
 it immediately. Structured results and verdicts, blocked/failed/needs-input
-workers, completed or superseded assignments, and roster changes open one
-durable 15-minute coalescing window. At the end of that window the host submits
-one proactive follow-up with the latest snapshot. Ordinary chatter and every
-worker turn do not. Events that arrive while the coordinator runs remain
-pending for the next coalesced window rather than building an unbounded queue.
+workers, completed or superseded assignments, roster changes, and worker
+Activity posts accumulate as pending evidence. The host submits one proactive
+follow-up only after at least half of the current non-removed workers have each
+authored a room message since the coordinator's last snapshot, rounding up
+(`3` of `5`, for example). Repeated messages from one worker count once.
+Events that arrive while the coordinator runs remain pending until a later
+worker-message quorum rather than building an unbounded queue.
 
 ## Worktrees and shared artifacts
 
