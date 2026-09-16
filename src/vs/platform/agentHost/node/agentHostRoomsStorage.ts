@@ -3,775 +3,386 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { execFile } from 'child_process';
-import { constants, promises as fs } from 'fs';
-import { dirname, isAbsolute, join, resolve } from '../../../base/common/path.js';
-import { Sequencer, SequencerByKey } from '../../../base/common/async.js';
-import { Schemas } from '../../../base/common/network.js';
+import { promises as fs } from 'fs';
+import { Sequencer } from '../../../base/common/async.js';
 import { deepFreeze, equals } from '../../../base/common/objects.js';
-import { isWindows } from '../../../base/common/platform.js';
-import { extUri, extUriBiasedIgnorePathCase } from '../../../base/common/resources.js';
+import { join } from '../../../base/common/path.js';
+import { extUri } from '../../../base/common/resources.js';
 import { URI } from '../../../base/common/uri.js';
-import { generateUuid, isUUID } from '../../../base/common/uuid.js';
-import { localize } from '../../../nls.js';
+import { isUUID } from '../../../base/common/uuid.js';
 import { ILogService } from '../../log/common/log.js';
-import { IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomMember, IAgentHostRoomMessage, MAX_ROOM_WORKERS } from '../common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomMember, IAgentHostRoomMessage, MAX_ROOM_MESSAGE_LENGTH, MAX_ROOM_WORKERS } from '../common/agentHostRooms.js';
 import { buildDefaultChatUri } from '../common/state/sessionState.js';
+import { parseRoomArchive } from './agentHostRoomArchive.js';
+import { checkRoomData as check, roomArray as array, roomCommit as commit, roomCount as count, RoomFiles, roomId as identifier, roomLocalFile as localFile, roomObject as object, roomText as text, sameRoomFile } from './agentHostRoomStorageUtils.js';
+import { AgentHostRoomWorktrees } from './agentHostRoomWorktrees.js';
 import { parseRoomConfiguration } from './agentHostRoomsConfiguration.js';
 import { parseRoomModelSelection } from './agentHostRoomsModels.js';
-import { IRoomRecord, IRoomSessionParticipant, IRoomStorage, RoomContentValidator } from './agentHostRoomsTypes.js';
+import { IRoomArchive, IRoomRecord, IRoomSessionParticipant, IRoomStorage, RoomContentValidator } from './agentHostRoomsTypes.js';
 
-/**
- * Durable room authority. Worktrees and published patches outlive individual
- * provider sessions; this storage deliberately has no session cleanup operation.
- */
+/** Atomic mailbox journals. V1 files are indexed only as immutable, read-only archives. */
 export class AgentHostRoomsStorage implements IRoomStorage {
-	private readonly recordsQueue = new Sequencer();
-	private readonly worktreeQueue = new SequencerByKey<string>();
-	private readonly root: string;
+	private readonly queue = new Sequencer();
+	private readonly legacyFiles: RoomFiles;
+	private readonly files: RoomFiles;
+	private readonly worktrees: AgentHostRoomWorktrees;
+	private records: ReadonlyMap<string, IRoomRecord> | undefined;
+	private archives: readonly IRoomArchive[] | undefined;
+	private readonly sessionOwners = new Map<string, string>();
+	private readonly artifactOwners = new Map<string, string>();
 
 	constructor(storageRoot: URI, private readonly logService: ILogService) {
-		this.root = localFile(storageRoot.toString(), 'storageRoot').fsPath;
+		this.legacyFiles = new RoomFiles(localFile(storageRoot.toString(), 'storageRoot').fsPath);
+		this.files = new RoomFiles(this.legacyFiles.path('v2'), this.legacyFiles);
+		this.worktrees = new AgentHostRoomWorktrees(this.files, logService);
 	}
 
 	load(): Promise<readonly IRoomRecord[]> {
-		return this.recordsQueue.queue(() => this.loadRecords());
+		return this.queue.queue(async () => {
+			await this.loadRecords();
+			return Object.freeze([...this.records!.values()]);
+		});
+	}
+
+	loadArchives(): Promise<readonly IRoomArchive[]> {
+		return this.queue.queue(async () => {
+			if (!this.records) {
+				await this.loadRecords();
+			}
+			return this.archives!;
+		});
 	}
 
 	async save(record: IRoomRecord): Promise<void> {
 		this.validateRecord(record);
-		// Capture the snapshot before yielding so a queued save never observes
-		// subsequent mutations by its caller.
-		const contents = JSON.stringify(record);
+		const contents = JSON.stringify({
+			version: record.version, room: record.room, executions: record.executions,
+			messages: record.messages.map(({ deliveries, ...message }) => message),
+			receipts: record.messages.map(message => ({ messageId: message.id, deliveries: message.deliveries })),
+		});
 		const snapshot = this.parseRecord(contents);
-		return this.recordsQueue.queue(async () => {
-			const existing = await this.loadRecords();
-			const previous = existing.find(value => value.room.id === snapshot.room.id);
-			if (previous) {
-				check(snapshot.room.revision >= previous.room.revision, 'room.revision regressed');
-				check(extUriBiasedIgnorePathCase.isEqual(URI.parse(snapshot.room.repositoryUri), URI.parse(previous.room.repositoryUri)) && snapshot.room.baseRevision === previous.room.baseRevision, 'room repository changed');
-				// A room may gain members, but never lose, reorder, or rewrite one: the
-				// existing identities must survive unchanged as a leading prefix, so a
-				// member's session or worktree can never be swapped out from under it.
-				const identities = (room: IAgentHostRoom) => room.members.map(member => [member.id, member.name, member.sessionUri, member.chatUri ?? buildDefaultChatUri(member.sessionUri), member.worktreeUri]);
-				const preserved = identities(previous.room);
-				const current = identities(snapshot.room);
-				check(current.length >= preserved.length && equals(preserved, current.slice(0, preserved.length)), 'preserved member identities changed');
-				if (previous.room.coordinator) {
-					const identity = (room: IAgentHostRoom) => room.coordinator && [
-						room.coordinator.id, room.coordinator.name, room.coordinator.sessionUri,
-						room.coordinator.chatUri, room.coordinator.worktreeUri,
-					];
-					check(equals(identity(previous.room), identity(snapshot.room)), 'preserved coordinator identity changed');
-				}
-				for (const execution of previous.executions) {
-					check(execution.briefed !== true || snapshot.executions.find(value => value.memberId === execution.memberId)?.briefed === true, 'execution brief regressed');
-				}
-				for (const artifact of previous.room.artifacts) {
-					check(equals(snapshot.room.artifacts.find(value => value.id === artifact.id), artifact), 'published artifact changed');
-				}
-				// The conversation is append-only. Delivery state legitimately advances as a
-				// message reaches its recipients, but everything a reader attributes - the
-				// author, the text, the ordering - must survive unchanged, so a post can
-				// never be rewritten or dropped after the room has shown it.
-				const attributed = ({ deliveries, ...rest }: IAgentHostRoomMessage) => rest;
-				check(snapshot.messages.length >= previous.messages.length
-					&& previous.messages.every((message, index) => equals(attributed(message), attributed(snapshot.messages[index]))),
-					'recorded room messages changed');
+		return this.queue.queue(async () => {
+			if (!this.records) {
+				await this.loadRecords();
 			}
-			this.validateIdentities([...existing.filter(value => value.room.id !== snapshot.room.id), snapshot]);
-			const directory = await this.directory('rooms');
-			await this.atomicWrite(join(directory, `${snapshot.room.id}.json`), contents, false);
-			this.logService.trace('[AgentHostRoomsStorage] Saved room', snapshot.room.id, snapshot.room.revision);
+			check(!this.archives!.some(archive => archive.room.id === snapshot.room.id), 'archived room is read-only');
+			const previous = this.records!.get(snapshot.room.id);
+			if (previous) {
+				validateUpdate(previous, snapshot);
+			}
+			this.checkIdentities(snapshot.room, snapshot.room.members.map(member => member.sessionUri));
+			const directory = await this.files.directory('rooms');
+			await this.files.write(join(directory, `${snapshot.room.id}.json`), contents);
+			this.records = new Map(this.records).set(snapshot.room.id, snapshot);
+			this.indexIdentities(snapshot.room, snapshot.room.members.map(member => member.sessionUri));
+			this.logService.trace('[AgentHostRoomsStorage] Saved inbox room', snapshot.room.id, snapshot.room.revision);
 		});
 	}
 
-	/** True when the folder is already inside a Git work tree with at least one commit. */
-	async isRepository(folderUri: string): Promise<boolean> {
-		const requested = localFile(folderUri, 'folderUri');
-		try {
-			const toplevel = (await this.git(requested.fsPath, ['rev-parse', '--show-toplevel'])).trim();
-			if (!toplevel.length) {
-				return false;
-			}
-			await this.git(toplevel, ['rev-parse', '--verify', 'HEAD^{commit}']);
-			return true;
-		} catch {
-			return false;
-		}
+	isRepository(folderUri: string): Promise<boolean> {
+		return this.worktrees.isRepository(folderUri);
 	}
 
-	async resolveRepository(repositoryUri: string, revision = 'HEAD', initialize = false): Promise<{ repositoryUri: string; baseRevision: string }> {
-		const requested = localFile(repositoryUri, 'repositoryUri');
-		text(revision, 'revision', false);
-		check(!revision.startsWith('-') && !revision.includes('\0'), 'revision');
-		if (initialize && !(await this.isRepository(repositoryUri))) {
-			await this.initializeRepository(requested.fsPath);
-		}
-		const toplevel = (await this.git(requested.fsPath, ['rev-parse', '--show-toplevel'])).trim();
-		check(toplevel.length > 0, 'repository toplevel');
-		const repository = await fs.realpath(toplevel);
-		const baseRevision = (await this.git(repository, ['rev-parse', '--verify', '--end-of-options', `${revision}^{commit}`])).trim();
-		commit(baseRevision, 'baseRevision');
-		return { repositoryUri: URI.file(repository).toString(), baseRevision };
-	}
-
-	/**
-	 * Prepare a plain folder for collaboration. Worktrees require Git, so a room
-	 * cannot isolate members without a repository and at least one commit. Only
-	 * ever reached through an explicit caller opt-in.
-	 */
-	private async initializeRepository(path: string): Promise<void> {
-		const stats = await statIfPresent(path);
-		check(stats?.isDirectory() === true, 'folder does not exist');
-		const inside = (await this.git(path, ['rev-parse', '--show-toplevel']).catch(() => '')).trim();
-		if (!inside.length) {
-			await this.git(path, ['init', '--quiet']);
-		}
-		const root = (await this.git(path, ['rev-parse', '--show-toplevel'])).trim();
-		check(root.length > 0, 'repository toplevel');
-		const identity = ['-c', 'user.name=Agent Collab', '-c', 'user.email=agent-collab@localhost'];
-		await this.git(root, ['add', '--all', '--', '.']).catch(() => undefined);
-		await this.git(root, [...identity, 'commit', '--quiet', '--allow-empty', '--no-verify', '-m', 'Baseline for Agent Collab']);
-		this.logService.info('[AgentHostRoomsStorage] Initialized a repository for collaboration', root);
+	resolveRepository(repositoryUri: string, revision?: string, initialize?: boolean): Promise<{ repositoryUri: string; baseRevision: string }> {
+		return this.worktrees.resolveRepository(repositoryUri, revision, initialize);
 	}
 
 	worktreeUri(roomId: string, memberId: string): string {
-		identifier(roomId, 'roomId');
-		identifier(memberId, 'memberId');
-		return URI.file(join(this.root, 'worktrees', roomId, memberId)).toString();
+		return this.worktrees.worktreeUri(roomId, memberId);
 	}
 
-	ensureWorktree(room: IAgentHostRoom, participant: IRoomSessionParticipant, requireExisting = false): Promise<void> {
-		return this.worktreeQueue.queue(room.id, () => this.prepareWorktree(room, participant, requireExisting));
+	ensureWorktree(room: IAgentHostRoom, member: IRoomSessionParticipant, requireExisting?: boolean): Promise<void> {
+		return this.worktrees.ensureWorktree(room, member, requireExisting);
 	}
 
 	publishPatch(room: IAgentHostRoom, member: IAgentHostRoomMember, title: string, validateContent?: RoomContentValidator): Promise<IAgentHostRoomArtifact> {
-		return this.worktreeQueue.queue(room.id, async () => {
-			text(title, 'artifact.title', false);
-			await this.prepareWorktree(room, member, true);
-			const cwd = localFile(this.worktreeUri(room.id, member.id), 'worktreeUri').fsPath;
-			const sourceRevision = (await this.git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
-			commit(sourceRevision, 'sourceRevision');
-			await this.git(cwd, ['merge-base', '--is-ancestor', room.baseRevision, sourceRevision]);
-			check((await this.git(cwd, ['ls-files', '--unmerged', '-z'])).length === 0, 'worktree has unresolved conflicts');
-			if (validateContent) {
-				const changed = await this.git(cwd, ['diff', '--name-only', '--no-ext-diff', '--no-textconv', '--no-renames', '-z', room.baseRevision, '--']);
-				const untracked = await this.git(cwd, ['ls-files', '--others', '--exclude-standard', '-z']);
-				await validateContent([...new Set((changed + untracked).split('\0').filter(path => path.length > 0))]);
-			}
-
-			const index = join(await this.directory('indexes'), `${generateUuid()}.index`);
-			const env = { GIT_INDEX_FILE: index };
-			let patch: string;
-			try {
-				// Rebuild a private index from the real index's entries, including
-				// force-added ignored files, without updating the user's index.
-				const entries = await this.git(cwd, ['ls-files', '--stage', '--full-name', '-z']);
-				await this.git(cwd, ['read-tree', '--empty'], env);
-				await this.git(cwd, ['update-index', '-z', '--index-info'], env, entries);
-				await this.git(cwd, ['add', '--all', '--', '.'], env);
-				if (validateContent) {
-					const paths = await this.git(cwd, ['diff', '--cached', '--name-only', '--no-ext-diff', '--no-textconv', '--no-renames', '-z', room.baseRevision, '--'], env);
-					await validateContent(paths.split('\0').filter(path => path.length > 0));
-				}
-				patch = await this.git(cwd, ['diff', '--cached', '--binary', '--full-index', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '--src-prefix=a/', '--dst-prefix=b/', room.baseRevision, '--'], env);
-				check((await this.git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim() === sourceRevision, 'member HEAD changed during patch publication');
-			} finally {
-				await removePrivateFile(index);
-				await removePrivateFile(`${index}.lock`);
-			}
-
-			const id = generateUuid();
-			const directory = await this.directory('artifacts', room.id);
-			const uri = URI.file(join(directory, `${id}.patch`)).toString();
-			await this.atomicWrite(localFile(uri, 'artifact.uri').fsPath, patch, true);
-			return deepFreeze({ id, memberId: member.id, title, createdAt: Date.now(), baseRevision: room.baseRevision, sourceRevision, uri });
-		});
+		return this.worktrees.publishPatch(room, member, title, validateContent);
 	}
 
-	async readArtifact(room: IAgentHostRoom, artifact: IAgentHostRoomArtifact, validateContent?: RoomContentValidator): Promise<string> {
-		this.validateRoom(room);
-		const recorded = room.artifacts.find(value => value.id === artifact.id);
-		check(recorded !== undefined && equals(recorded, artifact), 'artifact is not a published room artifact');
-		// Never use a caller-provided URI as a filesystem read capability.
-		const path = join(this.root, 'artifacts', room.id, `${artifact.id}.patch`);
-		await this.checkDirectory('artifacts', room.id);
-		const contents = await this.readFile(path);
-		if (validateContent && contents.length) {
-			const numstat = await this.git(localFile(room.repositoryUri, 'repositoryUri').fsPath, ['apply', '--numstat', '-z', '--'], undefined, contents);
-			const paths = numstat.split('\0').filter(entry => entry.length > 0).map(entry => {
-				const match = /^(?:\d+|-)\t(?:\d+|-)\t(?<path>[\s\S]+)$/.exec(entry);
-				const relativePath = match?.groups?.path;
-				check(typeof relativePath === 'string' && !isAbsolute(relativePath) && !relativePath.split(/[\\/]/).includes('..'), 'artifact path is not repository-relative');
-				return relativePath;
-			});
-			await validateContent(paths);
-		}
-		return contents;
+	readArtifact(room: IAgentHostRoom, artifact: IAgentHostRoomArtifact, validateContent?: RoomContentValidator): Promise<string> {
+		return this.worktrees.readArtifact(room, artifact, validateContent, room.archived ? this.legacyFiles : this.files);
 	}
 
-	private async loadRecords(): Promise<readonly IRoomRecord[]> {
-		if (!await this.checkDirectory('rooms')) {
-			return Object.freeze([]);
-		}
-		const directory = join(this.root, 'rooms');
+	private async loadRecords(): Promise<void> {
+		this.records = undefined;
 		const records: IRoomRecord[] = [];
-		for (const name of (await fs.readdir(directory)).sort()) {
-			if (!name.endsWith('.json')) {
-				continue;
-			}
-			const id = name.slice(0, -5);
-			identifier(id, 'room filename');
-			const record = this.parseRecord(await this.readFile(join(directory, name)));
+		for (const { id, contents } of await this.readJournals(this.files)) {
+			const record = this.parseRecord(contents);
 			check(record.room.id === id, 'room filename does not match its identity');
 			records.push(record);
 		}
-		this.validateIdentities(records);
-		return Object.freeze(records);
+		if (!this.archives) {
+			const archives: IRoomArchive[] = [];
+			for (const { id, contents } of await this.readJournals(this.legacyFiles)) {
+				const archive = parseRoomArchive(contents, this.legacyFiles.root);
+				check(archive.room.id === id, 'archive filename does not match its identity');
+				archives.push(archive);
+			}
+			this.archives = Object.freeze(archives);
+		}
+		this.sessionOwners.clear();
+		this.artifactOwners.clear();
+		const ids = new Set<string>();
+		for (const archive of this.archives) {
+			unique(ids, archive.room.id, 'room.id');
+			this.checkIdentities(archive.room, archive.sessionUris);
+			this.indexIdentities(archive.room, archive.sessionUris);
+		}
+		for (const record of records) {
+			unique(ids, record.room.id, 'room.id');
+			const sessions = record.room.members.map(member => member.sessionUri);
+			this.checkIdentities(record.room, sessions);
+			this.indexIdentities(record.room, sessions);
+		}
+		this.records = new Map(records.map(record => [record.room.id, record]));
 	}
 
-	private validateIdentities(records: readonly IRoomRecord[]): void {
-		const sessions = new Set<string>();
-		const artifacts = new Set<string>();
-		for (const record of records) {
-			for (const member of record.room.members) {
-				unique(sessions, extUri.getComparisonKey(URI.parse(member.sessionUri, true)), 'member.sessionUri');
+	private async readJournals(files: RoomFiles): Promise<readonly { id: string; contents: string }[]> {
+		if (!await files.hasDirectory('rooms')) {
+			return [];
+		}
+		const journals: { id: string; contents: string }[] = [];
+		for (const name of (await fs.readdir(files.path('rooms'))).sort()) {
+			if (name.endsWith('.json')) {
+				const id = identifier(name.slice(0, -5), 'room filename');
+				journals.push({ id, contents: await files.read(files.path('rooms', name)) });
 			}
-			if (record.room.coordinator) {
-				unique(sessions, extUri.getComparisonKey(URI.parse(record.room.coordinator.sessionUri, true)), 'coordinator.sessionUri');
-			}
-			for (const artifact of record.room.artifacts) {
-				unique(artifacts, artifact.id, 'artifact.id');
-			}
+		}
+		return journals;
+	}
+
+	private checkIdentities(room: IAgentHostRoom, sessions: readonly string[]): void {
+		const seen = new Set<string>();
+		for (const session of sessions) {
+			const key = extUri.getComparisonKey(URI.parse(session, true));
+			unique(seen, key, 'sessionUri');
+			const owner = this.sessionOwners.get(key);
+			check(owner === undefined || owner === room.id, 'sessionUri is duplicated');
+		}
+		for (const artifact of room.artifacts) {
+			const owner = this.artifactOwners.get(artifact.id);
+			check(owner === undefined || owner === room.id, 'artifact.id is duplicated');
+		}
+	}
+
+	private indexIdentities(room: IAgentHostRoom, sessions: readonly string[]): void {
+		for (const session of sessions) {
+			this.sessionOwners.set(extUri.getComparisonKey(URI.parse(session, true)), room.id);
+		}
+		for (const artifact of room.artifacts) {
+			this.artifactOwners.set(artifact.id, room.id);
 		}
 	}
 
 	private parseRecord(contents: string): IRoomRecord {
-		const value: unknown = JSON.parse(contents);
-		this.validateRecord(value);
-		return deepFreeze(value);
+		const stored = object(JSON.parse(contents), 'stored record', ['version', 'room', 'executions', 'messages', 'receipts']);
+		const messages = array(stored.messages, 'messages');
+		const receipts = array(stored.receipts, 'receipts');
+		check(receipts.length === messages.length, 'receipt message count');
+		const record = {
+			version: stored.version, room: stored.room, executions: stored.executions,
+			messages: messages.map((value, index) => {
+				const message = object(value, 'message');
+				const receipt = object(receipts[index], 'receipt', ['messageId', 'deliveries']);
+				check(!Object.hasOwn(message, 'deliveries') && message.id === receipt.messageId, 'receipt message identity');
+				return { ...message, deliveries: receipt.deliveries };
+			}),
+		};
+		this.validateRecord(record);
+		return deepFreeze(record);
 	}
 
 	private validateRecord(value: unknown): asserts value is IRoomRecord {
 		const record = object(value, 'record', ['version', 'room', 'messages', 'executions']);
-		check(record.version === 1, 'unsupported room record version');
+		check(record.version === 2, 'unsupported room record version');
 		this.validateRoom(record.room);
 		const room = record.room;
-		const memberIds = new Set(room.members.map(member => member.id));
+		const members = new Map(room.members.map(member => [member.id, member]));
 		const artifactIds = new Set(room.artifacts.map(artifact => artifact.id));
-		const publishedArtifactIds = new Set<string>();
 		const messages = array(record.messages, 'messages');
 		check(messages.length === room.latestMessageSequence, 'latestMessageSequence does not match messages');
 		const messageIds = new Set<string>();
-		const resultAuthors = new Map<string, string>();
-		const assignments = new Map<string, { readonly kind: string; readonly assigneeIds: readonly string[]; readonly resultId?: string }>();
-		const supersededAssignments = new Set<string>();
-		const assignmentResults = new Set<string>();
 		for (const [index, value] of messages.entries()) {
-			const message = object(value, 'message', ['id', 'sequence', 'authorId', 'authorName', 'authorKind', 'kind', 'mode', 'text', 'timestamp', 'mentions', 'replyTo', 'artifactId', 'assignment', 'result', 'verification', 'deliveries']);
-			identifier(message.id, 'message.id');
+			const message = object(value, 'message', ['id', 'sequence', 'authorId', 'authorName', 'authorKind', 'kind', 'text', 'timestamp', 'mentions', 'replyTo', 'artifactId', 'artifactIds', 'deliveries']);
+			const id = identifier(message.id, 'message.id');
 			check(message.sequence === index + 1, 'message.sequence');
-			identifier(message.authorId, 'message.authorId');
-			text(message.authorName, 'message.authorName', false);
+			const authorId = identifier(message.authorId, 'message.authorId');
+			const authorName = text(message.authorName, 'message.authorName');
 			enumValue(message.authorKind, ['human', 'agent', 'system'], 'message.authorKind');
 			if (message.authorKind === 'agent') {
-				const member = room.members.find(member => member.id === message.authorId);
-				check(member !== undefined || room.coordinator?.id === message.authorId, 'message author is not a room agent');
-				check(member?.name === message.authorName || room.coordinator?.id === message.authorId && room.coordinator.name === message.authorName, 'message author name does not match its room identity');
+				check(members.get(authorId)?.name === authorName, 'message author differs from roster');
 			} else {
-				check(message.authorId === message.authorKind, 'message author identity');
+				check(authorId === message.authorKind, 'message author identity');
 			}
-			enumValue(message.kind, ['message', 'work', 'finding', 'result', 'verification', 'artifact', 'system'], 'message.kind');
-			if (message.mode !== undefined) {
-				enumValue(message.mode, ['message', 'steer'], 'message.mode');
-				check(message.mode !== 'steer' || message.authorKind === 'human', 'only human messages may steer');
-			}
-			text(message.text, 'message.text');
+			enumValue(message.kind, ['message', 'work', 'finding', 'artifact', 'system'], 'message.kind');
+			check(message.kind !== 'system' || message.authorKind === 'system', 'system message author');
+			text(message.text, 'message.text', false, MAX_ROOM_MESSAGE_LENGTH);
 			count(message.timestamp, 'message.timestamp');
-			references(message.mentions, memberIds, 'message.mentions');
+			const mentions = references(message.mentions, new Set(members.keys()), 'message.mentions');
 			if (message.replyTo !== undefined) {
-				identifier(message.replyTo, 'message.replyTo');
-				check(messageIds.has(message.replyTo), 'message.replyTo is not an earlier message');
+				check(messageIds.has(identifier(message.replyTo, 'message.replyTo')), 'message.replyTo must reference an earlier message');
 			}
-			unique(messageIds, message.id, 'message.id');
 			if (message.artifactId !== undefined) {
-				identifier(message.artifactId, 'message.artifactId');
-				check(artifactIds.has(message.artifactId), 'message artifact does not exist');
+				check(artifactIds.has(identifier(message.artifactId, 'message.artifactId')), 'missing artifact reference');
+			}
+			if (message.artifactIds !== undefined) {
+				references(message.artifactIds, artifactIds, 'message.artifactIds');
 			}
 			check(message.kind !== 'artifact' || message.artifactId !== undefined, 'artifact message has no artifact');
 			if (message.kind === 'artifact') {
-				publishedArtifactIds.add(String(message.artifactId));
+				check(message.authorKind === 'agent' && room.artifacts.find(artifact => artifact.id === message.artifactId)?.memberId === authorId, 'artifact publication author');
 			}
-			if (message.assignment !== undefined) {
-				const assignment = object(message.assignment, 'message.assignment', ['assigneeIds', 'kind', 'description', 'expectedEvidence', 'resultId', 'supersedes', 'note']);
-				const assigneeIds = array(assignment.assigneeIds, 'message.assignment.assigneeIds');
-				check(assigneeIds.length > 0 && assigneeIds.length <= MAX_ROOM_WORKERS, 'message.assignment.assigneeIds');
-				const uniqueAssignees = new Set<string>();
-				for (const assigneeId of assigneeIds) {
-					identifier(assigneeId, 'message.assignment.assigneeId');
-					check(memberIds.has(assigneeId), 'assignment assignee does not exist');
-					unique(uniqueAssignees, assigneeId, 'message.assignment.assigneeId');
-				}
-				enumValue(assignment.kind, ['work', 'verification'], 'message.assignment.kind');
-				text(assignment.description, 'message.assignment.description', false, 8000);
-				evidence(assignment.expectedEvidence, 'message.assignment.expectedEvidence');
-				optional(assignment.note, text, 'message.assignment.note');
-				if (assignment.resultId !== undefined) {
-					identifier(assignment.resultId, 'message.assignment.resultId');
-					check(resultAuthors.has(String(assignment.resultId)), 'assignment result was not published earlier');
-				}
-				check((assignment.kind === 'verification') === (assignment.resultId !== undefined), 'verification assignment result linkage');
-				if (assignment.supersedes !== undefined) {
-					identifier(assignment.supersedes, 'message.assignment.supersedes');
-					check(assignments.has(String(assignment.supersedes)), 'superseded assignment was not published earlier');
-					unique(supersededAssignments, String(assignment.supersedes), 'message.assignment.supersedes');
-				}
-				check(message.kind === 'work' && message.authorKind === 'agent' && room.coordinator?.id === message.authorId, 'assignment payload requires a coordinator work message');
-				check((message.mentions as readonly string[]).length === assigneeIds.length
-					&& assigneeIds.every(assigneeId => (message.mentions as readonly string[]).includes(String(assigneeId))), 'assignment mentions do not match assignees');
-				assignments.set(String(message.id), {
-					kind: String(assignment.kind),
-					assigneeIds: assigneeIds.map(String),
-					resultId: assignment.resultId === undefined ? undefined : String(assignment.resultId),
-				});
-			}
-			if (message.result !== undefined) {
-				const result = object(message.result, 'message.result', ['title', 'summary', 'outcome', 'evidence', 'artifactIds', 'assignmentId', 'verificationState']);
-				text(result.title, 'message.result.title', false, 200);
-				text(result.summary, 'message.result.summary', false, 8000);
-				enumValue(result.outcome, ['success', 'negative', 'inconclusive', 'blocked'], 'message.result.outcome');
-				evidence(result.evidence, 'message.result.evidence');
-				const resultArtifactIds = array(result.artifactIds, 'message.result.artifactIds');
-				check(resultArtifactIds.length <= 20, 'message.result.artifactIds');
-				const uniqueArtifacts = new Set<string>();
-				for (const artifactId of resultArtifactIds) {
-					identifier(artifactId, 'message.result.artifactId');
-					unique(uniqueArtifacts, artifactId, 'message.result.artifactId');
-					check(publishedArtifactIds.has(artifactId), 'result artifact was not published earlier');
-					check(room.artifacts.find(artifact => artifact.id === artifactId)?.memberId === message.authorId, 'result artifact has a different author');
-				}
-				check(result.verificationState === undefined, 'persisted result has derived verification state');
-				check(message.kind === 'result' && message.authorKind === 'agent' && memberIds.has(message.authorId), 'result payload requires a member result message');
-				if (result.assignmentId !== undefined) {
-					identifier(result.assignmentId, 'message.result.assignmentId');
-					const assignment = assignments.get(String(result.assignmentId));
-					check(assignment?.kind === 'work' && assignment.assigneeIds.includes(String(message.authorId)), 'result assignment does not assign its author');
-					unique(assignmentResults, `${result.assignmentId}:${message.authorId}`, 'result assignment author');
-				}
-				resultAuthors.set(String(message.id), String(message.authorId));
-			}
-			check(message.kind !== 'result' || message.result !== undefined, 'result message has no result');
-			if (message.verification !== undefined) {
-				const verification = object(message.verification, 'message.verification', ['resultId', 'verdict', 'evidence']);
-				identifier(verification.resultId, 'message.verification.resultId');
-				enumValue(verification.verdict, ['verified', 'rejected'], 'message.verification.verdict');
-				evidence(verification.evidence, 'message.verification.evidence');
-				const resultAuthor = resultAuthors.get(String(verification.resultId));
-				check(resultAuthor !== undefined, 'verification result was not published earlier');
-				check(message.authorKind === 'human' || message.authorKind === 'agent' && memberIds.has(message.authorId), 'verification author');
-				check(message.authorKind !== 'agent' || message.authorId !== resultAuthor, 'result author verified its own result');
-				check(message.kind === 'verification', 'verification payload requires a verification message');
-			}
-			check(message.kind !== 'verification' || message.verification !== undefined, 'verification message has no verification');
-			check(message.kind === 'result' || message.result === undefined, 'result payload on another message kind');
-			check(message.kind === 'verification' || message.verification === undefined, 'verification payload on another message kind');
-			check(message.kind === 'work' || message.assignment === undefined, 'assignment payload on another message kind');
-			if (message.kind === 'result' || message.kind === 'verification') {
-				check(array(message.mentions, 'message.mentions').length === 0, 'structured room record has mentions');
-				check(array(message.deliveries, 'message.deliveries').length === 0, 'structured room record has deliveries');
-			}
-			if (message.assignment !== undefined || message.kind === 'result' || message.kind === 'verification') {
-				check(message.mode === undefined, 'structured room record has a delivery mode');
-			}
-			const delivered = new Set<string>();
+			const deliveries = new Set<string>();
 			for (const value of array(message.deliveries, 'message.deliveries')) {
 				const delivery = object(value, 'delivery', ['memberId', 'state', 'turnId', 'error']);
-				identifier(delivery.memberId, 'delivery.memberId');
-				check(memberIds.has(delivery.memberId), 'delivery member does not exist');
-				unique(delivered, delivery.memberId, 'delivery.memberId');
-				enumValue(delivery.state, ['pending', 'submitted', 'steering', 'delivered', 'completed', 'failed', 'cancelled', 'interrupted'], 'delivery.state');
+				const recipient = identifier(delivery.memberId, 'delivery.memberId');
+				check(mentions.has(recipient), 'delivery recipient is not addressed');
+				unique(deliveries, recipient, 'delivery.memberId');
+				enumValue(delivery.state, ['pending', 'reserved', 'submitted', 'failed', 'interrupted', 'cancelled'], 'delivery.state');
 				optional(delivery.turnId, identifier, 'delivery.turnId');
-				check(!['submitted', 'steering', 'delivered', 'completed'].includes(String(delivery.state)) || delivery.turnId !== undefined, 'delivery has no submitted turn');
-				check((delivery.state !== 'steering' && delivery.state !== 'delivered') || message.mode === 'steer', 'steering delivery requires a steering message');
+				check(delivery.state !== 'submitted' && delivery.state !== 'reserved' || delivery.turnId !== undefined, 'reserved or submitted delivery has no turn');
+				check(delivery.state !== 'pending' || delivery.turnId === undefined, 'pending delivery has a turn');
 				optional(delivery.error, text, 'delivery.error');
 			}
-			check(delivered.size === (message.mentions as readonly string[]).length && (message.mentions as readonly string[]).every(memberId => delivered.has(memberId)), 'deliveries do not match mentions');
+			check(deliveries.size === mentions.size, 'mentioned member has no delivery');
+			unique(messageIds, id, 'message.id');
 		}
 		const executions = array(record.executions, 'executions');
-		check(executions.length === room.members.length, 'execution count does not match members');
-		const executionIds = new Set<string>();
+		check(executions.length === members.size, 'execution member count');
+		const seen = new Set<string>();
 		for (const value of executions) {
-			const execution = object(value, 'execution', ['memberId', 'initialized', 'briefed', 'briefingTurnId', 'needsTurn', 'turnId', 'runId', 'readSequence', 'announced', 'nextAction']);
-			identifier(execution.memberId, 'execution.memberId');
-			check(memberIds.has(execution.memberId), 'execution member does not exist');
-			unique(executionIds, execution.memberId, 'execution.memberId');
-			boolean(execution.initialized, 'execution.initialized');
-			optional(execution.briefed, boolean, 'execution.briefed');
-			optional(execution.briefingTurnId, identifier, 'execution.briefingTurnId');
-			check(execution.briefed !== true || execution.briefingTurnId === undefined, 'briefed execution still has a pending brief');
-			boolean(execution.needsTurn, 'execution.needsTurn');
+			const execution = object(value, 'execution', ['memberId', 'initialized', 'turnId', 'runId']);
+			const id = identifier(execution.memberId, 'execution.memberId');
+			check(members.has(id), 'execution member is missing');
+			unique(seen, id, 'execution.memberId');
+			check(typeof execution.initialized === 'boolean', 'execution.initialized');
 			optional(execution.turnId, identifier, 'execution.turnId');
 			optional(execution.runId, identifier, 'execution.runId');
-			optional(execution.announced, boolean, 'execution.announced');
-			if (execution.nextAction !== undefined) {
-				enumValue(execution.nextAction, ['continue', 'wait'], 'execution.nextAction');
-				check(execution.turnId !== undefined, 'execution next action has no active turn');
-			}
-			if (execution.readSequence !== undefined) {
-				count(execution.readSequence, 'execution.readSequence');
-				check(execution.readSequence <= room.latestMessageSequence, 'execution.readSequence exceeds messages');
-			}
 			check((execution.turnId === undefined) === (execution.runId === undefined), 'execution turn/run mismatch');
 			check(execution.runId === undefined || execution.runId === room.run?.id, 'execution references a different run');
 		}
 	}
 
 	private validateRoom(value: unknown): asserts value is IAgentHostRoom {
-		const room = object(value, 'room', ['id', 'revision', 'title', 'goal', 'instructions', 'repositoryUri', 'baseRevision', 'createdAt', 'updatedAt', 'state', 'continuous', 'coordinator', 'members', 'artifacts', 'latestMessageSequence', 'run', 'error']);
-		identifier(room.id, 'room.id');
+		const room = object(value, 'room', ['id', 'revision', 'title', 'goal', 'instructions', 'repositoryUri', 'baseRevision', 'createdAt', 'updatedAt', 'state', 'archived', 'pauseReason', 'members', 'artifacts', 'latestMessageSequence', 'run', 'error']);
+		const roomId = identifier(room.id, 'room.id');
 		count(room.revision, 'room.revision');
-		text(room.title, 'room.title', false);
-		text(room.goal, 'room.goal', false);
-		text(room.instructions, 'room.instructions');
+		text(room.title, 'room.title');
+		text(room.goal, 'room.goal');
+		text(room.instructions, 'room.instructions', true);
 		localFile(room.repositoryUri, 'room.repositoryUri');
-		commit(room.baseRevision, 'room.baseRevision');
-		count(room.createdAt, 'room.createdAt');
-		count(room.updatedAt, 'room.updatedAt');
-		check(room.updatedAt >= room.createdAt, 'room.updatedAt precedes creation');
+		const base = commit(room.baseRevision, 'room.baseRevision');
+		check(count(room.updatedAt, 'room.updatedAt') >= count(room.createdAt, 'room.createdAt'), 'room.updatedAt precedes creation');
 		enumValue(room.state, ['created', 'running', 'idle', 'paused', 'stopping', 'stopped', 'interrupted'], 'room.state');
-		check(room.continuous === undefined || typeof room.continuous === 'boolean', 'room.continuous');
+		check(room.archived === undefined || room.archived === false, 'archived room is read-only');
+		if (room.pauseReason !== undefined) {
+			enumValue(room.pauseReason, ['user', 'budget', 'deadline'], 'room.pauseReason');
+		}
 		count(room.latestMessageSequence, 'room.latestMessageSequence');
 		optional(room.error, text, 'room.error');
-		let coordinatorSession: URI | undefined;
-		if (room.coordinator !== undefined) {
-			const coordinator = object(room.coordinator, 'room.coordinator', ['id', 'name', 'sessionUri', 'chatUri', 'worktreeUri', 'desiredModel', 'appliedModel', 'pendingModel', 'modelError', 'state', 'initialized', 'cursor', 'eventSequence', 'eventCursor', 'pendingEvents', 'nextEventTurnAt', 'turnId', 'activeEventSequence', 'activeEvents', 'error']);
-			identifier(coordinator.id, 'coordinator.id');
-			text(coordinator.name, 'coordinator.name', false);
-			text(coordinator.sessionUri, 'coordinator.sessionUri', false);
-			const session = URI.parse(coordinator.sessionUri, true);
-			coordinatorSession = session;
-			check(session.scheme === 'copilotcli' && !session.authority && session.path.length > 1 && !session.query && !session.fragment, 'coordinator.sessionUri');
-			identifier(session.path.slice(1), 'coordinator.sessionId');
-			check(coordinator.chatUri === buildDefaultChatUri(String(coordinator.sessionUri)), 'coordinator.chatUri must be the preserved session default chat');
-			check(sameFile(localFile(coordinator.worktreeUri, 'coordinator.worktreeUri').fsPath, localFile(this.worktreeUri(String(room.id), String(coordinator.id)), 'coordinator worktree').fsPath), 'coordinator worktree identity');
-			if (coordinator.desiredModel !== undefined) {
-				parseRoomModelSelection(coordinator.desiredModel);
-			}
-			if (coordinator.appliedModel !== undefined) {
-				parseRoomModelSelection(coordinator.appliedModel);
-			}
-			if (coordinator.pendingModel !== undefined) {
-				parseRoomModelSelection(coordinator.pendingModel);
-				check(equals(coordinator.pendingModel, coordinator.desiredModel), 'coordinator pending model differs from desired model');
-			}
-			optional(coordinator.modelError, text, 'coordinator.modelError');
-			enumValue(coordinator.state, ['pending', 'starting', 'working', 'idle', 'needsInput', 'failed', 'offline', 'interrupted'], 'coordinator.state');
-			boolean(coordinator.initialized, 'coordinator.initialized');
-			count(coordinator.cursor, 'coordinator.cursor');
-			check(coordinator.cursor <= room.latestMessageSequence, 'coordinator.cursor exceeds messages');
-			count(coordinator.eventSequence, 'coordinator.eventSequence');
-			count(coordinator.eventCursor, 'coordinator.eventCursor');
-			check(coordinator.eventCursor <= coordinator.eventSequence, 'coordinator.eventCursor exceeds events');
-			const pendingEvents = array(coordinator.pendingEvents, 'coordinator.pendingEvents');
-			const eventKinds = new Set<string>();
-			for (const event of pendingEvents) {
-				enumValue(event, ['activity', 'result', 'verification', 'blocked', 'failed', 'needsInput', 'assignmentCreated', 'assignmentSuperseded', 'assignmentCompleted', 'memberAdded', 'memberRemoved'], 'coordinator.pendingEvent');
-				unique(eventKinds, String(event), 'coordinator.pendingEvent');
-			}
-			if (coordinator.nextEventTurnAt !== undefined) {
-				count(coordinator.nextEventTurnAt, 'coordinator.nextEventTurnAt');
-				check(pendingEvents.length > 0, 'coordinator event timer has no pending events');
-			}
-			optional(coordinator.turnId, identifier, 'coordinator.turnId');
-			if (coordinator.activeEventSequence !== undefined) {
-				count(coordinator.activeEventSequence, 'coordinator.activeEventSequence');
-				check(coordinator.activeEventSequence <= coordinator.eventSequence && coordinator.turnId !== undefined, 'coordinator active event');
-			}
-			if (coordinator.activeEvents !== undefined) {
-				const activeEvents = array(coordinator.activeEvents, 'coordinator.activeEvents');
-				const activeEventKinds = new Set<string>();
-				for (const event of activeEvents) {
-					enumValue(event, ['activity', 'result', 'verification', 'blocked', 'failed', 'needsInput', 'assignmentCreated', 'assignmentSuperseded', 'assignmentCompleted', 'memberAdded', 'memberRemoved'], 'coordinator.activeEvent');
-					unique(activeEventKinds, String(event), 'coordinator.activeEvent');
-				}
-				check(coordinator.activeEventSequence !== undefined, 'coordinator active events have no sequence');
-			}
-			optional(coordinator.error, text, 'coordinator.error');
-		}
-		const members = array(room.members, 'room.members');
-		check(members.length > 0 && members.length <= MAX_ROOM_WORKERS, 'room member count');
 		const memberIds = new Set<string>();
 		const sessions = new Set<string>();
+		const members = array(room.members, 'room.members');
+		check(members.length > 0, 'room member count');
+		let activeMembers = 0;
 		for (const value of members) {
 			const member = object(value, 'member', ['id', 'name', 'sessionUri', 'chatUri', 'model', 'modelSelection', 'pendingModel', 'modelError', 'state', 'worktreeUri', 'activity', 'work', 'error', 'turns', 'removed', 'configuration']);
-			identifier(member.id, 'member.id');
-			unique(memberIds, member.id, 'member.id');
-			text(member.name, 'member.name', false);
-			text(member.sessionUri, 'member.sessionUri', false);
-			const session = URI.parse(member.sessionUri, true);
-			check(session.scheme === 'copilotcli' && !session.authority && session.path.length > 1 && !session.query && !session.fragment, 'member.sessionUri');
+			const id = identifier(member.id, 'member.id');
+			unique(memberIds, id, 'member.id');
+			text(member.name, 'member.name');
+			const session = URI.parse(text(member.sessionUri, 'member.sessionUri'), true);
+			check(session.scheme === 'copilotcli' && !session.authority && !session.query && !session.fragment && session.path.startsWith('/'), 'member.sessionUri');
 			identifier(session.path.slice(1), 'member.sessionId');
 			unique(sessions, extUri.getComparisonKey(session), 'member.sessionUri');
-			check(coordinatorSession === undefined || !extUri.isEqual(coordinatorSession, session), 'coordinator session is a member session');
-			if (member.chatUri !== undefined) {
-				check(member.chatUri === buildDefaultChatUri(member.sessionUri), 'member.chatUri must be the preserved session default chat');
+			check(member.chatUri === undefined || member.chatUri === buildDefaultChatUri(String(member.sessionUri)), 'member.chatUri must be the preserved session default chat');
+			if (member.worktreeUri !== undefined) {
+				check(sameRoomFile(localFile(member.worktreeUri, 'member.worktreeUri').fsPath, this.files.path('worktrees', roomId, id)), 'member worktree identity');
 			}
 			optional(member.model, text, 'member.model');
-			const modelSelection = member.modelSelection === undefined ? undefined : parseRoomModelSelection(member.modelSelection);
-			const pendingModel = member.pendingModel === undefined || member.pendingModel === null ? member.pendingModel : parseRoomModelSelection(member.pendingModel);
-			if (modelSelection !== undefined || pendingModel !== undefined) {
-				const selected = pendingModel === null ? 'auto' : (pendingModel ?? modelSelection)?.id;
-				check(member.model === selected, 'member.model does not match its selected model');
+			const selection = member.modelSelection === undefined ? undefined : parseRoomModelSelection(member.modelSelection);
+			const pending = member.pendingModel === undefined || member.pendingModel === null ? member.pendingModel : parseRoomModelSelection(member.pendingModel);
+			if (selection !== undefined || pending !== undefined) {
+				check(member.model === (pending === null ? 'auto' : (pending ?? selection)?.id), 'member.model does not match its selected model');
 			}
 			optional(member.modelError, text, 'member.modelError');
 			if (member.configuration !== undefined) {
 				parseRoomConfiguration(member.configuration, true);
 			}
 			enumValue(member.state, ['pending', 'starting', 'working', 'idle', 'blocked', 'needsInput', 'stopping', 'stopped', 'failed', 'interrupted'], 'member.state');
-			if (member.worktreeUri !== undefined) {
-				check(sameFile(localFile(member.worktreeUri, 'member.worktreeUri').fsPath, localFile(this.worktreeUri(room.id, member.id), 'member worktree').fsPath), 'member worktree identity');
-			}
 			optional(member.activity, text, 'member.activity');
 			optional(member.error, text, 'member.error');
 			count(member.turns, 'member.turns');
-			optional(member.removed, boolean, 'member.removed');
+			check(member.removed === undefined || typeof member.removed === 'boolean', 'member.removed');
+			if (!member.removed) {
+				activeMembers++;
+			}
 			if (member.work !== undefined) {
-				const work = object(member.work, 'member.work', ['description', 'nextStep', 'blocked', 'updatedAt']);
-				text(work.description, 'work.description');
-				optional(work.nextStep, text, 'work.nextStep');
-				boolean(work.blocked, 'work.blocked');
+				const work = object(member.work, 'member.work', ['description', 'blocked', 'updatedAt']);
+				text(work.description, 'work.description', true);
+				check(typeof work.blocked === 'boolean', 'work.blocked');
 				count(work.updatedAt, 'work.updatedAt');
 			}
 		}
+		check(activeMembers <= MAX_ROOM_WORKERS, 'room active member count');
 		const artifactIds = new Set<string>();
 		for (const value of array(room.artifacts, 'room.artifacts')) {
 			const artifact = object(value, 'artifact', ['id', 'memberId', 'title', 'createdAt', 'baseRevision', 'sourceRevision', 'uri']);
-			identifier(artifact.id, 'artifact.id');
-			check(isUUID(artifact.id), 'artifact.id must be a UUID');
-			unique(artifactIds, artifact.id, 'artifact.id');
-			identifier(artifact.memberId, 'artifact.memberId');
-			check(memberIds.has(artifact.memberId), 'artifact member does not exist');
-			text(artifact.title, 'artifact.title', false);
+			const id = identifier(artifact.id, 'artifact.id');
+			check(isUUID(id), 'artifact.id must be a UUID');
+			unique(artifactIds, id, 'artifact.id');
+			check(memberIds.has(identifier(artifact.memberId, 'artifact.memberId')), 'artifact member is missing');
+			text(artifact.title, 'artifact.title');
 			count(artifact.createdAt, 'artifact.createdAt');
-			commit(artifact.baseRevision, 'artifact.baseRevision');
-			check(artifact.baseRevision === room.baseRevision, 'artifact baseRevision differs from room');
+			check(commit(artifact.baseRevision, 'artifact.baseRevision') === base, 'artifact base differs from room');
 			commit(artifact.sourceRevision, 'artifact.sourceRevision');
-			check(sameFile(localFile(artifact.uri, 'artifact.uri').fsPath, join(this.root, 'artifacts', room.id, `${artifact.id}.patch`)), 'artifact file identity');
+			check(sameRoomFile(localFile(artifact.uri, 'artifact.uri').fsPath, this.files.path('artifacts', roomId, `${id}.patch`)), 'artifact file identity');
 		}
 		if (room.run !== undefined) {
 			const run = object(room.run, 'room.run', ['id', 'startedAt', 'deadline', 'limits', 'admittedTurns']);
 			identifier(run.id, 'run.id');
-			count(run.startedAt, 'run.startedAt');
-			if (run.deadline !== undefined) {
-				count(run.deadline, 'run.deadline');
-				check(run.deadline >= run.startedAt, 'run.deadline precedes start');
-			}
+			const startedAt = count(run.startedAt, 'run.startedAt');
 			const limits = object(run.limits, 'run.limits', ['maxTurns', 'timeoutMinutes']);
-			if (limits.maxTurns !== undefined) {
-				count(limits.maxTurns, 'limits.maxTurns');
-				check(limits.maxTurns > 0, 'limits.maxTurns');
-			}
+			const maxTurns = count(limits.maxTurns, 'limits.maxTurns');
+			check(maxTurns > 0, 'limits.maxTurns must be positive');
 			if (limits.timeoutMinutes !== undefined) {
 				check(typeof limits.timeoutMinutes === 'number' && Number.isFinite(limits.timeoutMinutes) && limits.timeoutMinutes > 0, 'limits.timeoutMinutes');
 			}
+			if (run.deadline !== undefined) {
+				check(count(run.deadline, 'run.deadline') >= startedAt, 'run.deadline precedes start');
+			}
 			check((run.deadline === undefined) === (limits.timeoutMinutes === undefined), 'run deadline does not match timeout setting');
-			count(run.admittedTurns, 'run.admittedTurns');
-			check(limits.maxTurns === undefined || run.admittedTurns <= limits.maxTurns, 'run.admittedTurns exceeds limit');
+			check(count(run.admittedTurns, 'run.admittedTurns') <= maxTurns, 'run.admittedTurns exceeds limit');
 		}
-	}
-
-	private async prepareWorktree(room: IAgentHostRoom, member: IRoomSessionParticipant, requireExisting: boolean): Promise<void> {
-		this.validateRoom(room);
-		check(room.members.some(value => equals(value, member))
-			|| !!room.coordinator && room.coordinator.id === member.id && room.coordinator.sessionUri === member.sessionUri
-			&& room.coordinator.chatUri === member.chatUri && room.coordinator.worktreeUri === member.worktreeUri,
-			'worktree participant is not in room');
-		const repository = await this.resolveRepository(room.repositoryUri, room.baseRevision);
-		check(repository.baseRevision === room.baseRevision, 'room baseRevision is not pinned');
-		const original = localFile(repository.repositoryUri, 'repositoryUri').fsPath;
-		const worktree = localFile(this.worktreeUri(room.id, member.id), 'worktreeUri').fsPath;
-		check(!sameFile(original, worktree), 'worktree must be isolated from the original repository');
-		await this.directory('worktrees', room.id);
-		const existing = await statIfPresent(worktree);
-		if (existing) {
-			check(existing.isDirectory() && !existing.isSymbolicLink(), 'worktree is not a real directory');
-		} else {
-			check(!requireExisting, 'preserved worktree is missing; restore it before retrying');
-			await this.git(original, ['worktree', 'add', '--detach', '--', worktree, room.baseRevision]);
-		}
-		const toplevel = (await this.git(worktree, ['rev-parse', '--show-toplevel'])).trim();
-		check(sameFile(await fs.realpath(toplevel), await fs.realpath(worktree)), 'worktree is not the git toplevel');
-		const originalCommon = (await this.git(original, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
-		const worktreeCommon = (await this.git(worktree, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
-		check(sameFile(await fs.realpath(originalCommon), await fs.realpath(worktreeCommon)), 'worktree belongs to a different repository');
-		await this.git(worktree, ['merge-base', '--is-ancestor', room.baseRevision, 'HEAD']);
-	}
-
-	private async directory(...segments: string[]): Promise<string> {
-		const created = await fs.mkdir(this.root, { recursive: true, mode: 0o700 });
-		check((await fs.lstat(this.root)).isDirectory(), 'storageRoot is not a real directory');
-		if (created) {
-			let parent = this.root;
-			do {
-				parent = dirname(parent);
-				await this.syncDirectory(parent);
-			} while (!sameFile(parent, dirname(created)));
-		}
-		let path = this.root;
-		for (const segment of segments) {
-			identifier(segment, 'storage directory');
-			path = join(path, segment);
-			const entry = await statIfPresent(path);
-			if (!entry) {
-				try {
-					await fs.mkdir(path, { mode: 0o700 });
-					await this.syncDirectory(dirname(path));
-				} catch (error) {
-					if (!hasCode(error, 'EEXIST')) {
-						throw error;
-					}
-				}
-			}
-			check((await fs.lstat(path)).isDirectory(), 'storage directory is not a real directory');
-		}
-		return path;
-	}
-
-	private async checkDirectory(...segments: string[]): Promise<boolean> {
-		let path = this.root;
-		for (const segment of ['', ...segments]) {
-			path = join(path, segment);
-			const entry = await statIfPresent(path);
-			if (!entry) {
-				return false;
-			}
-			check(entry.isDirectory(), 'storage directory is not a real directory');
-		}
-		return true;
-	}
-
-	private async readFile(path: string): Promise<string> {
-		const entry = await fs.lstat(path);
-		check(entry.isFile() && !entry.isSymbolicLink(), 'stored record is not a regular file');
-		const file = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-		try {
-			check((await file.stat()).isFile(), 'stored record is not a regular file');
-			return await file.readFile('utf8');
-		} finally {
-			await file.close();
-		}
-	}
-
-	private async atomicWrite(path: string, contents: string, exclusive: boolean): Promise<void> {
-		const temporary = join(dirname(path), `.${generateUuid()}.tmp`);
-		const file = await fs.open(temporary, 'wx', 0o600);
-		try {
-			try {
-				await file.writeFile(contents, 'utf8');
-				if (exclusive) {
-					await file.chmod(0o400);
-				}
-				await file.sync();
-			} finally {
-				await file.close();
-			}
-			if (exclusive) {
-				// Linking a complete file is atomic and refuses an existing name.
-				await fs.link(temporary, path);
-			} else {
-				await fs.rename(temporary, path);
-			}
-		} finally {
-			await removePrivateFile(temporary);
-		}
-		await this.syncDirectory(dirname(path));
-	}
-
-	private async syncDirectory(path: string): Promise<void> {
-		if (!isWindows) {
-			const directory = await fs.open(path, 'r');
-			try {
-				await directory.sync();
-			} finally {
-				await directory.close();
-			}
-		} else {
-			this.logService.trace('[AgentHostRoomsStorage] File flushed; directory fsync is unavailable on Windows');
-		}
-	}
-
-	private async git(cwd: string, args: readonly string[], extraEnv?: NodeJS.ProcessEnv, input?: string): Promise<string> {
-		const temporaryDirectory = await this.directory('git');
-		const env: NodeJS.ProcessEnv = {};
-		for (const [key, value] of Object.entries(process.env)) {
-			if (!key.toUpperCase().startsWith('GIT_')) {
-				env[key] = value;
-			}
-		}
-		Object.assign(env, {
-			GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0',
-			TMPDIR: temporaryDirectory, TMP: temporaryDirectory, TEMP: temporaryDirectory,
-		}, extraEnv);
-		return new Promise((resolve, reject) => {
-			const child = execFile('git', [
-				'-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false',
-				'-c', `core.hooksPath=${join(temporaryDirectory, 'no-hooks')}`, ...args,
-			], { cwd, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000, windowsHide: true }, (error, stdout, stderr) => {
-				if (error) {
-					reject(new Error(localize('agentHostRooms.gitFailed', "Room Git operation failed: {0}", stderr.trim() || error.message)));
-				} else {
-					resolve(stdout);
-				}
-			});
-			child.stdin?.on('error', error => {
-				if (!hasCode(error, 'EPIPE')) {
-					reject(error);
-				}
-			});
-			child.stdin?.end(input);
-		});
 	}
 }
 
-function check(condition: unknown, field: string): asserts condition {
-	if (!condition) {
-		throw new Error(localize('agentHostRooms.invalidStorage', "Invalid room storage data: {0}.", field));
+function validateUpdate(previous: IRoomRecord, next: IRoomRecord): void {
+	check(next.room.revision >= previous.room.revision, 'room.revision regressed');
+	check(sameRoomFile(localFile(next.room.repositoryUri, 'repositoryUri').fsPath, localFile(previous.room.repositoryUri, 'repositoryUri').fsPath)
+		&& next.room.baseRevision === previous.room.baseRevision, 'room repository changed');
+	const identities = (room: IAgentHostRoom) => room.members.map(member => [member.id, member.name, member.sessionUri, member.chatUri ?? buildDefaultChatUri(member.sessionUri), member.worktreeUri]);
+	const preserved = identities(previous.room);
+	check(next.room.members.length >= previous.room.members.length && equals(preserved, identities(next.room).slice(0, preserved.length)), 'preserved member identities changed');
+	for (const [index, member] of previous.room.members.entries()) {
+		check(next.room.members[index].turns >= member.turns && (!member.removed || next.room.members[index].removed), 'member lifecycle regressed');
+	}
+	for (const execution of previous.executions) {
+		check(!execution.initialized || next.executions.find(value => value.memberId === execution.memberId)?.initialized, 'execution initialization regressed');
+	}
+	for (const artifact of previous.room.artifacts) {
+		check(equals(next.room.artifacts.find(value => value.id === artifact.id), artifact), 'published artifact changed');
+	}
+	const attributed = ({ deliveries, ...message }: IAgentHostRoomMessage) => message;
+	check(next.messages.length >= previous.messages.length && previous.messages.every((message, index) => equals(attributed(message), attributed(next.messages[index]))), 'recorded room messages changed');
+	if (previous.room.run) {
+		check(next.room.run?.id === previous.room.run.id, 'run identity changed');
+		check(next.room.run.admittedTurns >= previous.room.run.admittedTurns && next.room.run.startedAt === previous.room.run.startedAt
+			&& next.room.run.limits.maxTurns! >= previous.room.run.limits.maxTurns!, 'run budget regressed');
 	}
 }
 
-function object(value: unknown, field: string, keys: readonly string[]): Record<string, unknown> {
-	check(value !== null && typeof value === 'object' && !Array.isArray(value), field);
-	check(Object.keys(value).every(key => keys.includes(key)), `${field} contains unknown fields`);
-	return value as Record<string, unknown>;
-}
-
-function array(value: unknown, field: string): readonly unknown[] {
-	check(Array.isArray(value), field);
-	return value;
-}
-
-function text(value: unknown, field: string, empty = true, limit = Number.POSITIVE_INFINITY): asserts value is string {
-	check(typeof value === 'string' && value.length <= limit && (empty || value.trim().length > 0), field);
-}
-
-function identifier(value: unknown, field: string): asserts value is string {
-	text(value, field, false);
-	check(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(value), field);
-	check(!/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(value), field);
-}
-
-function commit(value: unknown, field: string): asserts value is string {
-	text(value, field, false);
-	check(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value), field);
-}
-
-function count(value: unknown, field: string): asserts value is number {
-	check(typeof value === 'number' && Number.isSafeInteger(value) && value >= 0, field);
-}
-
-function boolean(value: unknown, field: string): void {
-	check(typeof value === 'boolean', field);
+function enumValue(value: unknown, values: readonly string[], field: string): void {
+	check(typeof value === 'string' && values.includes(value), field);
 }
 
 function optional(value: unknown, validate: (value: unknown, field: string) => void, field: string): void {
@@ -780,65 +391,17 @@ function optional(value: unknown, validate: (value: unknown, field: string) => v
 	}
 }
 
-function enumValue(value: unknown, values: readonly string[], field: string): void {
-	check(typeof value === 'string' && values.includes(value), field);
-}
-
-function evidence(value: unknown, field: string): void {
-	const entries = array(value, field);
-	check(entries.length >= 1 && entries.length <= 20, field);
-	for (const entry of entries) {
-		text(entry, field, false, 2000);
-	}
-}
-
 function unique(values: Set<string>, value: string, field: string): void {
 	check(!values.has(value), `${field} is duplicated`);
 	values.add(value);
 }
 
-function references(value: unknown, members: ReadonlySet<string>, field: string): void {
+function references(value: unknown, targets: ReadonlySet<string>, field: string): ReadonlySet<string> {
 	const seen = new Set<string>();
-	for (const id of array(value, field)) {
-		identifier(id, field);
-		check(members.has(id), `${field} references a missing member`);
+	for (const entry of array(value, field)) {
+		const id = identifier(entry, field);
+		check(targets.has(id), `${field} references a missing identity`);
 		unique(seen, id, field);
 	}
-}
-
-function localFile(value: unknown, field: string): URI {
-	text(value, field, false);
-	const uri = URI.parse(value, true);
-	check(uri.scheme === Schemas.file && !uri.authority && !uri.query && !uri.fragment && uri.path.startsWith('/') && !uri.path.includes('\0'), field);
-	check(sameFile(uri.fsPath, resolve(uri.fsPath)), field);
-	return uri;
-}
-
-function sameFile(left: string, right: string): boolean {
-	return extUriBiasedIgnorePathCase.isEqual(URI.file(left), URI.file(right));
-}
-
-function hasCode(error: unknown, code: string): boolean {
-	return error !== null && typeof error === 'object' && (error as { code?: unknown }).code === code;
-}
-
-async function statIfPresent(path: string) {
-	try {
-		return await fs.lstat(path);
-	} catch (error) {
-		if (hasCode(error, 'ENOENT')) {
-			return undefined;
-		}
-		throw error;
-	}
-}
-
-async function removePrivateFile(path: string): Promise<void> {
-	try {
-		await fs.unlink(path);
-	} catch (error) {
-		if (!hasCode(error, 'ENOENT')) {
-			throw error;
-		}
-	}
+	return seen;
 }

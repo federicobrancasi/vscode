@@ -11,6 +11,8 @@ import { ResolveSessionConfigResult, SessionConfigPropertySchema } from '../comm
 
 export const roomConfigurationKeys = [SessionConfigKey.Mode, SessionConfigKey.AutoApprove, SessionConfigKey.SandboxEnabled] as const;
 
+export function parseRoomConfiguration(configuration: unknown, requireAll: true): IAgentHostRoomConfiguration;
+export function parseRoomConfiguration(configuration: unknown, requireAll?: boolean): Partial<IAgentHostRoomConfiguration>;
 export function parseRoomConfiguration(configuration: unknown, requireAll = false): Partial<IAgentHostRoomConfiguration> {
 	if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration)
 		|| (Object.getPrototypeOf(configuration) !== Object.prototype && Object.getPrototypeOf(configuration) !== null)) {

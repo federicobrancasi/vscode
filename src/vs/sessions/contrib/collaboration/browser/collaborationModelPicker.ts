@@ -10,7 +10,7 @@ import { isCancellationError } from '../../../../base/common/errors.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { autorun, constObservable, derived, IObservable, observableValue, transaction } from '../../../../base/common/observable.js';
 import { localize } from '../../../../nls.js';
-import { IAgentHostRoomCoordinator, IAgentHostRoomMember } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoomMember } from '../../../../platform/agentHost/common/agentHostRooms.js';
 import { ModelSelection, SessionModelInfo } from '../../../../platform/agentHost/common/state/sessionState.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { AgentHostLanguageModelProvider } from '../../../../workbench/contrib/chat/browser/agentSessions/agentHost/agentHostLanguageModelProvider.js';
@@ -72,7 +72,7 @@ export interface ICollaborationModelPickerState {
 	readonly error?: string;
 }
 
-export function getCollaborationMemberModelState(member: IAgentHostRoomMember, models: readonly SessionModelInfo[], enabled: boolean): ICollaborationModelPickerState {
+export function getCollaborationMemberModelState(member: IAgentHostRoomMember, models: readonly SessionModelInfo[], enabled: boolean, archived = false): ICollaborationModelPickerState {
 	const selection = member.pendingModel === null ? { id: 'auto' }
 		: member.pendingModel ?? member.modelSelection ?? (member.model ? { id: member.model } : undefined);
 	const current = member.modelSelection ? models.find(model => model.id === member.modelSelection?.id)?.name ?? member.modelSelection.id : undefined;
@@ -87,20 +87,11 @@ export function getCollaborationMemberModelState(member: IAgentHostRoomMember, m
 				? localize('room.modelNextTurnUnknown', "Applies on this peer's next turn.")
 				: localize('room.modelBeforeStart', "Applies when this peer starts.")
 		: !current && !started ? localize('room.modelUnconfirmed', "Applies when this peer starts.") : undefined;
-	return { selection, enabled, detail, error: member.modelError };
-}
-
-export function getCollaborationCoordinatorModelState(coordinator: IAgentHostRoomCoordinator, models: readonly SessionModelInfo[], enabled: boolean): ICollaborationModelPickerState {
-	const selection = coordinator.pendingModel ?? coordinator.appliedModel ?? coordinator.desiredModel;
-	const current = coordinator.appliedModel
-		? models.find(model => model.id === coordinator.appliedModel?.id)?.name ?? coordinator.appliedModel.id
-		: undefined;
-	const detail = coordinator.pendingModel
-		? current
-			? localize('room.coordinatorModelNextTurn', "Applies on the next coordinator turn. Currently using {0}.", current)
-			: localize('room.coordinatorModelBeforeStart', "Applies when the coordinator starts.")
-		: !current && !coordinator.initialized ? localize('room.coordinatorModelBeforeStart', "Applies when the coordinator starts.") : undefined;
-	return { selection, enabled, detail, error: coordinator.modelError };
+	return {
+		selection, enabled: enabled && !archived,
+		detail: archived ? localize('room.archivedModel', "Historical model selection. This archive cannot run.") : detail,
+		error: member.modelError,
+	};
 }
 
 /** One delegate per worker: selecting a peer never changes the active chat's model. */

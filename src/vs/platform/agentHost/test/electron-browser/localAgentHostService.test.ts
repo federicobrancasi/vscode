@@ -27,7 +27,7 @@ import { AGENT_HOST_CLIENT_BYOK_LM_CHANNEL, AgentHostClientByokLmChannel } from 
 import { AgentHostClientType, editorWindowAgentHostClientInfo } from '../../common/agentHostClientInfo.js';
 import { AgentHostStartupTelemetry } from '../../common/agentHostStartupTelemetry.js';
 import { AgentHostClientConnectionKind } from '../../common/agentHostTelemetry.js';
-import { IAgentHostRoomCoordinator, IAgentHostRoomCoordinatorSnapshot, IAgentHostRoomsService } from '../../common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomMessage, IAgentHostRoomsService } from '../../common/agentHostRooms.js';
 import { ProtocolError } from '../../common/state/sessionProtocol.js';
 import { createLocalAgentHostRoomsService, LocalAgentHostManagementConnection, LocalAgentHostServiceClient, registerAgentHostClientChannels } from '../../electron-browser/localAgentHostService.js';
 
@@ -94,25 +94,24 @@ suite('registerAgentHostClientChannels', () => {
 		assert.deepStrictEqual(registered, [AGENT_HOST_CLIENT_PROXY_CHANNEL, AGENT_HOST_CLIENT_BYOK_LM_CHANNEL]);
 	});
 
-	test('forwards coordinator methods through the local room proxy', async () => {
+	test('forwards explicit inbox posts, filters, and budget extensions through the local room proxy', async () => {
 		const calls: string[] = [];
-		const coordinator = upcastPartial<IAgentHostRoomCoordinator>({ id: 'coordinator' });
-		const snapshot = upcastPartial<IAgentHostRoomCoordinatorSnapshot>({ coordinator });
+		const room = upcastPartial<IAgentHostRoom>({ id: 'room' });
+		const message = upcastPartial<IAgentHostRoomMessage>({ id: 'mail', mentions: ['peer'] });
+		const page = { messages: [message], hasEarlier: false, hasLater: false };
 		const proxy = upcastPartial<IAgentHostRoomsService>({
-			ensureCoordinator: async roomId => { calls.push(`ensure:${roomId}`); return coordinator; },
-			getCoordinator: async roomId => { calls.push(`get:${roomId}`); return coordinator; },
-			setCoordinatorModel: async (roomId, model) => { calls.push(`model:${roomId}:${model?.id}`); return coordinator; },
-			getCoordinatorSnapshot: async roomId => { calls.push(`snapshot:${roomId}`); return snapshot; },
+			postMessage: async (roomId, message) => { calls.push(`post:${roomId}:${message.mentions.join(',')}`); return { ...message, ...page.messages[0] }; },
+			getMessages: async (roomId, query) => { calls.push(`inbox:${roomId}:${query?.memberId}`); return page; },
+			extendRun: async (roomId, turns) => { calls.push(`extend:${roomId}:${turns}`); return room; },
 		});
 		const rooms = createLocalAgentHostRoomsService(Event.None, () => proxy);
 
 		assert.deepStrictEqual([
-			await rooms.ensureCoordinator('room'),
-			await rooms.getCoordinator('room'),
-			await rooms.setCoordinatorModel('room', { id: 'model-a' }),
-			await rooms.getCoordinatorSnapshot('room'),
+			(await rooms.postMessage('room', { id: 'mail', text: 'Peer input', mentions: ['peer'] })).mentions,
+			await rooms.getMessages('room', { memberId: 'peer' }),
+			await rooms.extendRun('room', 3),
 			calls,
-		], [coordinator, coordinator, coordinator, snapshot, ['ensure:room', 'get:room', 'model:room:model-a', 'snapshot:room']]);
+		], [['peer'], page, room, ['post:room:peer', 'inbox:room:peer', 'extend:room:3']]);
 	});
 
 	test('classifies only utility process validation errors as fatal', () => {

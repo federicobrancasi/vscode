@@ -23,11 +23,11 @@ export const ModelPickerSection = {
 export const RESTRICTED_MODE_TRUST_ACTION_ID = 'restrictedModeTrust';
 export const SETUP_REQUIRED_SIGN_IN_ACTION_ID = 'setupRequiredSignIn';
 
-function createSyntheticAutoItem(): IActionListItem<IActionWidgetDropdownAction> {
+function createSyntheticAutoItem(checked: boolean): IActionListItem<IActionWidgetDropdownAction> {
 	return createModelItem({
 		id: 'auto',
 		enabled: true,
-		checked: true,
+		checked,
 		class: undefined,
 		tooltip: localize('chat.modelPicker.auto', "Auto"),
 		label: localize('chat.modelPicker.auto', "Auto"),
@@ -130,19 +130,20 @@ export function buildUnavailableStateItems(options: IBuildModelPickerItemsOption
 
 export function buildFlatModelItems(options: IBuildModelPickerItemsOptions): IActionListItem<IActionWidgetDropdownAction>[] {
 	const items: IActionListItem<IActionWidgetDropdownAction>[] = [];
+	const checkedModelId = options.suppressModelSelection ? undefined : options.selectedModelId;
 	if (options.models.length === 0 && options.presentation.showAutoModel) {
-		items.push(createSyntheticAutoItem());
+		items.push(createSyntheticAutoItem(!options.suppressModelSelection));
 	}
 	const autoModel = options.models.find(isAutoModel);
 	if (autoModel) {
-		const { action, ariaDescription } = createModelAction(autoModel, options.selectedModelId, options.actions.onSelect);
+		const { action, ariaDescription } = createModelAction(autoModel, checkedModelId, options.actions.onSelect);
 		items.push(createModelItem(action, autoModel, options.openerService, undefined, options.presentation.isUBB, ariaDescription));
 	}
 	const sortedModels = options.models
 		.filter(model => model !== autoModel)
 		.sort((left, right) => left.metadata.vendor.localeCompare(right.metadata.vendor) || left.metadata.name.localeCompare(right.metadata.name));
 	for (const model of sortedModels) {
-		const { action, ariaDescription } = createModelAction(model, options.selectedModelId, options.actions.onSelect);
+		const { action, ariaDescription } = createModelAction(model, checkedModelId, options.actions.onSelect);
 		items.push(createModelItem(action, model, options.openerService, undefined, options.presentation.isUBB, ariaDescription, undefined, options.actions.onConfigure));
 	}
 	return items;
@@ -150,6 +151,7 @@ export function buildFlatModelItems(options: IBuildModelPickerItemsOptions): IAc
 
 interface IGroupedContext {
 	readonly options: IBuildModelPickerItemsOptions;
+	readonly checkedModelId: string | undefined;
 	readonly items: IActionListItem<IActionWidgetDropdownAction>[];
 	readonly modelToGroup: ReturnType<typeof buildModelToProviderGroupMap>;
 	readonly resolveModel: (id: string) => ILanguageModelChatMetadataAndIdentifier | undefined;
@@ -166,6 +168,7 @@ function createGroupedContext(options: IBuildModelPickerItemsOptions): IGroupedC
 	const placed = new Set<string>();
 	return {
 		options,
+		checkedModelId: options.suppressModelSelection ? undefined : options.selectedModelId,
 		items: [],
 		modelToGroup,
 		resolveModel: id => allModels.get(id) ?? modelsByMetadataId.get(id),
@@ -185,17 +188,17 @@ function appendLeadingModels(context: IGroupedContext): ILanguageModelChatMetada
 	const { options, items } = context;
 	const autoModel = options.models.find(isAutoModel);
 	if (!autoModel && options.models.length === 0 && options.presentation.showAutoModel) {
-		items.push(createSyntheticAutoItem());
+		items.push(createSyntheticAutoItem(!options.suppressModelSelection));
 	}
 	if (autoModel) {
 		context.markPlaced(autoModel.identifier);
-		const { action, ariaDescription } = createModelAction(autoModel, options.selectedModelId, options.actions.onSelect);
+		const { action, ariaDescription } = createModelAction(autoModel, context.checkedModelId, options.actions.onSelect);
 		items.push(createModelItem(action, autoModel, options.openerService, undefined, options.presentation.isUBB, ariaDescription));
 	}
 	for (const model of options.models) {
 		if (!context.placed.has(model.identifier) && ILanguageModelChatMetadata.hasPromoDiscount(model.metadata)) {
 			context.markPlaced(model.identifier);
-			const { action, ariaDescription } = createModelAction(model, options.selectedModelId, options.actions.onSelect);
+			const { action, ariaDescription } = createModelAction(model, context.checkedModelId, options.actions.onSelect);
 			items.push(createModelItem(action, model, options.openerService, undefined, options.presentation.isUBB, ariaDescription));
 		}
 	}
@@ -222,7 +225,7 @@ function appendPinnedModels(context: IGroupedContext): Set<string> {
 		items.push({ kind: ActionListItemKind.Separator, label: localize('chat.modelPicker.pinned', "Pinned") });
 		for (const model of pinnedModels) {
 			const groupLabel = context.showGroupLabel ? getProviderGroupForModel(model, context.modelToGroup, options.languageModelsService).groupName : undefined;
-			const { action, ariaDescription } = createModelAction(model, options.selectedModelId, options.actions.onSelect, undefined, context.showGroupLabel);
+			const { action, ariaDescription } = createModelAction(model, context.checkedModelId, options.actions.onSelect, undefined, context.showGroupLabel);
 			items.push(createModelItem(action, model, options.openerService, groupLabel, options.presentation.isUBB, ariaDescription, context.makePinAction(model), options.actions.onConfigure));
 		}
 	}
@@ -307,7 +310,7 @@ function appendPromotedModels(context: IGroupedContext, autoModel: ILanguageMode
 	for (const item of promoted) {
 		if (item.kind === 'available') {
 			const groupLabel = context.showGroupLabel ? getProviderGroupForModel(item.model, context.modelToGroup, options.languageModelsService).groupName : undefined;
-			const { action, ariaDescription } = createModelAction(item.model, options.selectedModelId, options.actions.onSelect, undefined, context.showGroupLabel);
+			const { action, ariaDescription } = createModelAction(item.model, context.checkedModelId, options.actions.onSelect, undefined, context.showGroupLabel);
 			items.push(createModelItem(action, item.model, options.openerService, groupLabel, options.presentation.isUBB, ariaDescription, context.makePinAction(item.model), options.actions.onConfigure));
 		} else {
 			items.push(createUnavailableModelItem(item.id, item.entry, item.reason, options.manageSettingsUrl, options.updateStateType, options.chatEntitlementService));
@@ -369,7 +372,7 @@ function appendOtherModels(context: IGroupedContext): boolean {
 			if (entry?.minVSCodeVersion && !isVersionAtLeast(options.currentVSCodeVersion, entry.minVSCodeVersion)) {
 				items.push(createUnavailableModelItem(model.metadata.id, entry, 'update', options.manageSettingsUrl, options.updateStateType, options.chatEntitlementService, ModelPickerSection.Other));
 			} else {
-				const { action, ariaDescription } = createModelAction(model, options.selectedModelId, options.actions.onSelect, ModelPickerSection.Other, showHeaders);
+				const { action, ariaDescription } = createModelAction(model, context.checkedModelId, options.actions.onSelect, ModelPickerSection.Other, showHeaders);
 				items.push(createModelItem(action, model, options.openerService, undefined, options.presentation.isUBB, ariaDescription, context.makePinAction(model), options.actions.onConfigure));
 			}
 		}

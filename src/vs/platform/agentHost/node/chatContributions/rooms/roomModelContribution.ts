@@ -26,18 +26,14 @@ export class RoomModelContribution extends Disposable implements IAgentHostChatC
 		if (observed.action.type !== ActionType.ChatDraftChanged || !observed.action.draft?.model) {
 			return;
 		}
-		const operation = this.rooms.isCoordinatorChat(observed.session, observed.channel)
-			? this.rooms.setCoordinatorModelForChat(observed.session, observed.channel, observed.action.draft.model)
-			: this.rooms.isRoomSessionUri(observed.session)
-				? this.rooms.setMemberModelForChat(observed.session, observed.channel, observed.action.draft.model)
-				: undefined;
+		const operation = this.rooms.isRoomSessionUri(observed.session)
+			? this.rooms.setMemberModelForChat(observed.session, observed.channel, observed.action.draft.model)
+			: undefined;
 		void operation?.catch(error => this.logService.warn('[RoomModelContribution] Failed to save the room model selection', error));
 	}
 
 	async onHydrateChat(context: IHydrationContext, restored: IRestoredChat): Promise<IRestoredChat> {
-		const model = this.rooms.isCoordinatorChat(context.session, context.chat)
-			? await this.rooms.getCoordinatorModelForChat(context.session, context.chat)
-			: await this.rooms.getMemberModelForChat(context.session, context.chat);
+		const model = await this.rooms.getMemberModelForChat(context.session, context.chat);
 		return model ? { ...restored, draft: { text: '', origin: { kind: MessageKind.User }, ...restored.draft, model } } : restored;
 	}
 }

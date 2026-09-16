@@ -268,6 +268,7 @@ export interface IChatPetHorizontalPlatformProvider {
 }
 
 export interface IChatInputPartOptions {
+	modelPickerDelegate?: (delegate: IModelPickerDelegate) => IModelPickerDelegate;
 	defaultMode?: IChatMode;
 	renderFollowups: boolean;
 	renderStyle?: 'compact';
@@ -1412,7 +1413,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 	}
 
 	private _createModelPickerDelegate(): IModelPickerDelegate {
-		return {
+		const delegate: IModelPickerDelegate = {
 			currentModel: this._currentLanguageModel,
 			setModel: (model: ILanguageModelChatMetadataAndIdentifier) => {
 				const previousModelIdentifier = this._currentLanguageModel.get()?.identifier;
@@ -1427,6 +1428,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 			getPresentationOptions: () => this._getModelPickerPresentationOptions(),
 			modelConfiguration: this._modelConfigStore,
 		};
+		return this.options.modelPickerDelegate?.(delegate) ?? delegate;
 	}
 
 	private _getModelPickerPresentationOptions(): IModelPickerPresentationOptions {

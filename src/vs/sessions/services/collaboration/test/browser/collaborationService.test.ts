@@ -12,7 +12,7 @@ import { isWeb } from '../../../../../base/common/platform.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomCoordinator, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsCapabilities, IAgentHostRoomsService, IAgentHostRoomVerifyResultOptions } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomConfiguration, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage, IAgentHostRoomMessageQuery, IAgentHostRoomPostOptions, IAgentHostRoomsCapabilities, IAgentHostRoomsService } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { GITHUB_COPILOT_PROTECTED_RESOURCE, IAgentHostService } from '../../../../../platform/agentHost/common/agentService.js';
 import { IAgentSubscription } from '../../../../../platform/agentHost/common/state/agentSubscription.js';
 import { PolicyState, RootState } from '../../../../../platform/agentHost/common/state/protocol/state.js';
@@ -43,9 +43,8 @@ suite('CollaborationService', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 	const desktopTest = isWeb ? test.skip : test;
 
-	function setup(enabled = true, aiDisabled = false, coordinatorSupported = false) {
+	function setup(enabled = true, aiDisabled = false) {
 		const starts: { roomId: string; limits: IAgentHostRoomLimits }[] = [];
-		const verifications: { roomId: string; options: IAgentHostRoomVerifyResultOptions }[] = [];
 		const changed = disposables.add(new Emitter<IAgentHostRoom>());
 		const exited = disposables.add(new Emitter<number>());
 		const configuration = new TestConfigurationService({
@@ -57,29 +56,18 @@ suite('CollaborationService', () => {
 			override readonly onDidChangeRoom = changed.event;
 			override async getCapabilities(): Promise<IAgentHostRoomsCapabilities> {
 				return {
-					version: 1,
+					version: 2,
 					available: true,
 					maxWorkers: 10,
-					supportsSteering: true,
+					supportsInbox: true,
 					supportsConfiguration: true,
 					supportsMemberModels: true,
-					supportsStructuredResults: true,
-					supportsResultVerification: true,
-					supportsCoordinator: coordinatorSupported,
 				};
 			}
 			override async listRooms(): Promise<readonly IAgentHostRoom[]> { return [room('a'), room('b')]; }
 			override async getRoom(id: string): Promise<IAgentHostRoom> { return room(id); }
 			override async getMessages(_roomId: string, _query?: IAgentHostRoomMessageQuery): Promise<IAgentHostRoomMessagePage> { return { messages: [], hasEarlier: false, hasLater: false }; }
 			override async postMessage(_roomId: string, options: IAgentHostRoomPostOptions): Promise<IAgentHostRoomMessage> { return post(options.id, options.text); }
-			override async verifyResult(roomId: string, options: IAgentHostRoomVerifyResultOptions): Promise<IAgentHostRoomMessage> {
-				verifications.push({ roomId, options });
-				return {
-					id: options.id, sequence: 1, authorId: 'human', authorName: 'You', authorKind: 'human',
-					kind: 'verification', text: 'Reviewed result', timestamp: 0, mentions: [], deliveries: [],
-					verification: { resultId: options.resultId, verdict: options.verdict, evidence: options.evidence },
-				};
-			}
 			override async getArtifact(roomId: string, artifactId: string): Promise<string> { return `${roomId}/${artifactId}`; }
 			override async startRoom(roomId: string, limits: IAgentHostRoomLimits): Promise<IAgentHostRoom> {
 				starts.push({ roomId, limits });
@@ -145,7 +133,7 @@ suite('CollaborationService', () => {
 			override readonly activeView = observableValue<ICollaborationRoomView | undefined>(this, new class extends mock<ICollaborationRoomView>() { }());
 		}();
 		const service = disposables.add(new CollaborationService(host, configuration, authenticationService, new NullLogService(), trustManagement, trustRequest, views));
-		return { service, api, changed, exited, authenticationService, authenticationPending, host, starts, verifications, trusted, trustPrompts, trustGrants, trustManagement, trustRequest, views };
+		return { service, api, changed, exited, authenticationService, authenticationPending, host, starts, trusted, trustPrompts, trustGrants, trustManagement, trustRequest, views };
 	}
 
 	function setupSignedIn() {
@@ -195,7 +183,7 @@ suite('CollaborationService', () => {
 		exited.fire(1);
 		assert.strictEqual(service.availability.get(), 'unavailable');
 		assert.strictEqual(service.supported.get(), true);
-		api.getCapabilities = async () => ({ version: 1, available: false, maxWorkers: 10, supportsSteering: false });
+		api.getCapabilities = async () => ({ version: 2, available: false, maxWorkers: 10, supportsInbox: false });
 		await service.refresh();
 		assert.strictEqual(service.supported.get(), false);
 	});
@@ -263,7 +251,7 @@ suite('CollaborationService', () => {
 		await waitForState(service.availability, state => state === 'available');
 		await service.selectRoom('a');
 		const draft = service.getDraft('a');
-		draft.update('Advice', undefined);
+		draft.update('Advice', undefined, { kind: 'note' });
 		const ids: string[] = [];
 		api.postMessage = async (_id, options) => {
 			ids.push(options.id);
@@ -287,7 +275,7 @@ suite('CollaborationService', () => {
 		const pending = new DeferredPromise<IAgentHostRoomMessage>();
 		api.postMessage = () => pending.p;
 		const draft = service.getDraft('a');
-		draft.update('First advice', undefined);
+		draft.update('First advice', undefined, { kind: 'note' });
 		const sending = service.sendMessage();
 		draft.update('New advice', 'reply');
 		await pending.complete(post('first', 'First advice'));
@@ -320,7 +308,7 @@ suite('CollaborationService', () => {
 			changed.fire({ ...room('a', 2), latestMessageSequence: 4 });
 			return saved;
 		};
-		service.getDraft('a').update('My advice', undefined);
+		service.getDraft('a').update('My advice', undefined, { kind: 'note' });
 		await service.sendMessage();
 		assert.deepStrictEqual({
 			visible: service.messages.get().messages.map(message => message.text),
@@ -340,7 +328,7 @@ suite('CollaborationService', () => {
 		await waitForState(service.availability, state => state === 'available');
 		await service.selectRoom('a');
 		api.getMessages = async () => { throw new Error('History refresh failed'); };
-		service.getDraft('a').update('Saved advice', undefined);
+		service.getDraft('a').update('Saved advice', undefined, { kind: 'note' });
 		await service.sendMessage();
 		await waitForState(service.error, error => error === 'History refresh failed');
 		assert.deepStrictEqual({
@@ -357,7 +345,7 @@ suite('CollaborationService', () => {
 		const pending = new DeferredPromise<IAgentHostRoomMessage>();
 		const posted = new DeferredPromise<void>();
 		api.postMessage = () => { void posted.complete(); return pending.p; };
-		service.getDraft('a').update('Advice for A', undefined);
+		service.getDraft('a').update('Advice for A', undefined, { kind: 'note' });
 		const sending = service.sendMessage();
 		await posted.p;
 		api.getMessages = async () => ({ messages: [post('b-post', 'Room B history')], hasEarlier: false, hasLater: false });
@@ -481,7 +469,7 @@ suite('CollaborationService', () => {
 		await waitForState(service.availability, state => state === 'available');
 		await service.selectRoom('a');
 		authenticationPending.set(true, undefined);
-		await assert.rejects(service.startRoom(), /signing in/);
+		await assert.rejects(service.startRoom({ maxTurns: 4 }), /signing in/);
 		assert.deepStrictEqual(starts, []);
 	});
 
@@ -489,7 +477,7 @@ suite('CollaborationService', () => {
 		const { service, starts } = setup();
 		await waitForState(service.availability, state => state === 'available');
 		await service.selectRoom('a');
-		await assert.rejects(service.startRoom(), /Sign in through the Accounts menu/);
+		await assert.rejects(service.startRoom({ maxTurns: 4 }), /Sign in through the Accounts menu/);
 		assert.deepStrictEqual(starts, []);
 		await service.stopRoom();
 		assert.strictEqual(service.activeRoom.get()?.state, 'stopped');
@@ -511,14 +499,18 @@ suite('CollaborationService', () => {
 		await service.selectRoom('a');
 		let posted = false;
 		api.postMessage = async (_room, options) => { posted = true; return post(options.id, options.text); };
-		for (const text of ['Please respond', '@Copilot-1 Please respond']) {
-			service.getDraft('a').update(text, undefined);
+		for (const [text, audience] of [
+			['Please respond', { kind: 'note' }],
+			['Please respond', { kind: 'all' }],
+			['@Copilot-1 Please respond', { kind: 'member', memberId: 'member-a' }],
+		] as const) {
+			service.getDraft('a').update(text, undefined, audience);
 			await assert.rejects(service.sendMessage(), /Sign in through the Accounts menu/);
 		}
 		assert.deepStrictEqual({ posted, draft: service.getDraft('a').text }, { posted: false, draft: '@Copilot-1 Please respond' });
 	});
 
-	desktopTest('Send explicitly addresses all finished peers without mentions and preserves mention targeting', async () => {
+	desktopTest('explicit audiences send notes, all peers, or a specific peer without parsing mentions', async () => {
 		const { service, api, starts } = setupSignedIn();
 		await waitForState(service.availability, state => state === 'available');
 		api.getRoom = async id => ({
@@ -531,157 +523,214 @@ suite('CollaborationService', () => {
 			sent.push(options);
 			return { ...post(options.id, options.text), sequence: sent.length, mentions: options.mentions };
 		};
-		service.getDraft('a').update('One more question about the result', undefined);
+		service.getDraft('a').update('@Copilot-2 This is only a note', undefined, { kind: 'note' });
 		await service.sendMessage();
-		service.getDraft('a').update('@Copilot-2 Check this detail', undefined);
+		service.getDraft('a').update('One more question about the result', undefined, { kind: 'all' });
+		await service.sendMessage();
+		service.getDraft('a').update('@Copilot-1 Check this detail', undefined, { kind: 'member', memberId: 'member-2' });
 		await service.sendMessage();
 		assert.deepStrictEqual({
-			messages: sent.map(message => ({ text: message.text, mentions: message.mentions, mode: message.mode })),
+			messages: sent.map(message => ({ text: message.text, mentions: message.mentions })),
 			separateStartCalls: starts,
 		}, {
 			messages: [
-				{ text: 'One more question about the result', mentions: ['member-1', 'member-2', 'member-3'], mode: undefined },
-				{ text: '@Copilot-2 Check this detail', mentions: ['member-2'], mode: undefined },
+				{ text: '@Copilot-2 This is only a note', mentions: [] },
+				{ text: 'One more question about the result', mentions: ['member-1', 'member-2', 'member-3'] },
+				{ text: '@Copilot-1 Check this detail', mentions: ['member-2'] },
 			],
 			separateStartCalls: [],
 		});
 	});
 
-	desktopTest('preparing a coordinator trusts its exact worktree and persists its independent model', async () => {
-		const { service, api, authenticationService, trustGrants } = setup(true, false, true);
-		const coordinator: IAgentHostRoomCoordinator = {
-			id: 'coordinator',
-			name: 'Coordinator',
-			sessionUri: 'copilotcli:/coordinator',
-			chatUri: 'copilotcli:/coordinator/chat',
-			worktreeUri: 'file:///rooms/a/coordinator',
-			state: 'idle',
-			initialized: true,
-			cursor: 0,
-			eventSequence: 0,
-			eventCursor: 0,
-			pendingEvents: [],
-		};
-		let prepared = false;
-		let selectedModel: string | undefined;
-		const selectedRoom = (): IAgentHostRoom => ({
-			...room('a', selectedModel ? 3 : prepared ? 2 : 1),
-			members: [1, 2].map(index => ({
-				id: `member-${index}`,
-				name: `member-${index}`,
-				sessionUri: `copilotcli:/member-${index}`,
-				worktreeUri: `file:///rooms/a/member-${index}`,
-				state: 'idle' as const,
-				turns: 0,
-			})),
-			...(prepared ? { coordinator: { ...coordinator, desiredModel: selectedModel ? { id: selectedModel } : undefined } } : {}),
-		});
-		api.listRooms = async () => [selectedRoom(), room('b')];
-		api.getRoom = async () => selectedRoom();
-		api.ensureCoordinator = async () => {
-			prepared = true;
-			return coordinator;
-		};
-		api.setCoordinatorModel = async (_roomId, model) => {
-			selectedModel = model?.id;
-			return selectedRoom().coordinator!;
-		};
+	desktopTest('a new human draft is explicitly addressed to all six peers by default', async () => {
+		const { service, api, starts } = setupSignedIn();
 		await waitForState(service.availability, state => state === 'available');
+		api.getRoom = async id => withPeers(id, 6);
 		await service.selectRoom('a');
-		authenticationService.getSessions = async () => [authenticationSession];
-		await service.ensureCoordinator();
-		await service.setCoordinatorModel({ id: 'allowed' });
-		assert.deepStrictEqual({
-			canCoordinate: service.canCoordinate.get(),
-			trustGrants,
-			coordinatorModel: service.activeRoom.get()?.coordinator?.desiredModel,
-		}, {
-			canCoordinate: true,
-			trustGrants: [
-				['file:///rooms/a/member-1', 'file:///rooms/a/member-2'],
-				['file:///rooms/a/coordinator'],
-			],
-			coordinatorModel: { id: 'allowed' },
-		});
-	});
-
-	desktopTest('steering without mentions delegates the broadcast roster to the host', async () => {
-		const { service, api, authenticationService } = setup();
-		await waitForState(service.availability, state => state === 'available');
-		api.getRoom = async id => ({
-			...room(id, 2),
-			members: [1, 2].map(index => ({ id: `member-${index}`, name: `Copilot-${index}`, sessionUri: `copilotcli:/${index}`, worktreeUri: `file:///rooms/a/member-${index}`, state: 'working' as const, turns: 1 })),
-		});
-		await service.selectRoom('a');
-		authenticationService.getSessions = async () => [authenticationSession];
 		const sent: IAgentHostRoomPostOptions[] = [];
-		api.postMessage = async (_id, options) => { sent.push(options); return { ...post(options.id, options.text), sequence: sent.length }; };
-		service.getDraft('a').update('Prioritize the form, not animations', undefined);
-		await service.sendMessage('steer');
-		assert.deepStrictEqual(sent.map(message => ({ text: message.text, mode: message.mode, mentions: message.mentions })), [{
-			text: 'Prioritize the form, not animations', mode: 'steer', mentions: [],
-		}]);
-		service.getDraft('a').update('@Copilot-2 Check the form', undefined);
-		await service.sendMessage('steer');
-		assert.deepStrictEqual(sent[1].mentions, ['member-2']);
+		api.postMessage = async (_id, options) => {
+			sent.push(options);
+			return { ...post(options.id, options.text), mentions: options.mentions };
+		};
+		service.getDraft('a').update('Focus exclusively on URI formatting', undefined);
+		await service.sendMessage();
+		assert.deepStrictEqual({
+			audience: service.getDraft('a').audience,
+			recipients: sent.map(message => message.mentions),
+			separateStarts: starts,
+		}, {
+			audience: { kind: 'all' },
+			recipients: [['member-1', 'member-2', 'member-3', 'member-4', 'member-5', 'member-6']],
+			separateStarts: [],
+		});
 	});
 
-	desktopTest('steering is not silently sent as discussion on an older host', async () => {
-		const { service, api } = setup();
+	desktopTest('creating, opening, refreshing, and filtering never authorize work', async () => {
+		const { service, api, starts, trustPrompts, authenticationService } = setup();
 		await waitForState(service.availability, state => state === 'available');
-		api.getCapabilities = async () => ({ version: 1, available: true, maxWorkers: 10, supportsSteering: false });
+		api.getRoom = async id => withPeers(id);
+		api.createRoom = async () => withPeers('new');
+		let authenticationRequests = 0;
+		authenticationService.getSessions = async () => { authenticationRequests++; return []; };
+		await service.createRoom({ title: 'New', goal: 'Work', repositoryUri: 'file:///repo', workerCount: 2 });
+		await service.selectRoom('a');
+		await service.selectInbox('member-1');
+		await service.loadMessages();
+		await service.selectInbox(undefined);
+		assert.deepStrictEqual({ starts, trustPrompts, authenticationRequests }, { starts: [], trustPrompts: [], authenticationRequests: 0 });
+	});
+
+	desktopTest('older hosts keep readable history but cannot accept inbox writes or create rooms', async () => {
+		const { service, api, starts } = setup();
+		await waitForState(service.availability, state => state === 'available');
+		api.getCapabilities = async () => ({ version: 1, available: true, maxWorkers: 10 });
 		await service.refresh();
 		await service.selectRoom('a');
 		service.getDraft('a').update('New guidance', undefined);
-		await assert.rejects(service.sendMessage('steer'), /does not support live room steering/);
-		assert.deepStrictEqual({ canSteer: service.canSteer.get(), draft: service.getDraft('a').text }, { canSteer: false, draft: 'New guidance' });
+		await assert.rejects(service.sendMessage(), /does not support inbox collaboration/);
+		await assert.rejects(service.startRoom({ maxTurns: 4 }), /does not support inbox collaboration/);
+		await assert.rejects(service.createRoom({ title: 'New', goal: 'Work', repositoryUri: 'file:///repo', workerCount: 2 }), /does not support inbox collaboration/);
+		assert.deepStrictEqual({
+			canSend: service.canSend.get(), canConfigure: service.canConfigure.get(), starts, draft: service.getDraft('a').text,
+			readOnlyExplained: service.availabilityError.get()?.includes('read-only'),
+		}, { canSend: false, canConfigure: false, starts: [], draft: 'New guidance', readOnlyExplained: true });
 	});
 
-	desktopTest('human result verification does not request execution authorization', async () => {
-		const { service, api, authenticationService, verifications, trustPrompts } = setup();
+	desktopTest('a summary uses the chosen existing peer inbox without replacing the composer draft or starting another run', async () => {
+		const { service, api, starts } = setupSignedIn();
+		await waitForState(service.availability, state => state === 'available');
+		api.getRoom = async id => withPeers(id);
+		await service.selectRoom('a');
+		service.getDraft('a').update('My unfinished note', 'previous', { kind: 'note' });
+		const sent: IAgentHostRoomPostOptions[] = [];
+		api.postMessage = async (_id, options) => { sent.push(options); return { ...post(options.id, options.text), mentions: options.mentions }; };
+		await service.askForSummary('member-2');
+		assert.deepStrictEqual({
+			recipients: sent.map(message => message.mentions),
+			ordinaryMessage: Object.keys(sent[0]).sort(),
+			draft: service.getDraft('a').state.get(), starts,
+		}, {
+			recipients: [['member-2']], ordinaryMessage: ['id', 'mentions', 'text'],
+			draft: { text: 'My unfinished note', replyTo: 'previous', audience: { kind: 'note' } }, starts: [],
+		});
+	});
+
+	desktopTest('first Start requires a finite positive integer budget and preserves the exact approved limit', async () => {
+		const { service, starts } = setupSignedIn();
 		await waitForState(service.availability, state => state === 'available');
 		await service.selectRoom('a');
-		let authenticationRequests = 0;
-		authenticationService.getSessions = async () => {
-			authenticationRequests++;
-			return [];
-		};
-		await service.verifyResult('result-one', 'verified', '  Repeated the focused test.  ');
-		assert.deepStrictEqual({
-			canVerifyResults: service.canVerifyResults.get(),
-			verifications: verifications.map(({ roomId, options }) => ({
-				roomId,
-				resultId: options.resultId,
-				verdict: options.verdict,
-				evidence: options.evidence,
-			})),
-			authenticationRequests,
-			trustPrompts,
-		}, {
-			canVerifyResults: true,
-			verifications: [{
-				roomId: 'a',
-				resultId: 'result-one',
-				verdict: 'verified',
-				evidence: ['Repeated the focused test.'],
-			}],
-			authenticationRequests: 0,
-			trustPrompts: [],
-		});
-		api.getCapabilities = async () => ({ version: 1, available: true, maxWorkers: 10 });
-		await service.refresh();
-		await assert.rejects(service.verifyResult('result-one', 'rejected', 'Evidence'), /does not support structured result verification/);
+		for (const maxTurns of [undefined, 0, -1, 1.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
+			await assert.rejects(service.startRoom({ maxTurns }), /finite turn budget/);
+		}
+		await service.startRoom({ maxTurns: 7 });
+		assert.deepStrictEqual(starts, [{ roomId: 'a', limits: { maxTurns: 7 } }]);
 	});
 
-	desktopTest('broadcast steering cannot wake peers before authentication', async () => {
+	desktopTest('exhaustion requires Extend, while Resume never replaces the existing run budget', async () => {
+		const { service, api, starts } = setupSignedIn();
+		await waitForState(service.availability, state => state === 'available');
+		const run = { id: 'existing-run', startedAt: 1, limits: { maxTurns: 3 }, admittedTurns: 3 };
+		api.getRoom = async id => ({ ...room(id, 2), state: 'paused', pauseReason: 'budget', run });
+		await service.selectRoom('a');
+		await assert.rejects(service.startRoom({}), /budget is exhausted/);
+		await assert.rejects(service.startRoom({ maxTurns: 20 }), /Use Extend/);
+		const extensions: number[] = [];
+		api.extendRun = async (id, additionalTurns) => {
+			extensions.push(additionalTurns);
+			return { ...room(id, 3), state: 'idle', run: { ...run, limits: { maxTurns: run.limits.maxTurns + additionalTurns } } };
+		};
+		await assert.rejects(service.extendRun(0), /finite turn budget/);
+		await service.extendRun(4);
+		const extended = service.activeRoom.get()?.run;
+		await service.startRoom({});
+		assert.deepStrictEqual({ extensions, extended, starts }, {
+			extensions: [4], extended: { ...run, limits: { maxTurns: 7 } }, starts: [{ roomId: 'a', limits: {} }],
+		});
+	});
+
+	desktopTest('archives reject every room write before authentication or workspace trust', async () => {
+		const { service, api, starts, trustPrompts, authenticationService } = setup();
+		await waitForState(service.availability, state => state === 'available');
+		api.getRoom = async id => ({ ...withPeers(id), archived: true });
+		await service.selectRoom('a');
+		let authenticated = 0;
+		authenticationService.getSessions = async () => { authenticated++; return [authenticationSession]; };
+		service.getDraft('a').update('Do not send', undefined, { kind: 'all' });
+		for (const operation of [
+			() => service.sendMessage(), () => service.askForSummary('member-1'), () => service.retryMessage('old'),
+			() => service.startRoom({ maxTurns: 4 }), () => service.extendRun(4), () => service.pauseRoom(), () => service.stopRoom(),
+			() => service.addMember(), () => service.removeMember('member-1'), () => service.stopMember('member-1'), () => service.retryMember('member-1'),
+			() => service.setMemberModel('member-1', { id: 'allowed' }), () => service.setConfiguration({ mode: 'plan' }),
+			() => service.requestWorkspaceTrust(),
+		]) {
+			await assert.rejects(async () => operation(), /archive/);
+		}
+		await service.selectInbox('member-1');
+		assert.deepStrictEqual({
+			starts, trustPrompts, authenticated, requests: service.requests.get(), artifact: await service.getArtifact('a', 'patch'),
+		}, { starts: [], trustPrompts: [], authenticated: 0, requests: [], artifact: 'a/patch' });
+	});
+
+	desktopTest('inbox filters page sparse history without changing receipts, drafts, or loaded room history', async () => {
 		const { service, api } = setup();
 		await waitForState(service.availability, state => state === 'available');
+		api.getRoom = async id => withPeers(id);
+		const records = Array.from({ length: 401 }, (_, index) => ({
+			...post(`post-${index}`, `Post ${index}`), sequence: index + 1,
+			mentions: index % 2 ? ['member-1'] : ['member-2'],
+			deliveries: [{ memberId: index % 2 ? 'member-1' : 'member-2', state: 'pending' as const }],
+		}));
+		const original = JSON.stringify(records);
+		const queries: IAgentHostRoomMessageQuery[] = [];
+		api.getMessages = async (_id, query = {}) => {
+			queries.push(query);
+			const all = records.filter(message => !query.memberId || message.mentions.includes(query.memberId));
+			const candidates = all.filter(message => (query.after === undefined || message.sequence > query.after) && (query.before === undefined || message.sequence < query.before));
+			const page = query.after === undefined ? candidates.slice(-(query.limit ?? 100)) : candidates.slice(0, query.limit ?? 100);
+			return { messages: page, hasEarlier: !!page.length && all[0].sequence < page[0].sequence, hasLater: !!page.length && all.at(-1)!.sequence > page.at(-1)!.sequence };
+		};
 		await service.selectRoom('a');
-		let posted = false;
-		api.postMessage = async (_room, options) => { posted = true; return post(options.id, options.text); };
-		service.getDraft('a').update('Change direction', undefined);
-		await assert.rejects(service.sendMessage('steer'), /Sign in through the Accounts menu/);
-		assert.strictEqual(posted, false);
+		const roomHistory = service.messages.get().messages;
+		service.getDraft('a').update('Preserve me', undefined, { kind: 'member', memberId: 'member-2' });
+		await service.selectInbox('member-1');
+		await service.loadEarlierMessages();
+		const inbox = service.messages.get();
+		await service.selectInbox(undefined);
+		assert.deepStrictEqual({
+			inboxCount: inbox.messages.length, recipients: [...new Set(inbox.messages.flatMap(message => message.mentions))], earlier: inbox.hasEarlier,
+			roomHistory: service.messages.get().messages, receiptsUnchanged: JSON.stringify(records) === original,
+			bounded: queries.every(query => query.limit === 100), filtered: queries.some(query => query.memberId === 'member-1'),
+			draft: service.getDraft('a').state.get(),
+		}, {
+			inboxCount: 200, recipients: ['member-1'], earlier: false, roomHistory, receiptsUnchanged: true, bounded: true, filtered: true,
+			draft: { text: 'Preserve me', replyTo: undefined, audience: { kind: 'member', memberId: 'member-2' } },
+		});
+	});
+
+	desktopTest('switching inboxes during background refresh cannot publish stale rows or cancellation errors', async () => {
+		const { service, api, changed } = setup();
+		await waitForState(service.availability, state => state === 'available');
+		api.getRoom = async id => withPeers(id);
+		await service.selectRoom('a');
+		const pending = new DeferredPromise<IAgentHostRoomMessagePage>();
+		const requested = new DeferredPromise<void>();
+		const addressed = { ...post('addressed', 'Peer inbox'), sequence: 7, mentions: ['member-1'] };
+		api.getMessages = async (_id, query) => {
+			if (query?.memberId) {
+				return { messages: [addressed], hasEarlier: false, hasLater: false };
+			}
+			void requested.complete();
+			return pending.p;
+		};
+		changed.fire({ ...withPeers('a'), revision: 3, latestMessageSequence: 7 });
+		await requested.p;
+		await service.selectInbox('member-1');
+		await pending.complete({ messages: [post('stale', 'Old room page')], hasEarlier: false, hasLater: false });
+		await Promise.resolve();
+		assert.deepStrictEqual({
+			messages: service.messages.get().messages.map(message => message.id), inbox: service.inboxMemberId.get(),
+			loading: service.loading.get(), error: service.error.get(),
+		}, { messages: ['addressed'], inbox: 'member-1', loading: false, error: undefined });
 	});
 
 	desktopTest('retry delivery reuses the saved human message identity rather than posting a duplicate', async () => {
@@ -689,7 +738,7 @@ suite('CollaborationService', () => {
 		await waitForState(service.availability, state => state === 'available');
 		const message: IAgentHostRoomMessage = {
 			...post('original-id', '@Copilot-1 Please respond'),
-			mentions: ['member-a'], deliveries: [{ memberId: 'member-a', state: 'pending' }],
+			mentions: ['member-a'], deliveries: [{ memberId: 'member-a', state: 'interrupted' }],
 		};
 		api.getMessages = async () => ({ messages: [message], hasEarlier: false, hasLater: false });
 		await service.selectRoom('a');
@@ -700,17 +749,38 @@ suite('CollaborationService', () => {
 		assert.deepStrictEqual(calls, [['a', message.id]]);
 	});
 
+	for (const state of ['pending', 'reserved', 'submitted'] as const) {
+		desktopTest(`${state} inbox inputs cannot be retried or implicitly replayed`, async () => {
+			const { service, api, authenticationService } = setup();
+			await waitForState(service.availability, state => state === 'available');
+			const message: IAgentHostRoomMessage = {
+				...post('original', 'Keep the immutable input'),
+				mentions: ['member-1'], deliveries: [{ memberId: 'member-1', state, turnId: state === 'pending' ? undefined : 'original-turn' }],
+			};
+			api.getMessages = async () => ({ messages: [message], hasEarlier: false, hasLater: false });
+			await service.selectRoom('a');
+			let retries = 0;
+			let authentications = 0;
+			api.retryMessage = async () => { retries++; return message; };
+			authenticationService.getSessions = async () => { authentications++; return [authenticationSession]; };
+			await assert.rejects(service.retryMessage(message.id), /interrupted, cancelled, or failed delivery/);
+			assert.deepStrictEqual({ retries, authentications, messages: service.messages.get().messages }, {
+				retries: 0, authentications: 0, messages: [message],
+			});
+		});
+	}
+
 	desktopTest('a run requires the local host to accept the existing account credentials', async () => {
 		const { service, host, authenticationService, starts } = setup();
 		await waitForState(service.availability, state => state === 'available');
 		await service.selectRoom('a');
 		authenticationService.getSessions = async () => [authenticationSession];
 		host.authenticate = async () => ({ authenticated: false });
-		await assert.rejects(service.startRoom(), /did not accept/);
+		await assert.rejects(service.startRoom({ maxTurns: 4 }), /did not accept/);
 		assert.deepStrictEqual(starts, []);
 		host.authenticate = async () => ({ authenticated: true });
-		await service.startRoom();
-		assert.deepStrictEqual(starts, [{ roomId: 'a', limits: {} }]);
+		await service.startRoom({ maxTurns: 4 });
+		assert.deepStrictEqual(starts, [{ roomId: 'a', limits: { maxTurns: 4 } }]);
 	});
 
 	desktopTest('navigation during authentication cannot start a run in a different room', async () => {
@@ -719,7 +789,7 @@ suite('CollaborationService', () => {
 		await service.selectRoom('a');
 		const sessions = new DeferredPromise<readonly AuthenticationSession[]>();
 		authenticationService.getSessions = () => sessions.p;
-		const starting = service.startRoom();
+		const starting = service.startRoom({ maxTurns: 4 });
 		const rejected = assert.rejects(starting, isCancellationError);
 		await service.selectRoom('b');
 		await sessions.complete([authenticationSession]);
@@ -742,7 +812,7 @@ suite('CollaborationService', () => {
 		const { service, api, authenticationService, trusted, trustRequest, trustGrants, starts } = setup();
 		await waitForState(service.availability, value => value === 'available');
 		api.getRoom = async id => withPeers(id);
-		const message = { ...post('pending', '@Copilot-1 Retry'), mentions: ['member-1'], deliveries: [{ memberId: 'member-1', state: 'pending' as const }] };
+		const message = { ...post('pending', '@Copilot-1 Retry'), mentions: ['member-1'], deliveries: [{ memberId: 'member-1', state: 'failed' as const }] };
 		api.getMessages = async () => ({ messages: [message], hasEarlier: false, hasLater: false });
 		await service.selectRoom('a');
 		authenticationService.getSessions = async () => [authenticationSession];
@@ -751,15 +821,15 @@ suite('CollaborationService', () => {
 		const calls: string[] = [];
 		api.retryMember = async () => { calls.push('retryMember'); return withPeers('a'); };
 		api.retryMessage = async () => { calls.push('retryMessage'); return message; };
-		api.postMessage = async (_id, options) => { calls.push(options.mode ?? 'message'); return { ...post(options.id, options.text), sequence: message.sequence + 1 }; };
+		api.postMessage = async (_id, options) => { calls.push('message'); return { ...post(options.id, options.text), sequence: message.sequence + 1 }; };
 
-		await assert.rejects(service.startRoom(), /trust was not granted/);
+		await assert.rejects(service.startRoom({ maxTurns: 4 }), /trust was not granted/);
 		await assert.rejects(service.retryMember('member-1'), /trust was not granted/);
 		await assert.rejects(service.retryMessage('pending'), /trust was not granted/);
-		service.getDraft('a').update('@Copilot-1 Please work', undefined);
+		service.getDraft('a').update('@Copilot-1 Please work', undefined, { kind: 'member', memberId: 'member-1' });
 		await assert.rejects(service.sendMessage(), /trust was not granted/);
-		service.getDraft('a').update('Change direction', undefined);
-		await assert.rejects(service.sendMessage('steer'), /trust was not granted/);
+		service.getDraft('a').update('Change direction', undefined, { kind: 'all' });
+		await assert.rejects(service.sendMessage(), /trust was not granted/);
 		service.getDraft('a').update('One more question', undefined);
 		await assert.rejects(service.sendMessage(), /trust was not granted/);
 		await service.loadMessages();
@@ -780,12 +850,12 @@ suite('CollaborationService', () => {
 		const second = service.requestWorkspaceTrust();
 		assert.strictEqual(first, second);
 		await Promise.all([first, second]);
-		await service.startRoom();
+		await service.startRoom({ maxTurns: 4 });
 		await service.selectRoom('a');
-		await service.startRoom();
+		await service.startRoom({ maxTurns: 4 });
 		assert.deepStrictEqual({
 			prompts: trustPrompts.map(prompt => prompt.uri.toString()),
-			separateWorktreesExplained: trustPrompts[0]?.message?.includes('The coordinator and each worker use separate local worktrees'),
+			separateWorktreesExplained: trustPrompts[0]?.message?.includes('Each peer uses a separate local worktree'),
 			grants: trustGrants,
 			starts: starts.length,
 		}, {
@@ -802,7 +872,7 @@ suite('CollaborationService', () => {
 		api.getRoom = async id => withPeers(id);
 		await service.selectRoom('a');
 		authenticationService.getSessions = async () => [authenticationSession];
-		await service.startRoom();
+		await service.startRoom({ maxTurns: 4 });
 		assert.deepStrictEqual({ trustPrompts, trustGrants }, {
 			trustPrompts: [], trustGrants: [['file:///rooms/a/member-1', 'file:///rooms/a/member-2']],
 		});
@@ -818,7 +888,7 @@ suite('CollaborationService', () => {
 		const consent = new DeferredPromise<boolean>();
 		const prompted = new DeferredPromise<void>();
 		trustRequest.requestResourcesTrust = () => { void prompted.complete(); return consent.p; };
-		const starting = service.startRoom();
+		const starting = service.startRoom({ maxTurns: 4 });
 		const rejected = assert.rejects(starting, isCancellationError);
 		await prompted.p;
 		await service.selectRoom('b');

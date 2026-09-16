@@ -12,9 +12,9 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { IActionListDelegate, IActionListItem } from '../../../../../platform/actionWidget/browser/actionList.js';
 import { IActionWidgetService } from '../../../../../platform/actionWidget/browser/actionWidget.js';
 import { ModelSelection, SessionModelInfo } from '../../../../../platform/agentHost/common/state/protocol/state.js';
-import { IAgentHostRoomCoordinator, IAgentHostRoomMember } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoomMember } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { workbenchInstantiationService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
-import { CollaborationModelCatalog, CollaborationModelPicker, getCollaborationCoordinatorModelState, getCollaborationMemberModelState } from '../../browser/collaborationModelPicker.js';
+import { CollaborationModelCatalog, CollaborationModelPicker, getCollaborationMemberModelState } from '../../browser/collaborationModelPicker.js';
 import { stubCollaborationTestServices } from './collaborationTestServices.js';
 
 suite('CollaborationModelPicker', () => {
@@ -137,34 +137,6 @@ suite('CollaborationModelPicker', () => {
 		});
 	});
 
-	test('the coordinator model reports its independent pending and applied state', () => {
-		const coordinator: IAgentHostRoomCoordinator = {
-			id: 'coordinator',
-			name: 'Coordinator',
-			sessionUri: 'copilotcli:/coordinator',
-			chatUri: 'copilotcli:/coordinator/chat',
-			worktreeUri: 'file:///coordinator',
-			desiredModel: { id: 'model-b', config: { effort: 'high' } },
-			appliedModel: { id: 'model-a' },
-			pendingModel: { id: 'model-b', config: { effort: 'high' } },
-			state: 'working',
-			initialized: true,
-			cursor: 0,
-			eventSequence: 0,
-			eventCursor: 0,
-			pendingEvents: [],
-		};
-		assert.deepStrictEqual(getCollaborationCoordinatorModelState(coordinator, [
-			{ id: 'model-a', name: 'Model A', provider: 'copilotcli' },
-			{ id: 'model-b', name: 'Model B', provider: 'copilotcli' },
-		], true), {
-			selection: { id: 'model-b', config: { effort: 'high' } },
-			enabled: true,
-			detail: 'Applies on the next coordinator turn. Currently using Model A.',
-			error: undefined,
-		});
-	});
-
 	test('a peer that has already run reports its change as pending, not its model as unconfirmed', () => {
 		const member: IAgentHostRoomMember = {
 			id: 'peer', name: 'Copilot 1', sessionUri: 'copilotcli:/peer', state: 'working', turns: 3,
@@ -186,5 +158,15 @@ suite('CollaborationModelPicker', () => {
 			{ selection: { id: 'auto' }, enabled: true, detail: 'Applies when this peer starts.', error: 'Auto is unavailable' },
 			{ selection: { id: 'legacy' }, enabled: true, detail: 'Applies when this peer starts.', error: undefined },
 		]);
+	});
+
+	test('archive models remain historical and cannot offer to apply a future selection', () => {
+		const member: IAgentHostRoomMember = {
+			id: 'peer', name: 'Peer', sessionUri: 'copilotcli:/peer', state: 'stopped', turns: 0,
+			pendingModel: { id: 'model-b' },
+		};
+		assert.deepStrictEqual(getCollaborationMemberModelState(member, [], true, true), {
+			selection: { id: 'model-b' }, enabled: false, detail: 'Historical model selection. This archive cannot run.', error: undefined,
+		});
 	});
 });

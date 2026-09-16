@@ -6,7 +6,7 @@
 import assert from 'assert';
 import { IStringDictionary } from '../../../../../../../../base/common/collections.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../../../base/test/common/utils.js';
-import { IModelConfigurationAccess, getModelConfigProperty, getModelConfigSummary, isExtendedContext, MODEL_CONFIG_GROUP_CONTEXT } from '../../../../../browser/widget/input/modelPicker/modelPickerModelConfig.js';
+import { IModelConfigurationAccess, getModelConfigProperty, getModelConfigSummary, isExtendedContext, MODEL_CONFIG_GROUP_CONTEXT, MODEL_CONFIG_GROUP_EFFORT } from '../../../../../browser/widget/input/modelPicker/modelPickerModelConfig.js';
 import { getModelBadge } from '../../../../../browser/widget/input/modelPicker/modelPickerBadges.js';
 import { latestOfEachLine, parseModelLine } from '../../../../../browser/widget/input/modelPicker/modelPickerLineage.js';
 import { buildSpeedVariants, collapseSpeedVariants } from '../../../../../browser/widget/input/modelPicker/modelPickerVariants.js';
@@ -631,6 +631,24 @@ suite('Model picker destinations', () => {
 			showSuggested: true,
 		});
 		assert.deepStrictEqual(sections.unavailable, []);
+	});
+
+	test('configuration properties accept a readonly role getter and preserve schema defaults', () => {
+		const model = createConfigurableModel();
+		const reads: string[] = [];
+		const properties = [undefined, { reasoningEffort: 'xhigh' }].map(configuration => {
+			const property = getModelConfigProperty(model, {
+				getModelConfiguration: id => {
+					reads.push(id);
+					return configuration;
+				},
+			}, MODEL_CONFIG_GROUP_EFFORT);
+			return property && { key: property.key, value: property.value };
+		});
+		assert.deepStrictEqual({ properties, reads }, {
+			properties: [{ key: 'reasoningEffort', value: 'medium' }, { key: 'reasoningEffort', value: 'xhigh' }],
+			reads: [model.identifier, model.identifier],
+		});
 	});
 
 	test('context is extended only at the largest configured window', () => {

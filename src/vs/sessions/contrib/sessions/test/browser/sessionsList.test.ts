@@ -177,6 +177,22 @@ suite('Sessions - SessionsList', () => {
 			assert.deepStrictEqual(harness.commandService.calls.map(call => [call.commandId, call.args[0]]), [[OpenCollaborationRoomCommandId, 'room-1']]);
 		});
 
+		test('archived room rows clearly identify their read-only destination without becoming native sessions', () => {
+			const room = upcastPartial<IAgentHostRoom>({ id: 'archive-1', title: 'Earlier experiment', members: [], archived: true });
+			const { container, harness } = createSidebar({ rooms: [room] });
+			const row = container.querySelector<HTMLElement>('.session-placeholder')!;
+			const label = row.textContent;
+			row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+			row.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0, detail: 1 }));
+			assert.deepStrictEqual({
+				label, commands: harness.commandService.calls.map(call => [call.commandId, call.args[0]]),
+				nativeReads: harness.managementService.readSessions,
+			}, {
+				label: 'Earlier experimentArchive - read-only',
+				commands: [[OpenCollaborationRoomCommandId, 'archive-1']], nativeReads: [],
+			});
+		});
+
 		test('opens the collaboration destination with Enter and mouse activation', () => {
 			const { container, list, harness } = createSidebar();
 			list.focus();

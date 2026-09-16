@@ -22,6 +22,7 @@ import { defineMcpPluginTests } from './mcpPluginSuite.js';
 import { defineCopilotRuntimeMcpTests } from './copilotRuntimeMcpSuite.js';
 import { defineStateOperationsTests } from './stateOperationsSuite.js';
 import { defineSubagentTests } from './subagentSuite.js';
+import { defineNativeModelTeamTests } from './nativeModelTeamSuite.js';
 import { defineTurnLifecycleTests } from './turnLifecycleSuite.js';
 import { defineWorkspaceTests } from './workspaceSuite.js';
 import { defineCopilotCoverageTests } from './copilotCoverageSuite.js';
@@ -155,6 +156,7 @@ function defineSuite(config: IAgentHostE2EProviderConfig, options: IDefineOption
 		});
 
 		defineAutomationsTests(context);
+		defineNativeModelTeamTests(context);
 
 		// Suites that contain only conformance-tier scenarios.
 		if (options.tier === 'conformance') {

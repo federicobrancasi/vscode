@@ -9,10 +9,14 @@ import { IOpenerService } from '../../../../../../../platform/opener/common/open
 import { StateType } from '../../../../../../../platform/update/common/update.js';
 import { IChatEntitlementService } from '../../../../../../services/chat/common/chatEntitlementService.js';
 import { IModelControlEntry, ILanguageModelChatMetadataAndIdentifier, ILanguageModelsService } from '../../../../common/languageModels.js';
+import type { IModelPickerAdditionalActionGroup } from './modelPickerActionItem.js';
 
 export interface IBuildModelPickerItemsOptions {
 	readonly models: ILanguageModelChatMetadataAndIdentifier[];
 	readonly selectedModelId: string | undefined;
+	/** Hides the checkmark without changing the current model's placement or configuration. */
+	readonly suppressModelSelection?: boolean;
+	readonly additionalActionGroups?: readonly IModelPickerAdditionalActionGroup[];
 	readonly recentModelIds: string[];
 	readonly pinnedModelIds: string[];
 	readonly controlModels: IStringDictionary<IModelControlEntry>;

@@ -24,9 +24,16 @@ export interface IModelPickerConfigurationHost {
 	readonly shouldShowCacheBreakHint: () => boolean;
 	readonly getCacheBreakLearnMoreLink: () => IActionListHeaderLink | undefined;
 	readonly dismissCacheBreakHint: () => void;
+	readonly onDidHide?: () => void;
 }
 
 export class ModelPickerConfiguration {
+	private _visible = false;
+	private _showVersion = 0;
+
+	get isVisible(): boolean {
+		return this._visible;
+	}
 
 	constructor(
 		private readonly _host: IModelPickerConfigurationHost,
@@ -80,28 +87,46 @@ export class ModelPickerConfiguration {
 		button.ariaLabel = ariaParts.join(', ');
 	}
 
-	show(button: HTMLElement | undefined, focusGroup?: string): void {
+	hide(): void {
+		if (this._visible) {
+			this._actionWidgetService.hide(true);
+		}
+	}
+
+	show(button: HTMLElement | undefined, focusGroup?: string): boolean {
 		if (this._host.isDisabled() || !button || !this._host.getSelectedModel()) {
-			return;
+			return false;
 		}
 
 		const items = this._buildItems();
 		if (!items.length) {
-			return;
+			return false;
 		}
 
+		this.hide();
+		const showVersion = ++this._showVersion;
+		this._visible = true;
 		const previouslyFocusedElement = dom.getActiveElement();
 		const delegate = {
 			onSelect: async (action: IActionWidgetDropdownAction) => {
 				this._actionWidgetService.focusItemById(action.id);
 				await action.run();
-				this._actionWidgetService.updateItems(this._buildItems(), action.id);
+				if (this._visible && showVersion === this._showVersion) {
+					this._actionWidgetService.updateItems(this._buildItems(), action.id);
+				}
 			},
 			onHide: () => {
-				button.setAttribute('aria-expanded', 'false');
-				if (dom.isHTMLElement(previouslyFocusedElement)) {
-					previouslyFocusedElement.focus();
+				if (!this._visible || showVersion !== this._showVersion) {
+					return;
 				}
+				this._visible = false;
+				button.setAttribute('aria-expanded', 'false');
+				if (dom.isHTMLElement(previouslyFocusedElement) && previouslyFocusedElement.isConnected) {
+					previouslyFocusedElement.focus();
+				} else if (button.isConnected) {
+					button.focus();
+				}
+				this._host.onDidHide?.();
 			}
 		};
 
@@ -135,6 +160,7 @@ export class ModelPickerConfiguration {
 				this._actionWidgetService.focusItemById(groupItem.item.id);
 			}
 		}
+		return true;
 	}
 
 	private _getConfigProperty(group: string) {

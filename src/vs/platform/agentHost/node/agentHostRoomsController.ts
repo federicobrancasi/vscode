@@ -7,13 +7,13 @@ import { URI } from '../../../base/common/uri.js';
 import { localize } from '../../../nls.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { ILogService } from '../../log/common/log.js';
-import { IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomCoordinatorSnapshot, IAgentHostRoomsService } from '../common/agentHostRooms.js';
+import { IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomsService } from '../common/agentHostRooms.js';
 import { ModelSelection } from '../common/state/sessionState.js';
 import { IAgentConfigurationService } from './agentConfigurationService.js';
-import { AgentHostRooms, IRoomCoordinatorTools, IRoomSessionTools } from './agentHostRooms.js';
+import { AgentHostRooms, IRoomSessionTools } from './agentHostRooms.js';
 import { AgentHostRoomsRuntime, IRoomSessionLifecycle } from './agentHostRoomsRuntime.js';
 import { AgentHostRoomsStorage } from './agentHostRoomsStorage.js';
-import { IRoomRecord, IRoomStorage } from './agentHostRoomsTypes.js';
+import { IRoomArchive, IRoomRecord, IRoomStorage } from './agentHostRoomsTypes.js';
 import { IAgentHostProviderService } from './agentHostProviderService.js';
 import { AgentHostStateManager, IAgentHostStateManager } from './agentHostStateManager.js';
 import { IAgentHostTurnService } from './agentHostTurnService.js';
@@ -21,19 +21,13 @@ import { IAgentHostTurnService } from './agentHostTurnService.js';
 export const IAgentHostRoomsController = createDecorator<IAgentHostRoomsController>('agentHostRoomsController');
 
 /** Internal authority; SDK tools never receive the human room-control surface. */
-export interface IAgentHostRoomsController extends IAgentHostRoomsService, IRoomSessionTools, IRoomCoordinatorTools {
+export interface IAgentHostRoomsController extends IAgentHostRoomsService, IRoomSessionTools {
 	setMemberConfiguration(session: string, configuration: Partial<IAgentHostRoomConfiguration>, onApplied?: () => void): Promise<void>;
 	getMemberModelForChat(session: string, chat: string): Promise<ModelSelection | undefined>;
 	setMemberModelForChat(session: string, chat: string, model: ModelSelection): Promise<void>;
 	isRoomSessionUri(session: string): boolean;
+	isRoomStateReady(): boolean;
 	isAdmittedTurn(session: string, chat: string, turnId: string): boolean;
-	getCoordinatorModelForChat(session: string, chat: string): Promise<ModelSelection | undefined>;
-	setCoordinatorModelForChat(session: string, chat: string, model: ModelSelection): Promise<void>;
-	isCoordinatorSessionUri(session: string): boolean;
-	isCoordinatorChat(session: string, chat: string): boolean;
-	isCoordinatorAdmittedTurn(session: string, chat: string, turnId: string): boolean;
-	isCoordinatorDirectTurnAvailable(session: string, chat: string): boolean;
-	getCoordinatorTurnSnapshot(session: string, chat: string, turnId: string): Promise<IAgentHostRoomCoordinatorSnapshot | undefined>;
 	shutdown(): Promise<void>;
 }
 
@@ -41,7 +35,7 @@ export interface IAgentHostRoomsController extends IAgentHostRoomsService, IRoom
 export class AgentHostRoomsController extends AgentHostRooms implements IAgentHostRoomsController {
 	constructor(
 		lifecycle: IRoomSessionLifecycle,
-		private readonly storage: URI | IRoomStorage | undefined,
+		private readonly roomStorage: URI | IRoomStorage | undefined,
 		@IAgentHostStateManager stateManager: AgentHostStateManager,
 		@IAgentHostTurnService turnService: IAgentHostTurnService,
 		@IAgentHostProviderService providers: IAgentHostProviderService,
@@ -49,7 +43,7 @@ export class AgentHostRoomsController extends AgentHostRooms implements IAgentHo
 		@ILogService logService: ILogService,
 	) {
 		super(
-			URI.isUri(storage) ? new AgentHostRoomsStorage(storage, logService) : storage ?? new UnavailableRoomStorage(),
+			URI.isUri(roomStorage) ? new AgentHostRoomsStorage(roomStorage, logService) : roomStorage ?? new UnavailableRoomStorage(),
 			new AgentHostRoomsRuntime(lifecycle, stateManager, turnService, providers, configurationService),
 			logService,
 		);
@@ -57,12 +51,13 @@ export class AgentHostRoomsController extends AgentHostRooms implements IAgentHo
 
 	override async getCapabilities() {
 		const capabilities = await super.getCapabilities();
-		return { ...capabilities, available: !!this.storage && capabilities.available };
+		return { ...capabilities, available: !!this.roomStorage && capabilities.available };
 	}
 }
 
 class UnavailableRoomStorage implements IRoomStorage {
 	async load(): Promise<readonly IRoomRecord[]> { return []; }
+	async loadArchives(): Promise<readonly IRoomArchive[]> { return []; }
 	async save(): Promise<void> { throw this.unavailable(); }
 	async isRepository(): Promise<boolean> { return false; }
 	async resolveRepository(): Promise<{ repositoryUri: string; baseRevision: string }> { throw this.unavailable(); }

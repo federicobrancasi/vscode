@@ -4054,9 +4054,10 @@ suite('AgentHostChatContribution', () => {
 			const posts: IAgentHostRoomPostOptions[] = [];
 			agentHostService.rooms = new class extends mock<IAgentHostRoomsService>() {
 				override async listRooms() { return [room]; }
+				override async getCapabilities() { return { version: 2 as const, available: true, maxWorkers: 10, supportsInbox: true }; }
 				override async postMessage(_roomId: string, message: IAgentHostRoomPostOptions) {
 					posts.push(message);
-					return { ...message, authorId: 'human', authorName: 'You', authorKind: 'human' as const, kind: 'message' as const, timestamp: 0, sequence: 1, deliveries: [] };
+					return { ...message, authorId: 'human', authorName: 'You', authorKind: 'human' as const, kind: 'message' as const, timestamp: 0, sequence: 1, deliveries: [{ memberId: 'member-a', state: 'pending' as const }] };
 				}
 			};
 			agentHostService.dispatchedActions.length = 0;
@@ -7467,6 +7468,7 @@ suite('AgentHostChatContribution', () => {
 			});
 			agentHostService.rooms = new class extends mock<IAgentHostRoomsService>() {
 				override async listRooms() { return [room]; }
+				override async getCapabilities() { return { version: 2 as const, available: true, maxWorkers: 10, supportsInbox: true }; }
 			};
 			const notifications = new Map<string, IChatInputNotification>();
 			instantiationService.stub(IChatInputNotificationService, {
@@ -7492,6 +7494,50 @@ suite('AgentHostChatContribution', () => {
 				resources: [resource.toString()],
 				notificationsAfterClose: 0,
 			});
+		});
+
+		for (const historicalSession of [false, true]) {
+			test(`archived room ${historicalSession ? 'historical' : 'peer'} sessions remain inspect-only`, async () => {
+				const { sessionHandler, agentHostService } = createContribution(disposables);
+				const sessionUri = AgentSession.uri('copilot', 'archive-peer');
+				const room = upcastPartial<IAgentHostRoom>({
+					id: 'archive', title: 'Earlier experiment', archived: true,
+					members: historicalSession ? [] : [{ id: 'peer', name: 'Peer', sessionUri: sessionUri.toString(), state: 'stopped', turns: 1 }],
+					archivedSessions: historicalSession ? [{ id: 'historical', name: 'Historical participant', sessionUri: sessionUri.toString() }] : undefined,
+				});
+				agentHostService.rooms = new class extends mock<IAgentHostRoomsService>() {
+					override async listRooms() { return [room]; }
+				};
+				const session = await sessionHandler.provideChatSessionContent(URI.parse('agent-host-copilot:/archive-peer'), CancellationToken.None);
+				disposables.add(toDisposable(() => session.dispose()));
+				assert.deepStrictEqual({
+					readOnly: session.isReadOnly?.get(), pending: session.supportsPendingRequests,
+					fork: session.forkSession, rename: session.renameSession, interrupt: session.interruptActiveResponseCallback,
+					createdSessions: agentHostService.createSessionCalls.length, turns: agentHostService.turnActions.length,
+				}, { readOnly: true, pending: false, fork: undefined, rename: undefined, interrupt: undefined, createdSessions: 0, turns: 0 });
+			});
+		}
+
+		test('a room session on an unsupported host is read-only without affecting ordinary session behavior', async () => {
+			const { sessionHandler, agentHostService } = createContribution(disposables);
+			const sessionUri = AgentSession.uri('copilot', 'unsupported-peer');
+			const room = upcastPartial<IAgentHostRoom>({
+				id: 'unsupported', title: 'Unsupported room',
+				members: [{ id: 'peer', name: 'Peer', sessionUri: sessionUri.toString(), state: 'idle', turns: 1 }],
+			});
+			agentHostService.rooms = new class extends mock<IAgentHostRoomsService>() {
+				override async listRooms() { return [room]; }
+				override async getCapabilities() { return { version: 1 as const, available: true, maxWorkers: 10 }; }
+			};
+			const session = await sessionHandler.provideChatSessionContent(URI.parse('agent-host-copilot:/unsupported-peer'), CancellationToken.None);
+			disposables.add(toDisposable(() => session.dispose()));
+			const ordinary = await sessionHandler.provideChatSessionContent(URI.parse('agent-host-copilot:/ordinary-peer'), CancellationToken.None);
+			disposables.add(toDisposable(() => ordinary.dispose()));
+			assert.deepStrictEqual({
+				readOnly: session.isReadOnly?.get(), pending: session.supportsPendingRequests,
+				ordinaryReadOnly: ordinary.isReadOnly?.get(), ordinaryPending: ordinary.supportsPendingRequests,
+				createdSessions: agentHostService.createSessionCalls.length, turns: agentHostService.turnActions.length,
+			}, { readOnly: true, pending: false, ordinaryReadOnly: false, ordinaryPending: true, createdSessions: 0, turns: 0 });
 		});
 
 		test('archived session read-only state follows session status', async () => {

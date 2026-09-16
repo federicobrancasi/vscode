@@ -9,12 +9,14 @@ import { Schemas } from '../../../../base/common/network.js';
 import { isObject, isStringArray } from '../../../../base/common/types.js';
 import { StopWatch } from '../../../../base/common/stopwatch.js';
 import { URI } from '../../../../base/common/uri.js';
+import { localize } from '../../../../nls.js';
 import { IFileService } from '../../../files/common/files.js';
 import { ILogService, LogLevel } from '../../../log/common/log.js';
 import { AgentSession } from '../../common/agent.js';
 import { getByokLmSelectionModelId, resolveByokLmEnablement, type IByokLmModelInfo } from '../../common/agentHostByokLm.js';
 import { AgentHostByokModelsEnabledConfigKey, AgentHostSessionSyncEnabledConfigKey, platformRootSchema, type AgentHostMcpServers } from '../../common/agentHostSchema.js';
 import { CopilotCliConfigKey, copilotCliConfigSchema, normalizeModelFamilyAlias, normalizeToolSearchDeferThreshold, resolveModelCapabilityOverrideField } from '../../common/copilotCliConfig.js';
+import { CopilotModelTeamSupportConfigKey, copilotModelTeamRuntimeSchema, ICopilotModelTeam } from '../../common/copilotModelTeam.js';
 import { IAgentHostOTelService } from '../../common/otel/agentHostOTelService.js';
 import { reasoningEffortLevels, type ReasoningEffortLevel } from '../../common/reasoningEffort.js';
 import { getSessionSandboxOverrides } from '../sessionSandbox.js';
@@ -23,7 +25,7 @@ import { projectCopilotSandboxPolicy } from './copilotSandboxPolicy.js';
 import { autoModeTiers, isAutoModeTier, normalizeAutoModeTier, type AutoModeTier } from '../../common/autoModeTiers.js';
 import { SEMANTIC_SEARCH_TOOL_NAME } from '../../common/semanticSearchConstants.js';
 import type { ModelSelection, ToolDefinition } from '../../common/state/protocol/state.js';
-import { ContextSizeConfigKey } from '../../common/agentModelConfiguration.js';
+import { ContextSizeConfigKey, ThinkingLevelConfigKey } from '../../common/agentModelConfiguration.js';
 import { RUNTIME_TOOL_SEARCH_TOOL_NAME } from '../../common/toolSearchConstants.js';
 import type { ActiveClientToolSet } from '../activeClientState.js';
 import { IAgentConfigurationService } from '../agentConfigurationService.js';
@@ -32,7 +34,7 @@ import { IAgentHostTerminalManager } from '../agentHostTerminalManager.js';
 import { IAgentHostSessionOpenTelemetry } from '../agentHostSessionOpenTelemetry.js';
 import { IAgentHostRoomsController } from '../agentHostRoomsController.js';
 import { roomExcludedTools } from '../agentHostRoomsTypes.js';
-import { createCopilotRoomCoordinatorTools, createCopilotRoomTools } from './copilotRoomTools.js';
+import { createCopilotRoomTools } from './copilotRoomTools.js';
 import { IByokLmBridgeRegistry } from '../byokLmBridgeRegistry.js';
 import { IByokLmProxyService, type IByokLmProxyHandle } from './byokLmProxyService.js';
 import type { ICopilotMcpServerInfo, ICopilotPluginInfo } from './copilotAgent.js';
@@ -45,12 +47,12 @@ import { EPHEMERAL_DISABLED_COPILOT_TOOLS } from './copilotToolDisplay.js';
 import './prompts/allPrompts.js';
 import { agentHostPromptRegistry, type IAgentHostPromptContext } from './prompts/promptRegistry.js';
 import { applyConfiguredPromptOverrides } from './prompts/promptOverride.js';
-import { describeSystemMessageConfig, fullSystemPrompt } from './prompts/systemMessage.js';
+import { appendSystemMessageContent, describeSystemMessageConfig, fullSystemPrompt } from './prompts/systemMessage.js';
+import { COPILOT_NATIVE_TEAM_INSTRUCTIONS, COPILOT_TEAM_SCOUT, COPILOT_TEAM_WORKER, createCopilotNativeTeam, withCopilotTeamAgents } from './copilotNativeTeam.js';
 import { buildSandboxConfigForSdk, type SandboxConfig } from './sandboxConfigForSdk.js';
 import { CLIENT_TOOL_SEARCH_REFERENCE_NAME, agentHostModelSupportsToolSearch } from './toolSearchDeferral.js';
 
-export const ThinkingLevelConfigKey = 'thinkingLevel';
-export { ContextSizeConfigKey };
+export { ContextSizeConfigKey, ThinkingLevelConfigKey };
 /**
  * @deprecated Legacy config key that stored the resolved tier string (`'default'` / `'long_context'`)
  * directly. Replaced by the numeric {@link ContextSizeConfigKey}; still read from persisted sessions
@@ -128,6 +130,7 @@ export interface IActiveClientSnapshot {
 	readonly tools: readonly ToolDefinition[];
 	readonly plugins: readonly ICopilotPluginInfo[];
 	readonly mcpServers: AgentHostMcpServers;
+	readonly modelTeam?: ICopilotModelTeam;
 }
 
 /**
@@ -660,7 +663,7 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 			// Only a session with no events on disk may fall back to creating a
 			// fresh one under the same ID (seeding model & working directory
 			// from stored metadata); every other failure propagates.
-			if (this._rooms.isRoomSessionUri(runtime.configurationResource.toString()) || !shouldCreateEmptySessionAfterResumeError(resumeError)) {
+			if (plan.snapshot.modelTeam || this._rooms.isRoomSessionUri(runtime.configurationResource.toString()) || !shouldCreateEmptySessionAfterResumeError(resumeError)) {
 				this._logService.warn(`[Copilot:${plan.sessionId}] Resume failure cannot replace the preserved session with an empty one`);
 				throw resumeError;
 			}
@@ -696,7 +699,7 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 			...config,
 			sessionId: plan.sessionId,
 			model: plan.model?.id,
-			reasoningEffort: resolveCopilotReasoningEffort(plan.model, this._configurationService, this._logService, plan.sessionId),
+			reasoningEffort: plan.snapshot.modelTeam ? getCopilotReasoningEffort(plan.model) : resolveCopilotReasoningEffort(plan.model, this._configurationService, this._logService, plan.sessionId),
 			contextTier: getCopilotContextTier(plan.model, plan.longContextWindow, plan.freeLongContext),
 			...toSdkCapiSessionOptions(resolveCopilotAutoTier(plan.model, this._configurationService, this._logService, plan.sessionId)),
 			...(plan.resolvedAgentName ? { agent: plan.resolvedAgentName } : {}),
@@ -890,15 +893,19 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		// createSession and resumeSession advertise the models to the runtime.
 		const byok = await this._resolveByokSessionConfig(plan.sessionId);
 		const roomSessionUri = runtime.configurationResource.toString();
-		const isRoomCoordinator = this._rooms.isCoordinatorSessionUri(roomSessionUri);
-		const rooms = this._rooms.isRoomSessionUri(roomSessionUri) || isRoomCoordinator ? this._rooms : undefined;
+		const rooms = this._rooms.isRoomSessionUri(roomSessionUri) ? this._rooms : undefined;
+		const modelTeam = plan.snapshot.modelTeam;
+		if (modelTeam && (rooms || plan.isEphemeral || plan.workspaceless || plan.hasScopedEditSurface)) {
+			throw new Error(localize('copilot.teamSurfaceUnsupported', "Model teams require an ordinary workspace chat outside Agent Collab."));
+		}
+		if (modelTeam && this._configurationService.getRootValue(copilotModelTeamRuntimeSchema, CopilotModelTeamSupportConfigKey) !== 1) {
+			throw new Error(localize('copilot.teamRuntimeUnsupported', "The connected Copilot runtime does not support native model teams."));
+		}
 		const roomSessionId = AgentSession.id(runtime.configurationResource);
-		const roomTools = !rooms ? [] : isRoomCoordinator
-			? createCopilotRoomCoordinatorTools(roomSessionId, rooms)
-			: createCopilotRoomTools(roomSessionId, rooms);
+		const roomTools = rooms ? createCopilotRoomTools(roomSessionId, rooms) : [];
 		const enableCustomTerminalTool = this._configurationService.getRootValue(copilotCliConfigSchema, CopilotCliConfigKey.EnableCustomTerminalTool) === true;
 		let shellTools: Awaited<ReturnType<typeof createShellTools>> = [];
-		if (enableCustomTerminalTool && !isRoomCoordinator) {
+		if (enableCustomTerminalTool) {
 			if (!plan.shellManager) {
 				throw new Error(`ShellManager is required to launch Copilot session '${plan.sessionId}'`);
 			}
@@ -916,7 +923,17 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		// An ephemeral session skips the explicit enumeration (and its file I/O). The SDK can
 		// still discover agents from `pluginDirectories`; suppressing that too would also drop
 		// skills and instructions, so it is left alone.
-		const customAgents = plan.isEphemeral ? [] : await toSdkSessionCustomAgents(plugins, plan.resolvedAgentName, this._fileService);
+		let customAgents = plan.isEphemeral ? [] : await toSdkSessionCustomAgents(plugins, plan.resolvedAgentName, this._fileService);
+		const teamEffort = modelTeam ? {
+			worker: getCopilotReasoningEffort(modelTeam.worker),
+			scout: modelTeam.scout ? getCopilotReasoningEffort(modelTeam.scout) : undefined,
+		} : undefined;
+		if (modelTeam) {
+			if (plugins.some(plugin => plugin.agents.some(agent => agent.name === COPILOT_TEAM_WORKER || agent.name === COPILOT_TEAM_SCOUT))) {
+				throw new Error(localize('copilot.teamPluginConflict', "A plugin agent uses a reserved model-team name. Rename that agent before enabling the team."));
+			}
+			customAgents = withCopilotTeamAgents(customAgents, modelTeam, teamEffort);
+		}
 		const skillDirectories = toSdkSkillDirectories(pluginsWithoutDirs.flatMap(p => p.skills));
 		const instructionDirectories = toSdkInstructionDirectories(plugins.flatMap(p => p.instructions));
 		const model = plan.kind === 'create' ? plan.model : plan.fallback.model;
@@ -938,17 +955,13 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		});
 		const availableTools = getToolFilterOverride(availableToolsOverride, 'availableTools', modelId, this._logService, plan.sessionId);
 		const excludedTools = getToolFilterOverride(excludedToolsOverride, 'excludedTools', modelId, this._logService, plan.sessionId);
-		const sdkAvailableTools = isRoomCoordinator
-			? roomTools.map(tool => tool.name)
-			: availableTools && rooms
-				? [...(toSdkToolFilterPatterns(availableTools) ?? []), ...roomTools.map(tool => tool.name)]
-				: toSdkToolFilterPatterns(availableTools);
+		const sdkAvailableTools = availableTools && rooms
+			? [...(toSdkToolFilterPatterns(availableTools) ?? []), ...roomTools.map(tool => tool.name)]
+			: toSdkToolFilterPatterns(availableTools);
 		const configuredSdkExcludedTools = plan.isEphemeral
 			? [...(toSdkToolFilterPatterns(excludedTools) ?? []), ...EPHEMERAL_DISABLED_COPILOT_TOOLS]
 			: toSdkToolFilterPatterns(excludedTools);
-		const clientToolNames = isRoomCoordinator
-			? new Set<string>()
-			: filterClientToolNames(clientToolNamesFromSnapshot(plan.snapshot), availableTools, excludedTools);
+		const clientToolNames = filterClientToolNames(clientToolNamesFromSnapshot(plan.snapshot), availableTools, excludedTools);
 		const sdkExcludedTools = clientToolNames.has(SEMANTIC_SEARCH_TOOL_NAME)
 			? configuredSdkExcludedTools
 			: [...new Set([...(configuredSdkExcludedTools ?? []), `builtin:${SEMANTIC_SEARCH_TOOL_NAME}`])];
@@ -973,7 +986,7 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 			&& agentHostModelSupportsToolSearch(effectiveModel?.id)
 			&& clientToolNames.has(CLIENT_TOOL_SEARCH_REFERENCE_NAME);
 		const toolSearchDeferThreshold = normalizeToolSearchDeferThreshold(this._configurationService.getRootValue(copilotCliConfigSchema, CopilotCliConfigKey.ToolSearchDeferThreshold));
-		const tools = isRoomCoordinator ? [] : [...shellTools, ...runtime.createClientSdkTools(toolSearchActive), ...runtime.createServerSdkTools()];
+		const tools = [...shellTools, ...runtime.createClientSdkTools(toolSearchActive), ...runtime.createServerSdkTools()];
 		const promptOverrides = await applyConfiguredPromptOverrides(promptOverrideString, promptOverrideFile, tools, this._fileService, this._logService);
 		const hooks = toSdkHooks(pluginsWithoutDirs.flatMap(p => p.hooks), {
 			onPreToolUse: async input => {
@@ -1000,9 +1013,10 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 		// Resolved once per (re)launch — the SDK has no mid-session system-message
 		// update, so this reflects the model/tools/settings at launch time. Log a
 		// summary at info for prompt observability; the full config at trace.
-		const systemMessage = promptOverrides.systemPrompt !== undefined
+		const baseSystemMessage = promptOverrides.systemPrompt !== undefined
 			? fullSystemPrompt(promptOverrides.systemPrompt)
 			: agentHostPromptRegistry.resolveSystemMessageConfig(effectiveModel, promptContext);
+		const systemMessage = modelTeam ? appendSystemMessageContent(baseSystemMessage, COPILOT_NATIVE_TEAM_INSTRUCTIONS) : baseSystemMessage;
 		this._logService.info(`[Copilot:${plan.sessionId}] Resolved system message: ${describeSystemMessageConfig(systemMessage)}`);
 		const additionalDisabledMcpServers = plan.isEphemeral ? [
 			...plugins.flatMap(plugin => plugin.mcpServers.map(server => server.name)),
@@ -1039,9 +1053,8 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 			clientName: AGENT_HOST_COPILOT_CLIENT_NAME,
 			streaming: true,
 			// Resume only: `_createSession` re-resolves the full effort for a create,
-			// while a resumed session keeps the effort the runtime journaled unless
-			// an override is configured.
-			...(plan.kind === 'resume' ? { reasoningEffort: resolveConfiguredReasoningEffortOverride(model, this._configurationService, this._logService, plan.sessionId) } : {}),
+			// Teams restore their role selection; ordinary resumes retain journaled effort unless overridden.
+			...(plan.kind === 'resume' ? { reasoningEffort: modelTeam ? getCopilotReasoningEffort(model) : resolveConfiguredReasoningEffortOverride(model, this._configurationService, this._logService, plan.sessionId) } : {}),
 			...(plan.kind === 'resume' ? toSdkCapiSessionOptions(resolveConfiguredAutoTierOverride(model, this._configurationService, this._logService, plan.sessionId)) : {}),
 			modelCapabilities,
 			enableMcpApps: true,
@@ -1058,6 +1071,7 @@ export class CopilotSessionLauncher implements ICopilotSessionLauncher {
 			onExitPlanModeRequest: (request, invocation) => runtime.handleExitPlanModeRequest(request, invocation),
 			workingDirectory: plan.workingDirectory?.fsPath,
 			customAgents: rooms ? [] : customAgents,
+			...(modelTeam ? { team: createCopilotNativeTeam(modelTeam, clientToolNames, shellTools.map(tool => tool.name), teamEffort) } : {}),
 			agent: rooms ? undefined : plan.resolvedAgentName,
 			skillDirectories,
 			instructionDirectories,

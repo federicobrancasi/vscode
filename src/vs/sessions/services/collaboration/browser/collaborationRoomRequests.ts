@@ -78,7 +78,7 @@ export class CollaborationRoomRequests extends Disposable {
 			// A member's session only exists once a turn has been admitted for it, so a
 			// room that was created and never started has nothing to observe. Subscribing
 			// anyway reports every peer as a failure the moment the room is reopened.
-			const members = room?.members.filter(member => member.turns > 0 && !['pending', 'starting', 'failed'].includes(member.state)).slice(0, MAX_ROOM_WORKERS) ?? [];
+			const members = room && !room.archived ? room.members.filter(member => !member.removed && member.turns > 0 && !['pending', 'starting', 'failed'].includes(member.state)).slice(0, MAX_ROOM_WORKERS) : [];
 			const desired = new Map(members.map(member => [member.chatUri ?? buildDefaultChatUri(member.sessionUri), member]));
 			for (const uri of this.subscriptionErrors.keys()) {
 				if (!desired.has(uri)) {

@@ -15,6 +15,7 @@ import { resolveAgentHostSession } from '../common/agentHostSubscriptionService.
 import { AgentHostConfigKey, agentHostCustomizationConfigSchema, defaultAgentHostCustomizationConfigValues } from '../common/agentHostCustomizationConfig.js';
 import { getAgentCustomizationSettingsEntries, getProviderBackedRootConfigKeys, withAgentCustomizationSettings, type IAgentCustomizationSettingsRegistration } from '../common/agentCustomizationSettings.js';
 import { copilotCliConfigSchema } from '../common/copilotCliConfig.js';
+import { copilotModelTeamRuntimeSchema } from '../common/copilotModelTeam.js';
 import { agentMergeRootConfigSchema } from '../common/agentMerge.js';
 import { sandboxConfigSchema } from '../common/sandboxConfigSchema.js';
 import { agentHostProxyConfigSchema, clientOwnedApprovalRootConfigKeys, platformRootSchema, type ISchema, type SchemaDefinition, type SchemaValue } from '../common/agentHostSchema.js';
@@ -183,11 +184,12 @@ export class AgentConfigurationService extends Disposable implements IAgentConfi
 		const ownSchema = agentHostCustomizationConfigSchema.toProtocol();
 		const sandboxSchema = sandboxConfigSchema.toProtocol();
 		const copilotCliSchema = copilotCliConfigSchema.toProtocol();
+		const modelTeamRuntimeSchema = copilotModelTeamRuntimeSchema.toProtocol();
 		const agentMergeSchema = agentMergeRootConfigSchema.toProtocol();
 		this._stateManager.rootState.config = {
 			schema: {
 				type: 'object',
-				properties: { ...existing?.schema.properties, ...ownSchema.properties, ...sandboxSchema.properties, ...copilotCliSchema.properties, ...agentMergeSchema.properties },
+				properties: { ...existing?.schema.properties, ...ownSchema.properties, ...sandboxSchema.properties, ...copilotCliSchema.properties, ...modelTeamRuntimeSchema.properties, ...agentMergeSchema.properties },
 			},
 			values: { ...existing?.values, ...this._loadPersistedRootConfig() },
 		};

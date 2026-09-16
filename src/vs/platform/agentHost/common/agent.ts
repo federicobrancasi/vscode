@@ -806,9 +806,6 @@ export interface IAgentChats {
 	/** Apply current host configuration to an existing backing without starting a turn. */
 	applyConfiguration?(chat: URI, context: AgentChatOperationContext): Promise<void>;
 
-	/** Inject guidance without opening a new turn; true means the provider acknowledged acceptance. */
-	sendSteeringInCurrentTurn?(chat: URI, turnId: string, prompt: string, context: AgentChatOperationContext): Promise<boolean>;
-
 	/** Fail closed when provider content exclusions do not permit sharing the named files. */
 	assertContentAccess?(chat: URI, paths: readonly string[], context: AgentChatOperationContext): Promise<void>;
 
@@ -1233,8 +1230,8 @@ export interface IAgent {
 
 	// ---- Configuration and customizations ----------------------------------
 
-	/** Resolve provider-owned chat configuration; host-owned worktree fields are omitted. */
-	resolveChatConfig(params: IAgentResolveChatConfigParams): Promise<ResolveSessionConfigResult>;
+	/** Resolve provider-owned configuration, omitting host-owned worktree fields. Restore may retain unavailable preferences; execution must still validate them. */
+	resolveChatConfig(params: IAgentResolveChatConfigParams, reason?: 'restore'): Promise<ResolveSessionConfigResult>;
 
 	/** Select provider-owned configuration inherited by a newly created chat. */
 	getInheritedChatConfig(config: Readonly<Record<string, unknown>>): Record<string, unknown> | undefined;

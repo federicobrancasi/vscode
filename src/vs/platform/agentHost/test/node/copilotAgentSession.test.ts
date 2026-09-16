@@ -54,7 +54,6 @@ import { ActiveClientToolSet } from '../../node/activeClientState.js';
 import { type CopilotSessionLaunchPlan, type IActiveClientSnapshot, type ICopilotSessionLauncher, type ICopilotSessionRuntime } from '../../node/copilot/copilotSessionLauncher.js';
 import { type IShellInitScript } from '../../common/shellInitScript.js';
 import { CopilotSessionWrapper } from '../../node/copilot/copilotSessionWrapper.js';
-import { roomSteeringMetadataKey } from '../../node/copilot/copilotRoomSteering.js';
 import { ISessionSandboxPolicy } from '../../node/sessionSandbox.js';
 import { AgentHostStateManager, IAgentHostStateManager } from '../../node/agentHostStateManager.js';
 import { IAgentHostCustomizationEnablementService, type CustomizationEnablementResolution, type ICustomizationEnablementTarget } from '../../node/agentHostCustomizationEnablementService.js';
@@ -6227,9 +6226,7 @@ suite('CopilotAgentSession', () => {
 		});
 	});
 
-	// ---- sendSteering ----
-
-	suite('room steering', () => {
+	suite('room configuration and admission', () => {
 		test('room configuration reaches idle and active SDK sessions immediately without a new turn', async () => {
 			const configValues: Record<string, unknown> = { mode: 'plan', autoApprove: 'assisted', sandboxEnabled: 'on' };
 			const { session, mockSession } = await createAgentSession(disposables, { isRoomSession: true, configValues });
@@ -6319,69 +6316,6 @@ suite('CopilotAgentSession', () => {
 				answer: 'The user is not available to answer your question. Choose a pragmatic option best aligned with the context of the request.',
 				managed: true, responded: true, result: { kind: 'approve-once' },
 			});
-		});
-
-		test('uses SDK immediate delivery in the admitted turn and persists the receipt with the selected approvals', async () => {
-			const database = new TestSessionDatabase();
-			const { session, mockSession, signals } = await createAgentSession(disposables, {
-				isRoomSession: true,
-				sessionDatabase: database,
-				configValues: { [SessionConfigKey.AutoApprove]: 'autoApprove' },
-				rootValues: { [AgentHostGlobalAutoApproveEnabledConfigKey]: true },
-			});
-			await session.send('Investigate', undefined, 'room-turn');
-			mockSession.fire('user.message', { content: 'Investigate', interactionId: 'root', source: 'user' }, { id: 'root-event' });
-			const accepted = await session.sendSteeringInCurrentTurn('room-turn', 'Prioritize correctness');
-			const wrongTurn = await session.sendSteeringInCurrentTurn('other-turn', 'Must not send');
-			assert.deepStrictEqual({
-				accepted, wrongTurn, sends: mockSession.sendRequests,
-				parent: await database.getMetadata(roomSteeringMetadataKey('message-2')),
-				newTurns: signals.filter(signal => signal.kind === 'action' && signal.action.type === ActionType.ChatTurnStarted).length,
-				permissionModes: mockSession.permissionModeSetCalls,
-			}, {
-				accepted: true, wrongTurn: false,
-				sends: [{ prompt: 'Investigate', attachments: undefined }, { prompt: 'Prioritize correctness', mode: 'immediate' }],
-				parent: 'root-event', newTurns: 0, permissionModes: ['allow-all'],
-			});
-		});
-
-		test('propagates failed SDK steering instead of acknowledging delivery', async () => {
-			const { session, mockSession } = await createAgentSession(disposables, { isRoomSession: true });
-			await session.send('Investigate', undefined, 'room-turn');
-			mockSession.sendError = new Error('SDK rejected steering');
-			await assert.rejects(session.sendSteeringInCurrentTurn('room-turn', 'New guidance'), /SDK rejected steering/);
-		});
-
-		test('a late acceptance remains an acceptance but abort prevents any further steering', async () => {
-			const { session, mockSession } = await createAgentSession(disposables, { isRoomSession: true });
-			await session.send('Investigate', undefined, 'room-turn');
-			const gate = new DeferredPromise<void>();
-			mockSession.sendGate = gate.p;
-			const delivery = session.sendSteeringInCurrentTurn('room-turn', 'In flight guidance');
-			await session.abort();
-			await gate.complete();
-			assert.deepStrictEqual({
-				accepted: await delivery,
-				afterAbort: await session.sendSteeringInCurrentTurn('room-turn', 'Too late'),
-				sends: mockSession.sendRequests.length,
-			}, { accepted: true, afterAbort: false, sends: 2 });
-		});
-
-		test('a late SDK receipt remains journalled when the room disconnects its old event stream', async () => {
-			const database = new TestSessionDatabase();
-			const { session, mockSession } = await createAgentSession(disposables, { isRoomSession: true, sessionDatabase: database });
-			await session.send('Investigate', undefined, 'room-turn');
-			await database.setTurnEventId('room-turn', 'root-event');
-			const gate = new DeferredPromise<void>();
-			mockSession.sendGate = gate.p;
-			const delivery = session.sendSteeringInCurrentTurn('room-turn', 'Preserve this guidance');
-			session.dispose();
-			await gate.complete();
-			assert.deepStrictEqual({
-				accepted: await delivery,
-				parent: await database.getMetadata(roomSteeringMetadataKey('message-2')),
-				afterDispose: await session.sendSteeringInCurrentTurn('room-turn', 'Too late'),
-			}, { accepted: true, parent: 'root-event', afterDispose: false });
 		});
 
 		test('an abort during room send preflight prevents a new SDK run', async () => {

@@ -83,7 +83,7 @@ export function createCollaborationFixtureMessages(): IAgentHostRoomMessagePage 
 			id: 'message-2', sequence: 2, authorId: 'member-2', authorName: 'Copilot-2', authorKind: 'agent', kind: 'message',
 			text: '@Copilot-1 I found repeated configuration reads. Can you check their impact on the baseline?',
 			timestamp: timestamp + 10000, mentions: ['member-1'], replyTo: 'message-1',
-			deliveries: [{ memberId: 'member-1', state: 'completed', turnId: 'turn-2' }],
+			deliveries: [{ memberId: 'member-1', state: 'submitted', turnId: 'turn-2' }],
 		}, {
 			id: 'message-3', sequence: 3, authorId: 'human', authorName: 'You', authorKind: 'human', kind: 'message',
 			text: '@Copilot-2 Keep the public configuration API unchanged.',
@@ -94,26 +94,15 @@ export function createCollaborationFixtureMessages(): IAgentHostRoomMessagePage 
 			text: 'The cache experiment is ready for review. Publishing this patch has not changed your working branch.',
 			timestamp: timestamp + 40000, mentions: [], artifactId: 'patch-1', deliveries: [],
 		}, {
-			id: 'result-cache', sequence: 5, authorId: 'member-2', authorName: 'Copilot-2', authorKind: 'agent', kind: 'result',
-			text: 'Cache configuration reads\n\nThe focused benchmark shows fewer repeated reads without changing the public API.',
-			timestamp: timestamp + 50000, mentions: [], deliveries: [],
-			result: {
-				title: 'Cache configuration reads',
-				summary: 'The focused benchmark shows fewer repeated reads without changing the public API.',
-				outcome: 'success',
-				evidence: ['Configuration cache tests passed.', 'Median startup time improved from 820 ms to 760 ms.'],
-				artifactIds: ['patch-1'],
-				verificationState: 'verified',
-			},
+			id: 'finding-cache', sequence: 5, authorId: 'member-2', authorName: 'Copilot-2', authorKind: 'agent', kind: 'finding',
+			text: 'The focused tests show fewer repeated reads without changing the public API. Please review the published cache patch independently.',
+			timestamp: timestamp + 50000, mentions: ['member-7'], deliveries: [{ memberId: 'member-7', state: 'pending' }],
+			artifactIds: ['patch-1'],
 		}, {
-			id: 'verification-cache', sequence: 6, authorId: 'member-7', authorName: 'Copilot-7', authorKind: 'agent', kind: 'verification',
-			text: 'Verified result "Cache configuration reads".',
-			timestamp: timestamp + 60000, mentions: [], deliveries: [],
-			verification: {
-				resultId: 'result-cache',
-				verdict: 'verified',
-				evidence: ['Re-ran the focused tests and benchmark in an independent worktree.'],
-			},
+			id: 'review-cache', sequence: 6, authorId: 'member-7', authorName: 'Copilot-7', authorKind: 'agent', kind: 'finding',
+			text: 'Re-ran the focused tests in an independent worktree. The cache patch preserves the public configuration API.',
+			timestamp: timestamp + 60000, mentions: ['member-2'], deliveries: [{ memberId: 'member-2', state: 'pending' }],
+			replyTo: 'finding-cache', artifactIds: ['patch-1'],
 		}],
 	};
 }
@@ -156,6 +145,7 @@ export class CollaborationFixtureService extends mock<ICollaborationService>() {
 	override readonly rooms = observableValue<readonly IAgentHostRoom[]>(this, []);
 	override readonly activeRoomId = observableValue<string | undefined>(this, undefined);
 	override readonly activeRoom = observableValue<IAgentHostRoom | undefined>(this, undefined);
+	override readonly inboxMemberId = observableValue<string | undefined>(this, undefined);
 	override readonly messages = observableValue<IAgentHostRoomMessagePage>(this, { messages: [], hasEarlier: false, hasLater: false });
 	override readonly models = observableValue<readonly SessionModelInfo[]>(this, [
 		{ id: 'auto', name: 'Auto', provider: 'copilotcli' },
@@ -166,21 +156,23 @@ export class CollaborationFixtureService extends mock<ICollaborationService>() {
 	override readonly loadingEarlier = observableValue(this, false);
 	override readonly creating = observableValue(this, false);
 	override readonly sending = observableValue(this, false);
-	override readonly canSteer = observableValue(this, true);
+	override readonly canSend = observableValue(this, true);
 	override readonly canConfigure = observableValue(this, true);
 	override readonly canSetMemberModel = observableValue(this, true);
-	override readonly canVerifyResults = observableValue(this, true);
 	override readonly error = observableValue<string | undefined>(this, undefined);
 	override readonly workspaceTrust = observableValue<ICollaborationWorkspaceTrust>(this, { state: 'trusted' });
 	override readonly requests = observableValue<readonly ICollaborationRequest[]>(this, []);
 	override readonly requestError = observableValue<string | undefined>(this, undefined);
 	private readonly drafts = new Map<string, CollaborationDraft>();
+	private history: IAgentHostRoomMessagePage = { messages: [], hasEarlier: false, hasLater: false };
 
 	showRoom(room: IAgentHostRoom, messages: IAgentHostRoomMessagePage): void {
+		this.history = messages;
 		transaction(tx => {
 			this.rooms.set([room], tx);
 			this.activeRoomId.set(room.id, tx);
 			this.activeRoom.set(room, tx);
+			this.inboxMemberId.set(undefined, tx);
 			this.messages.set(messages, tx);
 		});
 	}
@@ -197,6 +189,16 @@ export class CollaborationFixtureService extends mock<ICollaborationService>() {
 	override async refresh(): Promise<void> { }
 	override async loadMessages(): Promise<void> { }
 	override async loadEarlierMessages(): Promise<void> { }
+
+	override async selectInbox(memberId: string | undefined): Promise<void> {
+		transaction(tx => {
+			this.inboxMemberId.set(memberId, tx);
+			this.messages.set({
+				...this.history,
+				messages: memberId ? this.history.messages.filter(message => message.mentions.includes(memberId)) : this.history.messages,
+			}, tx);
+		});
+	}
 
 	override async setMemberModel(memberId: string, model: ModelSelection | undefined): Promise<void> {
 		const room = this.activeRoom.get();

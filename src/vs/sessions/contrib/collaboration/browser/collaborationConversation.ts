@@ -13,21 +13,24 @@ import { MarkdownString } from '../../../../base/common/htmlContent.js';
 import { Disposable, DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { equals } from '../../../../base/common/objects.js';
 import { localize } from '../../../../nls.js';
-import { IAgentHostRoom, IAgentHostRoomMessage } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomArchiveSession, IAgentHostRoomMessage } from '../../../../platform/agentHost/common/agentHostRooms.js';
+import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { WorkbenchList } from '../../../../platform/list/browser/listService.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
+import { Link } from '../../../../platform/opener/browser/link.js';
 import { defaultButtonStyles } from '../../../../platform/theme/browser/defaultStyles.js';
 import { getChatMarkdownRenderOptions } from '../../../../workbench/contrib/chat/browser/widget/chatContentMarkdownRenderer.js';
 import { ICollaborationRoomScrollState } from '../../../services/collaboration/browser/collaborationRoomView.js';
 import { collaborationAuthorAccent } from './collaborationColors.js';
-import { deliveryStateLabel, messageKindLabel, resultOutcomeLabel, verificationStateLabel, verificationVerdictLabel } from './collaborationRoomLabels.js';
+import { messageAudienceLabel, messageDeliveryLabels, messageKindLabel } from './collaborationRoomLabels.js';
 
 interface IConversationActions {
 	reply(message: IAgentHostRoomMessage): void;
+	inspectParticipant(participantId: string): void;
 	openArtifact(artifactId: string): void;
-	reviewResult(message: IAgentHostRoomMessage): void;
 	retry(messageId: string): void;
+	hide(message: IAgentHostRoomMessage): void;
 }
 
 interface IMessageTemplate {
@@ -42,7 +45,9 @@ interface IMessageTemplate {
 	readonly markdown: MutableDisposable<IRenderedMarkdown>;
 	message?: IAgentHostRoomMessage;
 	roomState?: IAgentHostRoom['state'];
-	canVerifyResults?: boolean;
+	readOnly?: boolean;
+	archived?: boolean;
+	archivedSessions?: readonly IAgentHostRoomArchiveSession[];
 }
 
 /** A virtualized, variable-height shared transcript, independent from all peer chat models. */
@@ -55,7 +60,7 @@ export class CollaborationConversation extends Disposable {
 	private readonly templates = new Set<IMessageTemplate>();
 	private messages: readonly IAgentHostRoomMessage[] = [];
 	private room: IAgentHostRoom | undefined;
-	private canVerifyResults = false;
+	private canSend = false;
 	private following = true;
 	private updating = false;
 	private pendingAnchor: ICollaborationRoomScrollState | undefined;
@@ -63,8 +68,9 @@ export class CollaborationConversation extends Disposable {
 	constructor(
 		container: HTMLElement,
 		private readonly actions: IConversationActions,
-		@IInstantiationService instantiation: IInstantiationService,
+		@IInstantiationService private readonly instantiation: IInstantiationService,
 		@IMarkdownRendererService private readonly markdownRenderer: IMarkdownRendererService,
+		@IHoverService private readonly hoverService: IHoverService,
 	) {
 		super();
 		this.element = container;
@@ -94,7 +100,7 @@ export class CollaborationConversation extends Disposable {
 				getWidgetAriaLabel: () => localize('room.feed', "Shared conversation"),
 				getWidgetRole: () => 'list',
 				getRole: () => 'listitem',
-				getAriaLabel: message => localize('room.messageAria', "{0}, {1}: {2}", message.authorName, messageKindLabel(message.kind), accessibleMessageText(message, this.room, this.messages)),
+				getAriaLabel: message => getCollaborationMessageAccessibleContent(message, this.room),
 			},
 			keyboardNavigationLabelProvider: { getKeyboardNavigationLabel: message => `${message.authorName} ${message.text}` },
 			supportDynamicHeights: true,
@@ -119,11 +125,7 @@ export class CollaborationConversation extends Disposable {
 	get scrollTop(): number { return this.list.scrollTop; }
 	get length(): number { return this.list.length; }
 
-	/**
-	 * Mirrors the agent chat's row structure and adopts its presentational classes,
-	 * so a room post reads as a chat turn. The chat's own renderer is not reusable:
-	 * it is driven by an IChatViewModel the room does not have.
-	 */
+	/** Reuses chat presentation without constructing a private session or chat model. */
 	private createTemplate(parent: HTMLElement): IMessageTemplate {
 		const lifetime = new DisposableStore();
 		const element = parent.appendChild($('article.room-message.interactive-item-container'));
@@ -153,7 +155,11 @@ export class CollaborationConversation extends Disposable {
 	}
 
 	private renderMessage(message: IAgentHostRoomMessage, template: IMessageTemplate): void {
-		const changed = !equals(template.message, message) || template.roomState !== this.room?.state || template.canVerifyResults !== this.canVerifyResults;
+		const readOnly = !this.canSend || this.room?.archived === true;
+		const archivedSessions = this.room?.archived ? this.room.archivedSessions : undefined;
+		const authorSession = archivedSessions?.find(session => session.id === message.authorId);
+		const changed = !equals(template.message, message) || template.roomState !== this.room?.state || template.readOnly !== readOnly
+			|| template.archived !== this.room?.archived || !equals(template.archivedSessions, archivedSessions);
 		const accent = collaborationAuthorAccent(this.room, message.authorId);
 		// The chat identifies a speaker by avatar and name; ten agents still need telling apart.
 		template.avatar.style.background = accent;
@@ -162,39 +168,50 @@ export class CollaborationConversation extends Disposable {
 		if (!changed) {
 			return;
 		}
-		const hadFocus = isAncestor(getActiveElement(), template.element);
-		const contentChanged = template.message?.text !== message.text;
+		const focused = getActiveElement();
+		const hadFocus = isAncestor(focused, template.element);
+		const authorHadFocus = isAncestor(focused, template.author);
+		const contentChanged = template.message?.text !== message.text || template.archived !== this.room?.archived;
+		template.current.clear();
 		template.message = message;
 		template.roomState = this.room?.state;
-		template.canVerifyResults = this.canVerifyResults;
+		template.readOnly = readOnly;
+		template.archived = this.room?.archived;
+		template.archivedSessions = archivedSessions;
+		template.body.classList.toggle('room-message-plain', this.room?.archived === true);
 		template.element.dataset.messageId = message.id;
 		template.author.textContent = message.authorName;
+		if (authorSession) {
+			template.author.textContent = '';
+			const label = localize('room.inspectAuthor', "Inspect {0}'s archived session", message.authorName);
+			template.current.add(this.instantiation.createInstance(Link, template.author, {
+				label: message.authorName,
+				href: authorSession.chatUri ?? authorSession.sessionUri,
+				title: authorSession.worktreeUri ? localize('room.inspectAuthorWorktree', "{0}\nWorktree: {1}", label, authorSession.worktreeUri) : label,
+			}, { opener: () => this.actions.inspectParticipant(message.authorId) }));
+			template.author.firstElementChild?.setAttribute('aria-label', label);
+		}
 		template.avatar.textContent = message.authorName.replace(/[^0-9]/g, '') || message.authorName.slice(0, 1).toUpperCase();
-		const delivery = message.authorKind === 'human' && !message.mentions.length && message.mode !== 'steer'
-			? [localize('room.noRecipients', "Shared with room; no agents notified")]
-			: message.deliveries.map(delivery => {
-				const name = this.room?.members.find(member => member.id === delivery.memberId)?.name ?? delivery.memberId;
-				return localize('room.delivery', "{0}: {1}{2}", name, deliveryStateLabel(delivery.state), delivery.error ? ` (${delivery.error})` : '');
-			});
-		const kind = message.mode === 'steer' ? localize('room.guidance', "Human guidance") : messageKindLabel(message.kind);
+		const delivery = messageDeliveryLabels(message, this.room);
+		const kind = messageKindLabel(message.kind);
 		const reply = message.replyTo ? localize('room.replyMetadata', "Reply to {0}", this.messages.find(item => item.id === message.replyTo)?.authorName ?? message.replyTo) : '';
-		template.metadata.textContent = [kind, new Date(message.timestamp).toLocaleString(), reply, ...delivery].filter(Boolean).join(' | ');
-		if (message.result) {
+		template.metadata.textContent = [kind, new Date(message.timestamp).toLocaleString(), messageAudienceLabel(message, this.room), reply, ...delivery].filter(Boolean).join(' | ');
+		const description = messageDeliveryLabels(message, this.room, true).join('\n');
+		if (description) {
+			template.metadata.setAttribute('aria-description', description);
+			template.current.add(this.hoverService.setupDelayedHover(template.metadata, { content: description }));
+		} else {
+			template.metadata.removeAttribute('aria-description');
+		}
+		if (this.room?.archived) {
 			template.markdown.clear();
-			this.renderResult(message, template.body);
-		} else if (message.assignment) {
-			template.markdown.clear();
-			this.renderAssignment(message, template.body);
-		} else if (message.verification) {
-			template.markdown.clear();
-			this.renderVerification(message, template.body);
+			template.body.textContent = message.text;
 		} else if (contentChanged || !template.markdown.value) {
 			template.markdown.value = this.markdownRenderer.render(new MarkdownString(message.text, { isTrusted: false, supportHtml: false }), getChatMarkdownRenderOptions({
 				asyncRenderCallback: () => this.scheduleMeasurements(),
 			}));
 			template.body.replaceChildren(template.markdown.value.element);
 		}
-		template.current.clear();
 		template.actions.replaceChildren();
 		const addButton = (label: string, run: () => void): Button => {
 			const button = template.current.add(new Button(template.actions, { ...defaultButtonStyles, secondary: true }));
@@ -202,103 +219,52 @@ export class CollaborationConversation extends Disposable {
 			template.current.add(button.onDidClick(run));
 			return button;
 		};
-		addButton(localize('room.reply', "Reply"), () => this.actions.reply(message));
+		addButton(localize('room.reply', "Reply"), () => this.actions.reply(message)).enabled = !readOnly;
+		if (message.replyTo) {
+			if (this.messages.some(candidate => candidate.id === message.replyTo)) {
+				addButton(localize('room.showOriginal', "Show Original"), () => {
+					const original = this.messages.findIndex(candidate => candidate.id === message.replyTo);
+					this.following = false;
+					this.list.reveal(original);
+					this.list.setFocus([original]);
+					this.list.domFocus();
+				});
+			}
+		}
 		if (message.artifactId) {
 			addButton(localize('room.reviewArtifact', "Review Published Artifact"), () => this.actions.openArtifact(message.artifactId!));
 		}
-		for (const artifactId of message.result?.artifactIds ?? []) {
+		for (const artifactId of new Set(message.artifactIds?.filter(id => id !== message.artifactId))) {
 			const title = this.room?.artifacts.find(artifact => artifact.id === artifactId)?.title ?? artifactId;
 			addButton(localize('room.reviewResultArtifact', "Review Patch: {0}", title), () => this.actions.openArtifact(artifactId));
 		}
-		if (message.result && this.canVerifyResults) {
-			addButton(localize('room.reviewResult', "Review Result"), () => this.actions.reviewResult(message));
+		if (message.authorKind === 'human' && message.deliveries.some(delivery => ['interrupted', 'cancelled', 'failed'].includes(delivery.state))) {
+			addButton(localize('room.retryDelivery', "Retry Delivery"), () => this.actions.retry(message.id)).enabled = !readOnly && this.room?.state !== 'stopping';
 		}
-		if (message.authorKind === 'human' && message.deliveries.some(delivery => ['pending', 'cancelled', 'failed'].includes(delivery.state))) {
-			addButton(localize('room.retryDelivery', "Retry Delivery"), () => this.actions.retry(message.id)).enabled = this.room?.state !== 'paused' && this.room?.state !== 'stopping';
+		if (message.authorKind !== 'agent' && !this.room?.archived) {
+			const hide = addButton(localize('room.hideMessage', "Hide for Me"), () => this.actions.hide(message));
+			template.current.add(this.hoverService.setupDelayedHover(hide.element, {
+				content: localize('room.hideMessageDetail', "Hide this message in this profile. Room history and agent delivery are unchanged. Use Show Hidden Messages to restore it."),
+			}));
 		}
 		if (hadFocus) {
-			const firstAction = template.actions.firstElementChild;
-			if (isHTMLElement(firstAction)) {
-				firstAction.focus();
+			const target = authorHadFocus ? template.author.firstElementChild
+				: [...template.actions.children].find(element => element.getAttribute('aria-disabled') !== 'true');
+			if (isHTMLElement(target)) {
+				target.focus();
+			} else {
+				this.list.domFocus();
 			}
 		}
 		this.scheduleMeasurements();
 	}
 
-	private renderResult(message: IAgentHostRoomMessage, container: HTMLElement): void {
-		const result = message.result!;
-		const element = $('.room-result');
-		element.dataset.outcome = result.outcome;
-		element.dataset.verificationState = result.verificationState ?? 'pending';
-		const heading = element.appendChild($('.room-result-heading'));
-		heading.appendChild($('strong.room-result-title')).textContent = result.title;
-		heading.appendChild($('span.room-result-outcome')).textContent = resultOutcomeLabel(result.outcome);
-		heading.appendChild($('span.room-result-verification')).textContent = verificationStateLabel(result.verificationState ?? 'pending');
-		element.appendChild($('p.room-result-summary')).textContent = result.summary;
-		const evidenceHeading = element.appendChild($('div.room-result-evidence-heading'));
-		evidenceHeading.textContent = localize('room.resultEvidence', "Evidence");
-		const evidence = element.appendChild($('ul.room-result-evidence'));
-		for (const item of result.evidence) {
-			evidence.appendChild($('li')).textContent = item;
-		}
-		container.replaceChildren(element);
-	}
-
-	private renderAssignment(message: IAgentHostRoomMessage, container: HTMLElement): void {
-		const assignment = message.assignment!;
-		const state = assignmentState(message, this.messages);
-		const element = $('.room-assignment');
-		element.dataset.state = state;
-		const heading = element.appendChild($('.room-assignment-heading'));
-		heading.appendChild($('strong.room-assignment-title')).textContent = assignment.kind === 'verification'
-			? localize('room.verificationAssignment', "Verification Assignment")
-			: assignment.assigneeIds.length > 1
-				? localize('room.pairedAssignment', "Paired Assignment")
-				: localize('room.workAssignment', "Work Assignment");
-		heading.appendChild($('span.room-assignment-state')).textContent = assignmentStateLabel(state);
-		element.appendChild($('p.room-assignment-objective')).textContent = assignment.description;
-		if (assignment.note) {
-			element.appendChild($('p.room-assignment-note')).textContent = localize('room.assignmentNote', "Coordination note: {0}", assignment.note);
-		}
-		const names = assignment.assigneeIds.map(id => this.room?.members.find(member => member.id === id)?.name ?? id);
-		element.appendChild($('div.room-assignment-assignees')).textContent = assignment.assigneeIds.length > 1
-			? localize('room.pairedAgents', "Paired agents: {0}", names.join(', '))
-			: localize('room.assignedAgent', "Assigned agent: {0}", names[0]);
-		if (assignment.supersedes) {
-			element.appendChild($('div.room-assignment-link')).textContent = localize('room.assignmentSupersedes', "Supersedes assignment: {0}", assignment.supersedes);
-		}
-		if (assignment.resultId) {
-			element.appendChild($('div.room-assignment-link')).textContent = localize('room.assignmentResult', "Result to verify: {0}", assignment.resultId);
-		}
-		if (assignment.expectedEvidence.length) {
-			element.appendChild($('div.room-assignment-evidence-heading')).textContent = localize('room.assignmentEvidence', "Expected Evidence");
-			const evidence = element.appendChild($('ul.room-assignment-evidence'));
-			for (const item of assignment.expectedEvidence) {
-				evidence.appendChild($('li')).textContent = item;
-			}
-		}
-		container.replaceChildren(element);
-	}
-
-	private renderVerification(message: IAgentHostRoomMessage, container: HTMLElement): void {
-		const verification = message.verification!;
-		const element = $('.room-verification');
-		element.dataset.verdict = verification.verdict;
-		element.appendChild($('strong.room-verification-verdict')).textContent = verificationVerdictLabel(verification.verdict);
-		element.appendChild($('span.room-verification-result')).textContent = localize('room.verificationFor', "Result: {0}", verification.resultId);
-		const evidence = element.appendChild($('ul.room-result-evidence'));
-		for (const item of verification.evidence) {
-			evidence.appendChild($('li')).textContent = item;
-		}
-		container.replaceChildren(element);
-	}
-
-	setMessages(messages: readonly IAgentHostRoomMessage[], room: IAgentHostRoom | undefined, canVerifyResults = false): void {
+	setMessages(messages: readonly IAgentHostRoomMessage[], room: IAgentHostRoom | undefined, canSend = true): void {
 		const anchor = this.captureScrollState(room?.id ?? '');
 		this.updating = true;
 		try {
 			this.room = room;
-			this.canVerifyResults = canVerifyResults;
+			this.canSend = canSend;
 			let prefix = 0;
 			while (prefix < messages.length && prefix < this.messages.length && equals(messages[prefix], this.messages[prefix])) {
 				prefix++;
@@ -406,46 +372,14 @@ export class CollaborationConversation extends Disposable {
 	focus(): void { this.list.domFocus(); }
 }
 
-function assignmentState(message: IAgentHostRoomMessage, messages: readonly IAgentHostRoomMessage[]): 'pending' | 'completed' | 'superseded' {
-	if (messages.some(candidate => candidate.assignment?.supersedes === message.id)) {
-		return 'superseded';
-	}
-	const assignment = message.assignment!;
-	const completed = assignment.kind === 'work'
-		? assignment.assigneeIds.filter(id => messages.some(candidate => candidate.authorId === id && candidate.result?.assignmentId === message.id))
-		: assignment.assigneeIds.filter(id => messages.some(candidate => candidate.authorId === id && candidate.verification?.resultId === assignment.resultId));
-	return completed.length === assignment.assigneeIds.length ? 'completed' : 'pending';
-}
-
-function assignmentStateLabel(state: ReturnType<typeof assignmentState>): string {
-	switch (state) {
-		case 'pending': return localize('room.assignmentPending', "Pending");
-		case 'completed': return localize('room.assignmentCompleted', "Completed");
-		case 'superseded': return localize('room.assignmentSuperseded', "Superseded");
-	}
-}
-
-function accessibleMessageText(message: IAgentHostRoomMessage, room: IAgentHostRoom | undefined, messages: readonly IAgentHostRoomMessage[]): string {
-	if (message.result) {
-		return localize('room.resultAria', "{0}. Outcome: {1}. Verification: {2}. {3}. Evidence: {4}",
-			message.result.title, resultOutcomeLabel(message.result.outcome), verificationStateLabel(message.result.verificationState ?? 'pending'),
-			message.result.summary, message.result.evidence.join('; '));
-	}
-	if (message.verification) {
-		return localize('room.verificationAria', "{0} result {1}. Evidence: {2}",
-			verificationVerdictLabel(message.verification.verdict), message.verification.resultId, message.verification.evidence.join('; '));
-	}
-	if (message.assignment) {
-		const assignment = message.assignment;
-		const assignees = assignment.assigneeIds.map(id => room?.members.find(member => member.id === id)?.name ?? id).join(', ');
-		return localize('room.assignmentAria', "{0}. State: {1}. Assigned to: {2}. Objective: {3}. Expected evidence: {4}.{5}{6}",
-			assignment.kind === 'verification' ? localize('room.verificationAssignment', "Verification Assignment") : localize('room.workAssignment', "Work Assignment"),
-			assignmentStateLabel(assignmentState(message, messages)), assignees, assignment.description, assignment.expectedEvidence.join('; '),
-			assignment.supersedes ? localize('room.assignmentSupersedesAria', " Supersedes {0}.", assignment.supersedes) : '',
-			[
-				assignment.resultId ? localize('room.assignmentResultAria', " Verifies result {0}.", assignment.resultId) : '',
-				assignment.note ? localize('room.assignmentNoteAria', " Coordination note: {0}.", assignment.note) : '',
-			].join(''));
-	}
-	return message.text;
+export function getCollaborationMessageAccessibleContent(message: IAgentHostRoomMessage, room: IAgentHostRoom | undefined): string {
+	const artifacts = [...new Set([...(message.artifactId ? [message.artifactId] : []), ...(message.artifactIds ?? [])])];
+	return [
+		localize('room.messageAria', "{0}, {1}, {2}", message.authorName, new Date(message.timestamp).toLocaleString(), messageKindLabel(message.kind)),
+		messageAudienceLabel(message, room),
+		...messageDeliveryLabels(message, room, true),
+		...(message.replyTo ? [localize('room.replyMetadata', "Reply to {0}", message.replyTo)] : []),
+		message.text,
+		...artifacts.map(id => localize('room.messageArtifact', "Published artifact: {0}", room?.artifacts.find(artifact => artifact.id === id)?.title ?? id)),
+	].join('\n');
 }

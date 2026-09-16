@@ -8,6 +8,8 @@ import assert from 'assert';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
+import { CopilotModelTeamSupportConfigKey } from '../../common/copilotModelTeam.js';
+import { COPILOT_TEAM_WORKER } from '../../node/copilot/copilotNativeTeam.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { upcastPartial } from '../../../../base/test/common/mock.js';
 import { PluginFormat, type IMcpServerDefinition } from '../../../agentPlugins/common/pluginParsers.js';
@@ -104,7 +106,7 @@ const noopSessionOpenTelemetry: IAgentHostSessionOpenTelemetry = {
 	sdkResumeFallbackCreated: () => { },
 };
 
-function createTestLauncher(managedSettingsPermissions?: IAgentHostManagedSettingsPermissions, rootValues: Partial<Record<CopilotCliConfigKey, unknown>> = {}, logService: ILogService = new NullLogService(), sessionOpenTelemetry: IAgentHostSessionOpenTelemetry = noopSessionOpenTelemetry, configuration?: IAgentConfigurationService, rooms: IAgentHostRoomsController = createNoopRoomsController()): CopilotSessionLauncher {
+function createTestLauncher(managedSettingsPermissions?: IAgentHostManagedSettingsPermissions, rootValues: Partial<Record<CopilotCliConfigKey | typeof CopilotModelTeamSupportConfigKey, unknown>> = {}, logService: ILogService = new NullLogService(), sessionOpenTelemetry: IAgentHostSessionOpenTelemetry = noopSessionOpenTelemetry, configuration?: IAgentConfigurationService, rooms: IAgentHostRoomsController = createNoopRoomsController()): CopilotSessionLauncher {
 	const configurationService = configuration ?? {
 		getRootValue: (_schema: unknown, key: CopilotCliConfigKey) => rootValues[key],
 		getSessionConfigValues: () => undefined,
@@ -129,6 +131,111 @@ function createTestLauncher(managedSettingsPermissions?: IAgentHostManagedSettin
 		rooms,
 	);
 }
+
+suite('CopilotSessionLauncher native teams', () => {
+	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	function plan(configurations: ResumeSessionConfig[]): CopilotSessionLaunchPlan {
+		const session = upcastPartial<CopilotSession>({
+			sessionId: 'sdk-team',
+			on: () => () => { },
+			disconnect: async () => { },
+			rpc: upcastPartial<CopilotSession['rpc']>({ options: { update: async () => ({ success: true }) } }),
+		});
+		const client = upcastPartial<CopilotClient>({
+			createSession: async config => {
+				assert.ok(config);
+				configurations.push(config);
+				reportManagedSettings(config);
+				return session;
+			},
+			resumeSession: async (_id, config) => {
+				assert.ok(config);
+				configurations.push(config);
+				reportManagedSettings(config);
+				return session;
+			},
+		});
+		return {
+			kind: 'create', client, sessionId: 'sdk-team', model: { id: 'lead-model' },
+			workingDirectory: testWorkingDirectory, resolvedAgentName: undefined,
+			snapshot: { tools: [], plugins: [], mcpServers: {}, modelTeam: { worker: { id: 'worker-model' } } },
+			activeClientToolSet: new ActiveClientToolSet(), shellManager: undefined,
+			githubCredentials: CopilotGitHubSessionCredentials.fromToken(undefined),
+		};
+	}
+
+	test('create and resume supply the enforced team and native role definitions', async () => {
+		const configurations: ResumeSessionConfig[] = [];
+		const launcher = createTestLauncher(undefined, { [CopilotModelTeamSupportConfigKey]: 1 });
+		const create = plan(configurations);
+		store.add(await launcher.launch(create, testRuntime));
+		store.add(await launcher.launch({ ...create, kind: 'resume', workingDirectory: testWorkingDirectory, fallback: { model: { id: 'lead-model' } } }, testRuntime));
+		assert.deepStrictEqual(configurations.map(config => ({
+			teamVersion: config.team?.version,
+			worker: config.team?.worker.model,
+			scout: config.team?.scout,
+			agents: config.customAgents?.map(agent => agent.name),
+			guidance: config.systemMessage?.content?.includes('sole') || config.systemMessage?.content?.includes('Only the Worker'),
+		})), Array.from({ length: 2 }, () => ({
+			teamVersion: 1, worker: 'worker-model', scout: undefined, agents: [COPILOT_TEAM_WORKER], guidance: true,
+		})));
+	});
+
+	test('unsupported runtime rejects before creating a session', async () => {
+		const configurations: ResumeSessionConfig[] = [];
+		await assert.rejects(createTestLauncher().launch(plan(configurations), testRuntime), /does not support native model teams/);
+		assert.deepStrictEqual(configurations, []);
+	});
+
+	test('create and resume use independent role efforts instead of the global effort override', async () => {
+		const configurations: ResumeSessionConfig[] = [];
+		const launcher = createTestLauncher(undefined, {
+			[CopilotModelTeamSupportConfigKey]: 1,
+			[CopilotCliConfigKey.ModelCapabilityOverrides]: { '*': { reasoningEffort: 'max' } },
+		});
+		const create = {
+			...plan(configurations),
+			kind: 'create' as const,
+			model: { id: 'same-model', config: { thinkingLevel: 'high' } },
+			snapshot: {
+				tools: [], plugins: [], mcpServers: {},
+				modelTeam: {
+					worker: { id: 'same-model', config: { thinkingLevel: 'low' } },
+					scout: { id: 'same-model', config: { thinkingLevel: 'medium' } },
+				},
+			},
+		};
+		store.add(await launcher.launch(create, testRuntime));
+		store.add(await launcher.launch({ ...create, kind: 'resume', workingDirectory: testWorkingDirectory, fallback: { model: create.model } }, testRuntime));
+		assert.deepStrictEqual(configurations.map(config => ({
+			lead: config.reasoningEffort,
+			worker: config.team?.worker.reasoningEffort,
+			scout: config.team?.scout?.reasoningEffort,
+			agents: config.customAgents?.map(agent => agent.reasoningEffort),
+		})), Array.from({ length: 2 }, () => ({ lead: 'high', worker: 'low', scout: 'medium', agents: ['low', 'medium'] })));
+	});
+
+	test('workspace-less, transient and scoped editing surfaces reject team launches', async () => {
+		const configurations: ResumeSessionConfig[] = [];
+		const launcher = createTestLauncher(undefined, { [CopilotModelTeamSupportConfigKey]: 1 });
+		for (const flags of [{ workspaceless: true }, { isEphemeral: true }, { hasScopedEditSurface: true }]) {
+			await assert.rejects(launcher.launch({ ...plan(configurations), ...flags }, testRuntime), /ordinary workspace chat/);
+		}
+		assert.deepStrictEqual(configurations, []);
+	});
+
+	test('Single mode does not acquire definitions, prompts, or capability requirements', async () => {
+		const configurations: ResumeSessionConfig[] = [];
+		const create = plan(configurations);
+		store.add(await createTestLauncher().launch({ ...create, snapshot: { tools: [], plugins: [], mcpServers: {} } }, testRuntime));
+		assert.deepStrictEqual({
+			team: configurations[0].team,
+			agents: configurations[0].customAgents,
+			teamGuidance: configurations[0].systemMessage?.content?.includes('selected a native model team'),
+		}, { team: undefined, agents: [], teamGuidance: false });
+	});
+});
 
 suite('CopilotSessionLauncher room tools', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -200,23 +307,21 @@ suite('CopilotSessionLauncher room tools', () => {
 		}, {
 			checked: [{ sessionId: 'sess-1', tool: 'task' }, { sessionId: 'sess-1', tool: 'task' }],
 			configurations: ['create', 'resume'].map(() => ({
-				tools: ['room_read', 'room_read_artifact', 'room_post', 'room_yield', 'room_publish_result', 'room_verify_result', 'room_share_patch'], customAgents: [],
+				tools: ['room_read', 'room_post', 'room_share_patch', 'room_read_artifact'], customAgents: [],
 				excludesTask: true, excludesFactory: true, skipPermission: false,
 			})),
 		});
 	});
 
-	test('coordinator sessions receive only coordinator tools and deny worker capabilities', async () => {
+	test('read-only archive session bindings deny every runtime tool', async () => {
 		let configuration: ResumeSessionConfig | undefined;
 		const checked: string[] = [];
 		const rooms: IAgentHostRoomsController = {
 			...createNoopRoomsController(),
-			isCoordinatorSessionUri: session => session === testRuntime.configurationResource.toString(),
+			isRoomSessionUri: session => session === testRuntime.configurationResource.toString(),
 			beforeTool: (_sessionId, tool) => {
 				checked.push(tool);
-				if (tool !== 'room_coordinator_snapshot' && tool !== 'room_assign' && tool !== 'room_post') {
-					throw new Error('Coordinator tools only');
-				}
+				throw new Error('Archived collaboration rooms are read-only');
 			},
 		};
 		const sdkSession = upcastPartial<CopilotSession>({
@@ -247,9 +352,9 @@ suite('CopilotSessionLauncher room tools', () => {
 			shellManager: undefined,
 			githubCredentials: CopilotGitHubSessionCredentials.fromToken(undefined),
 		}, testRuntime));
-		const allowed = await configuration!.hooks?.onPreToolUse?.({
+		const read = await configuration!.hooks?.onPreToolUse?.({
 			sessionId: 'sdk-backing', timestamp: new Date(0), workingDirectory: testWorkingDirectory.fsPath,
-			toolName: 'room_assign', toolArgs: {},
+			toolName: 'room_read', toolArgs: {},
 		}, { sessionId: 'sdk-backing' });
 		const deniedTools = ['bash', 'task', 'ask_user', 'deleteComments'];
 		const denied = await Promise.all(deniedTools.map(toolName => configuration!.hooks?.onPreToolUse?.({
@@ -260,15 +365,15 @@ suite('CopilotSessionLauncher room tools', () => {
 		assert.deepStrictEqual({
 			tools: configuration!.tools?.map(tool => tool.name),
 			availableTools: configuration!.availableTools,
-			allowed: allowed?.permissionDecision,
+			read: read?.permissionDecision,
 			denied: denied.map(result => result?.permissionDecision),
 			checked,
 		}, {
-			tools: ['room_coordinator_snapshot', 'room_assign', 'room_post'],
-			availableTools: ['room_coordinator_snapshot', 'room_assign', 'room_post'],
-			allowed: undefined,
+			tools: ['room_read', 'room_post', 'room_share_patch', 'room_read_artifact'],
+			availableTools: undefined,
+			read: 'deny',
 			denied: deniedTools.map(() => 'deny'),
-			checked: ['room_assign', ...deniedTools],
+			checked: ['room_read', ...deniedTools],
 		});
 	});
 });

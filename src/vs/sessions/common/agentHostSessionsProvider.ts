@@ -343,11 +343,7 @@ export interface IAgentHostSessionsProvider extends ISessionsProvider {
 	getBackendChatResource(chatResource: URI): URI | undefined;
 
 	/** Resolve authoritative backend identities to current client session and chat facades. */
-	resolveSessionChat(sessionResource: URI, chatResource: URI | undefined, token: CancellationToken, reserved?: {
-		readonly title: string;
-		readonly createdAt: number;
-		readonly worktreeUri: URI;
-	}): Promise<{ readonly session: ISession; readonly chat: IChat } | undefined>;
+	resolveSessionChat(sessionResource: URI, chatResource: URI | undefined, token: CancellationToken): Promise<{ readonly session: ISession; readonly chat: IChat } | undefined>;
 
 }
 

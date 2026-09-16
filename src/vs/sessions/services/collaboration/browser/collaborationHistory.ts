@@ -68,6 +68,7 @@ export class CollaborationHistory extends Disposable {
 	constructor(
 		private readonly fetchPage: (query: IAgentHostRoomMessageQuery) => Promise<IAgentHostRoomMessagePage>,
 		private readonly pageSize = 100,
+		private readonly memberId?: string,
 	) {
 		if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 200) {
 			throw new RangeError(localize('collaborationHistory.pageSize', "History page size must be an integer between 1 and 200."));
@@ -110,7 +111,7 @@ export class CollaborationHistory extends Disposable {
 			}
 			const earlier = await this.readPage({ before, limit: this.pageSize }, generation);
 			const additions = earlier.page.messages.filter(message => message.sequence < before);
-			if (!additions.length || additions.at(-1)!.sequence !== before - 1) {
+			if (!additions.length || (!this.memberId && additions.at(-1)!.sequence !== before - 1)) {
 				throw this.invalidHistory();
 			}
 			const state = this.merge([earlier]);
@@ -139,6 +140,9 @@ export class CollaborationHistory extends Disposable {
 	/** A nonadjacent acknowledgement remains visible while refresh fills the intervening gap. */
 	acceptMessage(message: IAgentHostRoomMessage): void {
 		this.assertCurrent(this.generation);
+		if (this.memberId && !message.mentions.includes(this.memberId)) {
+			return;
+		}
 		try {
 			const current = this._page.get();
 			const page = this.normalizePage({
@@ -170,6 +174,11 @@ export class CollaborationHistory extends Disposable {
 			this._loadingEarlier.set(false, tx);
 			this._error.set(undefined, tx);
 		});
+	}
+
+	cancelPendingRequests(): void {
+		this.cancelRequests();
+		this.updateStatus();
 	}
 
 	override dispose(): void {
@@ -240,7 +249,7 @@ export class CollaborationHistory extends Disposable {
 	private async readPage(query: IAgentHostRoomMessageQuery, generation: number): Promise<IVersionedPage> {
 		this.assertCurrent(generation);
 		const version = ++this.version;
-		const result = await this.fetchPage(query);
+		const result = await this.fetchPage(this.memberId ? { ...query, memberId: this.memberId } : query);
 		this.assertCurrent(generation);
 		const page = this.normalizePage(result);
 		if (query.after === undefined && query.before === undefined && page.hasLater) {
@@ -262,7 +271,7 @@ export class CollaborationHistory extends Disposable {
 		const latest = await this.readPage({ limit: this.pageSize }, generation);
 		const pages = [latest];
 		let state = this.merge(pages);
-		for (; ;) {
+		for (; !this.memberId;) {
 			const messages = state.page.messages;
 			const gap = messages.findIndex((message, index) => index > 0 && message.sequence !== messages[index - 1].sequence + 1);
 			if (gap === -1) {
@@ -283,6 +292,22 @@ export class CollaborationHistory extends Disposable {
 	private async refreshEarlierRecords(latest: IVersionedPage, generation: number): Promise<void> {
 		const before = latest.page.messages[0]?.sequence;
 		if (before === undefined) {
+			return;
+		}
+		if (this.memberId) {
+			let after = (this._page.get().messages[0]?.sequence ?? before) - 1;
+			while (!this.refreshRequested && after < before - 1) {
+				const updated = await this.readPage({ after, before, limit: this.pageSize }, generation);
+				const additions = updated.page.messages.filter(message => message.sequence > after && message.sequence < before);
+				if (!additions.length) {
+					if (this._page.get().messages.some(message => message.sequence > after && message.sequence < before)) {
+						throw this.invalidHistory();
+					}
+					break;
+				}
+				this.commit(this.merge([updated]));
+				after = additions.at(-1)!.sequence;
+			}
 			return;
 		}
 		// Delivery retries can change even terminal records; refresh the loaded prefix, not just pending deliveries.
@@ -310,6 +335,7 @@ export class CollaborationHistory extends Disposable {
 		const ids = new Map<string, number>();
 		for (const message of page.messages) {
 			if (!message.id || !Number.isSafeInteger(message.sequence) || message.sequence < 1
+				|| (this.memberId !== undefined && !message.mentions.includes(this.memberId))
 				|| (records.has(message.sequence) && records.get(message.sequence)!.id !== message.id)
 				|| (ids.has(message.id) && ids.get(message.id) !== message.sequence)) {
 				throw this.invalidHistory();
@@ -319,7 +345,7 @@ export class CollaborationHistory extends Disposable {
 		}
 		const messages = [...records.values()].sort((a, b) => a.sequence - b.sequence);
 		if ((!messages.length && (page.hasEarlier || page.hasLater))
-			|| messages.some((message, index) => index > 0 && message.sequence !== messages[index - 1].sequence + 1)) {
+			|| (!this.memberId && messages.some((message, index) => index > 0 && message.sequence !== messages[index - 1].sequence + 1))) {
 			throw this.invalidHistory();
 		}
 		return { messages, hasEarlier: page.hasEarlier, hasLater: page.hasLater };

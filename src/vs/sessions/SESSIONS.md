@@ -151,6 +151,12 @@ Provider-specific configuration remains opaque to shared Sessions code. Scoped A
 
 Providers implement only operations advertised by their contracts, including request sending, model selection, rename, archive, read state, deletion, and chat creation. Capability checks happen before invocation. Once invoked, an operation returns a defined result or rejects; unsupported behavior must not be reported as a success-shaped fallback.
 
+Providers may expose optional model-team selection for an exact chat. The owning
+provider stages Lead and helper preferences without starting a request, reports
+pending versus applied configuration, and preserves the existing model catalog
+and Lead model identity. Shared pickers consume this contract without knowledge
+of provider runtimes; runtime enforcement is not owned by the renderer.
+
 ### Provider ownership
 
 Backend state, transport, URI formats, recovery, and authentication remain inside provider contributions. Providers adapt those details into `ISession`, `IChat`, and shared operations.

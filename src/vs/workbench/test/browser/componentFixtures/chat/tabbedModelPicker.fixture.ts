@@ -3,29 +3,43 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { addDisposableListener, EventHelper, EventType } from '../../../../../base/browser/dom.js';
+import { $, addDisposableListener, append, EventHelper, EventType } from '../../../../../base/browser/dom.js';
+import { Switch } from '../../../../../base/browser/ui/toggle/switch.js';
+import { toAction } from '../../../../../base/common/actions.js';
+import { Codicon } from '../../../../../base/common/codicons.js';
 import { IStringDictionary } from '../../../../../base/common/collections.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { DisposableStore } from '../../../../../base/common/lifecycle.js';
+import { constObservable, observableValue } from '../../../../../base/common/observable.js';
+import { extUri } from '../../../../../base/common/resources.js';
 import { InMemoryStorageService, IStorageService } from '../../../../../platform/storage/common/storage.js';
 import { upcastPartial } from '../../../../../base/test/common/mock.js';
 import { localize } from '../../../../../nls.js';
 import { IAccessibilityService } from '../../../../../platform/accessibility/common/accessibility.js';
 import { TestAccessibilityService } from '../../../../../platform/accessibility/test/common/testAccessibilityService.js';
+import { ActionWidgetService, IActionWidgetService } from '../../../../../platform/actionWidget/browser/actionWidget.js';
 import { autoModeTiers, defaultAutoModeTier, getAutoModeTierDescription, getAutoModeTierLabel } from '../../../../../platform/agentHost/common/autoModeTiers.js';
 import { ExtensionIdentifier } from '../../../../../platform/extensions/common/extensions.js';
 import { IContextViewDelegate, IContextViewService } from '../../../../../platform/contextview/browser/contextView.js';
 import { ContextViewService } from '../../../../../platform/contextview/browser/contextViewService.js';
+import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
+import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { ILayoutService } from '../../../../../platform/layout/browser/layoutService.js';
 import { NullOpenerService } from '../../../../../platform/opener/test/common/nullOpenerService.js';
-import { StateType } from '../../../../../platform/update/common/update.js';
+import { IProductService } from '../../../../../platform/product/common/productService.js';
+import { IUpdateService, State, StateType, UpdateType } from '../../../../../platform/update/common/update.js';
+import { IUriIdentityService } from '../../../../../platform/uriIdentity/common/uriIdentity.js';
 import { ChatEntitlement, IChatEntitlementService } from '../../../../services/chat/common/chatEntitlementService.js';
 import { ILanguageModelChatMetadata, ILanguageModelChatMetadataAndIdentifier, ILanguageModelProviderDescriptor, ILanguageModelsService, IModelControlEntry } from '../../../../contrib/chat/common/languageModels.js';
 import { IModelConfigurationAccess } from '../../../../contrib/chat/browser/widget/input/modelPicker/modelPickerModelConfig.js';
+import { IModelPickerAdditionalContent, IModelPickerDelegate, IModelPickerSelectionPresentation, ModelPickerActionItem } from '../../../../contrib/chat/browser/widget/input/modelPicker/modelPickerActionItem.js';
 import { ModelPickerAutoRow } from '../../../../contrib/chat/browser/widget/input/modelPicker/modelPickerAutoRow.js';
 import { IPricingDisclosure, ModelCard } from '../../../../contrib/chat/browser/widget/input/modelPicker/modelPickerCard.js';
 import { ITabbedModelPickerContext, TabbedModelPicker } from '../../../../contrib/chat/browser/widget/input/modelPicker/modelPickerTabbedWidget.js';
 import { IModelPickerProviderPlaceholder } from '../../../../contrib/chat/browser/widget/input/modelPicker/modelPickerTabs.js';
+import { TABBED_MODEL_PICKER_SETTING_ID } from '../../../../contrib/chat/browser/widget/input/modelPicker/modelPickerWidget.js';
+import { NullLanguageModelsService } from '../../../../contrib/chat/test/common/languageModels.js';
+import { TestChatEntitlementService } from '../../../common/workbenchTestServices.js';
 import { ComponentFixtureContext, createEditorServices, defineComponentFixture, defineThemedFixtureGroup, registerWorkbenchServices } from '../fixtureUtils.js';
 
 import '../../../../contrib/chat/browser/widget/media/chat.css';
@@ -242,11 +256,17 @@ function createLanguageModelsService(): ILanguageModelsService {
 function createInlineContextViewService(container: HTMLElement, disposables: ComponentFixtureContext['disposableStore']): IContextViewService {
 	let activeHost: HTMLElement | undefined;
 	let activeRender: { dispose(): void } | undefined;
+	let activeDelegate: IContextViewDelegate | undefined;
 	const hide = () => {
-		activeRender?.dispose();
-		activeHost?.remove();
+		const delegate = activeDelegate;
+		const render = activeRender;
+		const host = activeHost;
+		activeDelegate = undefined;
 		activeRender = undefined;
 		activeHost = undefined;
+		delegate?.onHide?.();
+		render?.dispose();
+		host?.remove();
 	};
 	disposables.add({ dispose: hide });
 	return upcastPartial<IContextViewService>({
@@ -254,9 +274,14 @@ function createInlineContextViewService(container: HTMLElement, disposables: Com
 			hide();
 			activeHost = document.createElement('div');
 			container.appendChild(activeHost);
+			activeDelegate = delegate;
 			const rendered = delegate.render(activeHost);
 			activeRender = rendered ?? undefined;
-			return { close: hide };
+			return { close: () => {
+				if (activeDelegate === delegate) {
+					hide();
+				}
+			} };
 		},
 		hideContextView: hide,
 		getContextViewElement: () => container,
@@ -298,7 +323,16 @@ interface IPickerFixtureOptions {
 	readonly entitlement?: ChatEntitlement;
 	/** Settings to apply per model identifier, so rows can show what they were tuned to. */
 	readonly configured?: IStringDictionary<IStringDictionary<unknown>>;
+	readonly additionalActions?: boolean;
+	readonly selectionPresentation?: IModelPickerSelectionPresentation;
+	readonly additionalContent?: 'header' | 'replacement';
 }
+
+const SAVED_SELECTION: IModelPickerSelectionPresentation = {
+	label: localize('modelPicker.fixture.savedSelection.label', "Review +2"),
+	ariaLabel: localize('modelPicker.fixture.savedSelection.ariaLabel', "Review setup with three participants"),
+	tooltip: localize('modelPicker.fixture.savedSelection.tooltip', "Review setup: GPT-5.5 and two other participants"),
+};
 
 async function renderPicker(context: ComponentFixtureContext, options: IPickerFixtureOptions = {}): Promise<void> {
 	const { container, disposableStore } = context;
@@ -359,6 +393,7 @@ async function renderPicker(context: ComponentFixtureContext, options: IPickerFi
 	container.appendChild(anchor);
 
 	const picker = disposableStore.add(instantiationService.createInstance(TabbedModelPicker));
+	const selectionPresentation = observableValue<IModelPickerSelectionPresentation | undefined>('fixture.selectionPresentation', options.selectionPresentation);
 	const configurationAccess = createConfigurationAccess();
 	for (const [modelId, values] of Object.entries(options.configured ?? {})) {
 		void configurationAccess.setModelConfiguration(modelId, values);
@@ -366,13 +401,42 @@ async function renderPicker(context: ComponentFixtureContext, options: IPickerFi
 	let pickerContext: ITabbedModelPickerContext = {
 		models: options.models ?? ALL_MODELS,
 		selectedModelId: options.selectedModelId ?? 'copilot/gpt-5-5',
+		selectionPresentation: options.additionalActions ? selectionPresentation : undefined,
+		getAdditionalActionGroups: options.additionalActions ? () => [{
+			label: localize('modelPicker.fixture.savedChoices', "Saved choices"),
+			actions: [
+				toAction({
+					id: 'fixture.savedChoice',
+					label: localize('modelPicker.fixture.reviewSetup', "Review Setup"),
+					checked: !!selectionPresentation.get(),
+					run: () => selectionPresentation.set(SAVED_SELECTION, undefined),
+				}),
+				toAction({
+					id: 'fixture.unavailableChoice',
+					label: localize('modelPicker.fixture.unavailableSetup', "Unavailable Setup"),
+					checked: false,
+					enabled: false,
+					run: () => { },
+				}),
+			],
+		}, {
+			label: localize('modelPicker.fixture.choiceActions', "Actions"),
+			actions: [toAction({
+				id: 'fixture.manageChoices',
+				label: localize('modelPicker.fixture.manageChoices', "Manage Choices..."),
+				run: () => { },
+			})],
+		}] : undefined,
 		recentModelIds: ['copilot/gpt-5-3-codex', 'copilot/gemini-3-5-flash'],
 		pinnedModelIds: options.pinnedModelIds ?? ['copilot/claude-sonnet-5'],
 		controlModels: options.controlModels ?? CONTROL_MODELS,
 		configurationAccess,
 		isUBB: true,
 		showManageModels: true,
-		onSelect: model => { pickerContext = { ...pickerContext, selectedModelId: model.identifier }; },
+		onSelect: model => {
+			pickerContext = { ...pickerContext, selectedModelId: model.identifier };
+			selectionPresentation.set(undefined, undefined);
+		},
 		onTogglePin: (id, pinned) => {
 			pickerContext = {
 				...pickerContext,
@@ -391,7 +455,36 @@ async function renderPicker(context: ComponentFixtureContext, options: IPickerFi
 		onUnavailableLinkClick: () => { },
 		providerPlaceholders: options.providerPlaceholders ?? [],
 		cacheBreakHint: undefined,
+		reopen: () => picker.show(anchor, pickerContext),
 	};
+	const createAdditionalContent = (enabled: boolean): IModelPickerAdditionalContent => ({
+		replaceModelList: enabled,
+		renderHeader: (container, context) => {
+			const store = new DisposableStore();
+			const row = append(container, $('div'));
+			row.style.display = 'flex';
+			row.style.alignItems = 'center';
+			row.style.justifyContent = 'space-between';
+			row.style.padding = 'var(--vscode-spacing-size80)';
+			append(row, $('span', undefined, localize('modelPicker.fixture.team', "Team")));
+			const toggle = store.add(new Switch({ ariaLabel: localize('modelPicker.fixture.teamToggle', "Enable Team"), checked: enabled }));
+			row.appendChild(toggle.domNode);
+			store.add(toggle.onChange(checked => {
+				pickerContext = { ...pickerContext, additionalContent: createAdditionalContent(checked) };
+				context.hide();
+				context.reopen();
+			}));
+			return store;
+		},
+		render: enabled ? container => {
+			const card = new ModelCard({ model: COPILOT_MODELS[0], configurationAccess, isUBB: true, openerService: NullOpenerService });
+			container.appendChild(card.element);
+			return card;
+		} : undefined,
+	});
+	if (options.additionalContent) {
+		pickerContext = { ...pickerContext, additionalContent: createAdditionalContent(options.additionalContent === 'replacement') };
+	}
 	if (options.anchored) {
 		disposableStore.add(addDisposableListener(anchor, EventType.CLICK, event => {
 			EventHelper.stop(event, true);
@@ -438,6 +531,92 @@ async function renderPicker(context: ComponentFixtureContext, options: IPickerFi
 			throw new Error('Model pricing disclosure not found');
 		}
 		toggle.click();
+	}
+}
+
+async function renderSharedPicker(context: ComponentFixtureContext, multiple: boolean, tabbed?: boolean): Promise<void> {
+	const { container, disposableStore, theme } = context;
+	const open = tabbed !== undefined;
+	setupContainer(container, open ? 700 : 320);
+	container.classList.add('interactive-session');
+	container.style.position = 'relative';
+	const toolbars = append(container, $('.chat-input-toolbars'));
+	const toolbar = append(toolbars, $('.chat-input-toolbar'));
+	if (open) {
+		container.style.height = '560px';
+		toolbar.style.position = 'absolute';
+		toolbar.style.bottom = 'var(--vscode-spacing-size80)';
+	}
+	const item = append(toolbar, $('div'));
+	item.style.width = '280px';
+	const entitlement = new TestChatEntitlementService();
+	entitlement.entitlement = ChatEntitlement.Pro;
+	const instantiationService = createEditorServices(disposableStore, {
+		colorTheme: theme,
+		additionalServices: registration => {
+			registerWorkbenchServices(registration);
+			registration.defineInstance(IConfigurationService, new TestConfigurationService({ [TABBED_MODEL_PICKER_SETTING_ID]: tabbed ?? false }));
+			registration.defineInstance(IChatEntitlementService, entitlement);
+			registration.defineInstance(ILanguageModelsService, new class extends NullLanguageModelsService {
+				override getLanguageModelIds(): string[] { return ALL_MODELS.map(model => model.identifier); }
+				override getRecentlyUsedModelIds(): string[] { return [COPILOT_MODELS[0].identifier]; }
+				override getVendors(): ILanguageModelProviderDescriptor[] { return createLanguageModelsService().getVendors(); }
+			}());
+			registration.defineInstance(IProductService, upcastPartial<IProductService>({ version: '1.100.0' }));
+			registration.defineInstance(IUpdateService, upcastPartial<IUpdateService>({ state: State.Idle(UpdateType.Archive) }));
+			registration.defineInstance(IUriIdentityService, upcastPartial<IUriIdentityService>({ extUri }));
+			registration.defineInstance(ILayoutService, upcastPartial<ILayoutService>({
+				getContainer: () => container, mainContainer: container, activeContainer: container, onDidLayoutContainer: Event.None,
+			}));
+			registration.define(IContextViewService, ContextViewService);
+			registration.define(IActionWidgetService, ActionWidgetService);
+		},
+	});
+	const currentModel = observableValue('fixture.currentModel', COPILOT_MODELS[0]);
+	const configurationAccess = createConfigurationAccess();
+	let teamEnabled = false;
+	const delegate: IModelPickerDelegate = {
+		currentModel,
+		selectionPresentation: constObservable(multiple ? {
+			label: localize('modelPicker.fixture.teamSelection', "Team"),
+			ariaLabel: localize('modelPicker.fixture.teamSelectionAria', "Team, GPT-5.5 and Claude Sonnet 5"),
+			tooltip: localize('modelPicker.fixture.teamSelectionTooltip', "Lead: GPT-5.5; Worker: Claude Sonnet 5"),
+			segments: [{ label: 'GPT-5.5', icon: Codicon.agent }, { label: 'Claude Sonnet 5', icon: Codicon.agent }],
+		} : undefined),
+		setModel: model => currentModel.set(model, undefined),
+		getModels: () => ALL_MODELS,
+		getPresentationOptions: () => ({
+			useGroupedModelPicker: true, showManageModelsAction: false, showUnavailableFeatured: false,
+			showFeatured: true, showAutoModel: true, showModelIcon: true,
+		}),
+		getAdditionalContent: open ? () => ({
+			replaceModelList: teamEnabled,
+			renderHeader: (container, context) => {
+				const store = new DisposableStore();
+				const toggle = store.add(new Switch({ ariaLabel: localize('modelPicker.fixture.team', "Team"), checked: teamEnabled }));
+				container.appendChild(toggle.domNode);
+				store.add(toggle.onChange(checked => {
+					teamEnabled = checked;
+					context.hide();
+					context.reopen();
+				}));
+				return store;
+			},
+			render: teamEnabled ? container => {
+				const card = new ModelCard({ model: currentModel.get(), configurationAccess, isUBB: true, openerService: NullOpenerService });
+				container.appendChild(card.element);
+				return card;
+			} : undefined,
+		}) : undefined,
+		modelConfiguration: configurationAccess,
+	};
+	const picker = disposableStore.add(instantiationService.createInstance(ModelPickerActionItem,
+		toAction({ id: 'fixture.modelPicker', label: localize('modelPicker.fixture.models', "Models"), run: () => { } }),
+		delegate, { compact: constObservable(!open) }));
+	picker.render(item);
+	await Promise.resolve();
+	if (open) {
+		picker.show();
 	}
 }
 
@@ -520,6 +699,32 @@ export default defineThemedFixtureGroup({ path: 'chat/input/tabbedModelPicker' }
 	}),
 	Picker: defineComponentFixture({ render: context => renderPicker(context, { models: COPILOT_ONLY_MODELS }) }),
 	PickerWithAddedModels: defineComponentFixture({ render: context => renderPicker(context) }),
+	PickerWithHeader: defineComponentFixture({
+		additionalThemes: ['darkHighContrast', 'lightHighContrast'],
+		render: context => renderPicker(context, { additionalContent: 'header' }),
+	}),
+	PickerWithReplacementBody: defineComponentFixture({
+		additionalThemes: ['darkHighContrast', 'lightHighContrast'],
+		render: context => renderPicker(context, { additionalContent: 'replacement' }),
+	}),
+	SharedClassicHeader: defineComponentFixture({ render: context => renderSharedPicker(context, false, false) }),
+	SharedTabbedHeader: defineComponentFixture({ render: context => renderSharedPicker(context, false, true) }),
+	CompactSingleSelection: defineComponentFixture({ render: context => renderSharedPicker(context, false) }),
+	CompactMultipleSelection: defineComponentFixture({
+		additionalThemes: ['darkHighContrast', 'lightHighContrast'],
+		render: context => renderSharedPicker(context, true),
+	}),
+	PickerWithAdditionalActions: defineComponentFixture({
+		additionalThemes: ['darkHighContrast', 'lightHighContrast'],
+		render: context => renderPicker(context, { additionalActions: true }),
+	}),
+	PickerWithAdditionalSelection: defineComponentFixture({
+		additionalThemes: ['darkHighContrast', 'lightHighContrast'],
+		render: context => renderPicker(context, { additionalActions: true, selectionPresentation: SAVED_SELECTION, openCardFor: 'GPT-5.5' }),
+	}),
+	PickerAdditionalActionsSearch: defineComponentFixture({
+		render: context => renderPicker(context, { additionalActions: true, selectionPresentation: SAVED_SELECTION, search: true }),
+	}),
 	PickerAddedModelsTab: defineComponentFixture({
 		render: context => renderPicker(context, { initialTabLabel: 'Ollama' }),
 	}),

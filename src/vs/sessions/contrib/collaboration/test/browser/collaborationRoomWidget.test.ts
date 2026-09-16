@@ -13,35 +13,35 @@ import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IActionWidgetService } from '../../../../../platform/actionWidget/browser/actionWidget.js';
-import { IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomMessage, IAgentHostRoomMessagePage, MAX_ROOM_WORKERS } from '../../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomCreateOptions, IAgentHostRoomLimits, IAgentHostRoomMessage, IAgentHostRoomMessagePage, MAX_ROOM_WORKERS } from '../../../../../platform/agentHost/common/agentHostRooms.js';
 import { ChatInputRequestWithPlanReview } from '../../../../../platform/agentHost/common/agentHostPlanReview.js';
 import { ChatInputQuestionKind, ChatInputResponseKind, ConfirmationOptionKind, ModelSelection, SessionModelInfo, ToolCallStatus } from '../../../../../platform/agentHost/common/state/protocol/state.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
+import { IContextMenuService } from '../../../../../platform/contextview/browser/contextView.js';
 import { IConfirmation, IDialogService, IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
+import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
+import { NullHoverService } from '../../../../../platform/hover/test/browser/nullHoverService.js';
 import { IKeybindingService } from '../../../../../platform/keybinding/common/keybinding.js';
 import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
 import { WorkbenchList } from '../../../../../platform/list/browser/listService.js';
 import { IMarkdownRendererService } from '../../../../../platform/markdown/browser/markdownRenderer.js';
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
-import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
+import { IPickOptions, IQuickInputService, IQuickPickItem, QuickPickInput } from '../../../../../platform/quickinput/common/quickInput.js';
 import { IEditorService } from '../../../../../workbench/services/editor/common/editorService.js';
 import { IViewsService } from '../../../../../workbench/services/views/common/viewsService.js';
 import { ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
 import { workbenchInstantiationService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
-import { AbstractChatView } from '../../../../browser/parts/chatView.js';
 import { IAgentHostSessionsProvider, LOCAL_AGENT_HOST_PROVIDER_ID } from '../../../../common/agentHostSessionsProvider.js';
-import { IChatViewFactory } from '../../../../services/chatView/browser/chatViewFactory.js';
 import { ISessionsPartService } from '../../../../services/sessions/browser/sessionsPartService.js';
 import { ISessionsService } from '../../../../services/sessions/browser/sessionsService.js';
 import { ICollaborationRoomCreationDraft, ICollaborationRoomScrollState, ICollaborationRoomViewService } from '../../../../services/collaboration/browser/collaborationRoomView.js';
 import { CollaborationRequestResponse, ICollaborationRequest, ICollaborationService, ICollaborationWorkspaceTrust } from '../../../../services/collaboration/common/collaboration.js';
-import { CollaborationDraft } from '../../../../services/collaboration/common/collaborationMentions.js';
+import { CollaborationAudience, CollaborationDraft } from '../../../../services/collaboration/common/collaborationMentions.js';
 import { ISessionsProvidersService } from '../../../../services/sessions/browser/sessionsProvidersService.js';
 import { IChat, ISession } from '../../../../services/sessions/common/session.js';
 import { ISessionsProvider } from '../../../../services/sessions/common/sessionsProvider.js';
-import { CollaborationCoordinatorView } from '../../browser/collaborationCoordinatorView.js';
 import { CollaborationRoomWidget } from '../../browser/collaborationRoomWidget.js';
 import { stubCollaborationTestServices } from './collaborationTestServices.js';
 
@@ -55,17 +55,20 @@ suite('CollaborationRoomWidget', () => {
 			members: [1, 2].map(index => ({
 				id: `member-${index}`, name: `Copilot-${index}`, sessionUri: `copilotcli:/member-${index}`,
 				chatUri: `opaque-chat:/member-${index}/primary?version=2`,
-				state: 'working' as const, turns: 1,
+				state: state === 'created' ? 'pending' as const : 'working' as const, turns: state === 'created' ? 0 : 1,
 			})),
 			artifacts: [], latestMessageSequence: messageCount,
+			run: state === 'created' ? undefined : { id: 'run', startedAt: 0, limits: { maxTurns: 10 }, admittedTurns: 2 },
 		};
 		const messages: IAgentHostRoomMessage[] = Array.from({ length: messageCount }, (_, index): IAgentHostRoomMessage => ({
 			id: `post-${index}`, sequence: index + 1, authorId: 'member-1', authorName: 'Copilot-1',
 			authorKind: 'agent', kind: 'message', text: `Shared post ${index}`, timestamp: 0,
 			mentions: [], deliveries: [],
 		}));
-		const starts: undefined[] = [];
-		const sendModes: string[] = [];
+		const starts: IAgentHostRoomLimits[] = [];
+		const extensions: number[] = [];
+		const summaries: string[] = [];
+		const sentMessages: { text: string; audience: CollaborationAudience; replyTo: string | undefined }[] = [];
 		const created = new DeferredPromise<IAgentHostRoomCreateOptions>();
 		const opened = new DeferredPromise<{ session: ISession; chat: URI }>();
 		const artifactFocused = new DeferredPromise<void>();
@@ -86,6 +89,7 @@ suite('CollaborationRoomWidget', () => {
 		}();
 		let sends = 0;
 		let sessionFocuses = 0;
+		const drafts = new Map<string, CollaborationDraft>([['room', draft]]);
 		const facade = new class extends mock<ICollaborationService>() {
 			override readonly availability = constObservable('available' as const);
 			override readonly supported = constObservable(true);
@@ -93,6 +97,7 @@ suite('CollaborationRoomWidget', () => {
 			override readonly rooms = observableValue<readonly IAgentHostRoom[]>(this, [room]);
 			override readonly activeRoomId = observableValue<string | undefined>(this, newRoom ? undefined : room.id);
 			override readonly activeRoom = observableValue<IAgentHostRoom | undefined>(this, newRoom ? undefined : room);
+			override readonly inboxMemberId = observableValue<string | undefined>(this, undefined);
 			override readonly messages = observableValue<IAgentHostRoomMessagePage>(this, { messages, hasEarlier: false, hasLater: false });
 			override readonly models = observableValue<readonly SessionModelInfo[]>(this, [
 				{ id: 'model-a', name: 'Model A', provider: 'copilotcli' },
@@ -102,27 +107,50 @@ suite('CollaborationRoomWidget', () => {
 			override readonly loadingEarlier = observableValue(this, false);
 			override readonly creating = observableValue(this, false);
 			override readonly sending = constObservable(false);
-			override readonly canSteer = observableValue(this, true);
+			override readonly canSend = observableValue(this, true);
 			override readonly canConfigure = observableValue(this, false);
 			override readonly canSetMemberModel = observableValue(this, true);
-			override readonly canVerifyResults = observableValue(this, true);
-			override readonly canCoordinate = observableValue(this, false);
 			override readonly error = constObservable(undefined);
 			override readonly workspaceTrust = observableValue<ICollaborationWorkspaceTrust>(this, { state: 'trusted' });
 			override readonly requests = observableValue<readonly ICollaborationRequest[]>(this, []);
 			override readonly requestError = constObservable(undefined);
-			override getDraft() { return draft; }
+			override getDraft(roomId: string) {
+				let draft = drafts.get(roomId);
+				if (!draft) {
+					draft = new CollaborationDraft();
+					drafts.set(roomId, draft);
+				}
+				return draft;
+			}
+			private roomHistory: IAgentHostRoomMessagePage | undefined;
 			override async selectRoom(roomId: string | undefined): Promise<void> {
 				selectedRooms.push(roomId);
 				transaction(tx => {
 					this.activeRoomId.set(roomId, tx);
 					this.activeRoom.set(this.rooms.get().find(candidate => candidate.id === roomId), tx);
+					this.inboxMemberId.set(undefined, tx);
+				});
+			}
+			override async selectInbox(memberId: string | undefined): Promise<void> {
+				if (this.inboxMemberId.get() === undefined) {
+					this.roomHistory = this.messages.get();
+				}
+				const page = this.roomHistory!;
+				transaction(tx => {
+					this.inboxMemberId.set(memberId, tx);
+					this.messages.set({ ...page, messages: memberId ? page.messages.filter(message => message.mentions.includes(memberId)) : page.messages }, tx);
 				});
 			}
 			override async loadMessages(): Promise<void> { }
 			override async loadEarlierMessages(): Promise<void> { }
-			override async sendMessage(mode = 'message'): Promise<void> { sends++; sendModes.push(mode); }
-			override async startRoom(): Promise<void> { starts.push(undefined); }
+			override async sendMessage(): Promise<void> {
+				const draft = this.getDraft(this.activeRoomId.get()!);
+				sends++;
+				sentMessages.push({ text: draft.text, audience: draft.audience, replyTo: draft.replyTo });
+			}
+			override async askForSummary(memberId: string): Promise<void> { summaries.push(memberId); }
+			override async startRoom(limits: IAgentHostRoomLimits): Promise<void> { starts.push(limits); }
+			override async extendRun(additionalTurns: number): Promise<void> { extensions.push(additionalTurns); }
 			override async isRepository(): Promise<boolean> { return true; }
 			override async createRoom(options: IAgentHostRoomCreateOptions): Promise<IAgentHostRoom> {
 				await created.complete(options);
@@ -134,17 +162,43 @@ suite('CollaborationRoomWidget', () => {
 			override readonly activeView = constObservable(undefined);
 			override readonly scrollState = observableValue<ICollaborationRoomScrollState | undefined>(this, undefined);
 			override readonly creationDraft = observableValue<ICollaborationRoomCreationDraft | undefined>(this, initialDraft);
+			override readonly hiddenMessages = observableValue<ReadonlyMap<string, ReadonlySet<string>>>(this, new Map());
 			override readonly panelContent = observableValue<HTMLElement | undefined>(this, undefined);
 			override saveScrollState(state: ICollaborationRoomScrollState): void { this.scrollState.set(state, undefined); }
 			override saveCreationDraft(draft: ICollaborationRoomCreationDraft | undefined): void { this.creationDraft.set(draft, undefined); }
 			override publishPanelContent(content: HTMLElement | undefined): IDisposable { this.panelContent.set(content, undefined); return Disposable.None; }
 			override close(): void { this.visible.set(false, undefined); }
+			override hideMessage(roomId: string, messageId: string): void {
+				const hidden = new Map(this.hiddenMessages.get());
+				hidden.set(roomId, new Set([...hidden.get(roomId) ?? [], messageId]));
+				this.hiddenMessages.set(hidden, undefined);
+			}
+			override restoreHiddenMessages(roomId: string): void {
+				const hidden = new Map(this.hiddenMessages.get());
+				hidden.delete(roomId);
+				this.hiddenMessages.set(hidden, undefined);
+			}
 		}();
 		const instantiation = workbenchInstantiationService(undefined, disposables);
 		const lists = stubCollaborationTestServices(instantiation, disposables);
+		const hovers = new Map<HTMLElement, string>();
+		instantiation.stub(IHoverService, {
+			...NullHoverService,
+			setupDelayedHover: (target: HTMLElement, options: Parameters<IHoverService['setupDelayedHover']>[1]) => {
+				const content = (typeof options === 'function' ? options() : options).content;
+				if (typeof content === 'string') {
+					hovers.set(target, content);
+				}
+				return toDisposable(() => hovers.delete(target));
+			},
+		});
 		instantiation.stub(IActionWidgetService, new class extends mock<IActionWidgetService>() {
 			override show(): void { }
 			override hide(): void { }
+		}());
+		let contextMenu: Parameters<IContextMenuService['showContextMenu']>[0] | undefined;
+		instantiation.stub(IContextMenuService, new class extends mock<IContextMenuService>() {
+			override showContextMenu(delegate: Parameters<IContextMenuService['showContextMenu']>[0]): void { contextMenu = delegate; }
 		}());
 		instantiation.stub(ICollaborationService, facade);
 		instantiation.stub(ICollaborationRoomViewService, viewService);
@@ -169,7 +223,15 @@ suite('CollaborationRoomWidget', () => {
 		instantiation.stub(IOpenerService, new class extends mock<IOpenerService>() {
 			override async open() { return true; }
 		}());
-		instantiation.stub(IQuickInputService, new class extends mock<IQuickInputService>() { }());
+		instantiation.stub(IQuickInputService, new class extends mock<IQuickInputService>() {
+			override pick<T extends IQuickPickItem>(picks: Promise<QuickPickInput<T>[]> | QuickPickInput<T>[], options?: IPickOptions<T> & { canPickMany: true }): Promise<T[] | undefined>;
+			override pick<T extends IQuickPickItem>(picks: Promise<QuickPickInput<T>[]> | QuickPickInput<T>[], options?: IPickOptions<T> & { canPickMany: false }): Promise<T | undefined>;
+			override pick<T extends IQuickPickItem>(picks: Promise<QuickPickInput<T>[]> | QuickPickInput<T>[], options?: Omit<IPickOptions<T>, 'canPickMany'>): Promise<T | undefined>;
+			override async pick<T extends IQuickPickItem>(picks: Promise<QuickPickInput<T>[]> | QuickPickInput<T>[], options?: IPickOptions<T>): Promise<T | T[] | undefined> {
+				const item = (await picks)[1];
+				return item && item.type !== 'separator' ? options?.canPickMany ? [item] : item : undefined;
+			}
+		}());
 		const providers = new Map<string, ISessionsProvider>([[provider.id, provider]]);
 		instantiation.stub(ISessionsProvidersService, new class extends mock<ISessionsProvidersService>() {
 			override getProvider<T extends ISessionsProvider>(id: string): T | undefined { return providers.get(id) as T | undefined; }
@@ -222,6 +284,20 @@ suite('CollaborationRoomWidget', () => {
 			input.dispatchEvent(event);
 			return event;
 		};
+		const setBudget = (value: string) => {
+			const input = panel.querySelector<HTMLInputElement>('.room-budget-field input')!;
+			input.value = value;
+			input.dispatchEvent(new Event('input', { bubbles: true }));
+		};
+		const chooseMenuItem = async (selector: string, label: string) => {
+			container.querySelector<HTMLElement>(selector)!.click();
+			const menu = contextMenu!;
+			assert.ok(menu.getActions);
+			const action = menu.getActions().find(action => action.label === label);
+			assert.ok(action);
+			await action.run();
+			menu.onHide?.(false);
+		};
 		const getMessageList = () => {
 			const list = lists.widget;
 			assert.ok(list instanceof WorkbenchList);
@@ -237,85 +313,44 @@ suite('CollaborationRoomWidget', () => {
 			}
 			list.reveal(list.getFocus()[0], key === 'Home' ? 0 : 1);
 		};
-		return { widget, container, instantiation, confirmations, input, type, key, historyKey, getMessageList, draft, starts, created, opened, artifactFocused, provider, resolutions, selectedRooms, peerSession, peerChat, viewService, facade, sendModes, openedContainers, panel, getSends: () => sends, getSessionFocuses: () => sessionFocuses };
+		return { widget, container, instantiation, confirmations, input, type, key, setBudget, chooseMenuItem, historyKey, getMessageList, hovers, draft, starts, extensions, summaries, created, opened, artifactFocused, provider, resolutions, selectedRooms, peerSession, peerChat, viewService, facade, sentMessages, openedContainers, panel, getSends: () => sends, getSessionFocuses: () => sessionFocuses };
 	}
 
 	test('peer navigation resolves opaque identities through the owning provider', async () => {
 		const { container, opened, resolutions, peerSession, peerChat } = setup();
-		container.querySelector<HTMLButtonElement>('.room-member-heading button')!.click();
+		container.querySelector<HTMLElement>('.room-member-heading .monaco-button')!.click();
 		assert.deepStrictEqual(await opened.p, { session: peerSession, chat: peerChat.resource });
 		assert.deepStrictEqual(resolutions, [{ session: 'copilotcli:/member-1', chat: URI.parse('opaque-chat:/member-1/primary?version=2').toString() }]);
 	});
 
-	test('coordinator view binds the resolved session to a standard chat view', async () => {
-		const calls: string[] = [];
-		const chat = new class extends mock<IChat>() {
-			override readonly resource = URI.parse('chat:/coordinator');
-		}();
-		const session = new class extends mock<ISession>() {
-			override readonly resource = URI.parse('session:/coordinator');
-			override readonly sessionId = 'coordinator-session';
-		}();
-		const provider = new class extends mock<IAgentHostSessionsProvider>() {
-			override readonly id = LOCAL_AGENT_HOST_PROVIDER_ID;
-			available = true;
-			override async resolveSessionChat(sessionUri: URI, chatUri: URI | undefined) {
-				calls.push(`resolve:${sessionUri.toString()}:${chatUri?.toString()}`);
-				return this.available ? { session, chat } : undefined;
-			}
-		}();
-		const registeredProviders = new Map<string, ISessionsProvider>([[provider.id, provider]]);
-		const providers = new class extends mock<ISessionsProvidersService>() {
-			override getProvider<T extends ISessionsProvider>(id: string): T | undefined { return registeredProviders.get(id) as T | undefined; }
-		}();
-		const chatView = new class extends mock<AbstractChatView>() {
-			override readonly kind = 'chat';
-			override readonly element = document.createElement('div');
-			override setPrimary(value: boolean): void { calls.push(`primary:${value}`); }
-			override setActive(value: boolean): void { calls.push(`active:${value}`); }
-			override setVisible(value: boolean): void { calls.push(`visible:${value}`); }
-			override setChat(value: IChat, historyKey?: string): void { calls.push(`chat:${value.resource.toString()}:${historyKey}`); }
-			override layout(width: number, height: number, top: number, left: number): void { calls.push(`layout:${width}:${height}:${top}:${left}`); }
-			protected override doLayout(width: number, height: number, top: number, left: number): void { calls.push(`layout:${width}:${height}:${top}:${left}`); }
-			override toJSON(): object { return {}; }
-			override focus(): void { calls.push('focus'); }
-			override dispose(): void { }
-		}();
-		const factory = new class extends mock<IChatViewFactory>() {
-			override createChatView(): AbstractChatView { calls.push('create'); return chatView; }
-		}();
-		const view = disposables.add(new CollaborationCoordinatorView(factory, providers));
-		view.layout(800, 600);
-		await view.setCoordinator('copilotcli:/coordinator', 'copilotcli:/coordinator/chat', 'Coordinator: Room', 0, 'file:///coordinator');
-		view.setVisible(false);
-		view.focus();
-		provider.available = false;
-		await assert.rejects(view.setCoordinator('copilotcli:/another-coordinator', undefined, 'Coordinator: Another Room', 1, 'file:///another-coordinator'));
-		assert.deepStrictEqual({
-			calls,
-			staleChatCleared: view.element.childElementCount === 0,
-		}, {
-			calls: [
-				'resolve:copilotcli:/coordinator:copilotcli:/coordinator/chat',
-				'create',
-				'primary:true',
-				'active:true',
-				'visible:true',
-				'chat:chat:/coordinator:coordinator-session',
-				'layout:800:600:0:0',
-				'visible:false',
-				'focus',
-				'resolve:copilotcli:/another-coordinator:undefined',
-			],
-			staleChatCleared: true,
+	test('peer navigation uses the latest host-supplied chat after provisioning', async () => {
+		const { facade, container, opened, resolutions } = setup('created');
+		const room = facade.activeRoom.get()!;
+		const beforeStart = container.querySelector('.room-member-heading .monaco-button')?.getAttribute('aria-disabled');
+		facade.activeRoom.set({ ...room, members: room.members.map(member => ({ ...member, turns: 1, state: 'idle', chatUri: 'opaque-chat:/provisioned/primary?version=3' })) }, undefined);
+		container.querySelector<HTMLElement>('.room-member-heading .monaco-button')!.click();
+		await opened.p;
+		assert.deepStrictEqual({ beforeStart, resolutions }, {
+			beforeStart: 'true', resolutions: [{ session: 'copilotcli:/member-1', chat: URI.parse('opaque-chat:/provisioned/primary?version=3').toString() }],
 		});
+	});
+
+	test('rendering, resizing, incoming state, and inbox filtering create no sessions or turns', async () => {
+		const { widget, facade, starts, getSends, resolutions, created } = setup('created', 1);
+		widget.layout(800, 600);
+		facade.activeRoom.set({ ...facade.activeRoom.get()!, revision: 2 }, undefined);
+		await facade.selectInbox('member-1');
+		await facade.selectInbox(undefined);
+		assert.deepStrictEqual({
+			starts, sends: getSends(), resolutions, created: created.isSettled,
+		}, { starts: [], sends: 0, resolutions: [], created: false });
 	});
 
 	test('a late peer resolution cannot reopen a disposed room surface', async () => {
 		const { container, opened, provider, widget, peerSession, peerChat } = setup();
 		const pending = new DeferredPromise<{ session: ISession; chat: IChat }>();
 		provider.resolveSessionChat = () => pending.p;
-		container.querySelector<HTMLButtonElement>('.room-member-heading button')!.click();
+		container.querySelector<HTMLElement>('.room-member-heading .monaco-button')!.click();
 		widget.dispose();
 		await pending.complete({ session: peerSession, chat: peerChat });
 		await timeout(0);
@@ -353,13 +388,85 @@ suite('CollaborationRoomWidget', () => {
 		assert.strictEqual(second.input.value, 'A later edit');
 	});
 
+	test('room switches restore the original draft, audience, and scroll anchor without stealing composer focus', () => {
+		const { facade, input, type, draft, historyKey, getMessageList, starts } = setup('running', 20);
+		const first = facade.activeRoom.get()!;
+		const firstPage = facade.messages.get();
+		draft.update('Original note', undefined, { kind: 'member', memberId: 'member-1' });
+		historyKey('Home');
+		getMessageList().scrollTop = 37;
+		const originalScroll = getMessageList().scrollTop;
+		input.focus();
+		transaction(tx => {
+			facade.activeRoomId.set('second', tx);
+			facade.activeRoom.set({ ...first, id: 'second' }, tx);
+			facade.messages.set({ ...firstPage, messages: firstPage.messages.map(message => ({ ...message, id: `second-${message.id}` })) }, tx);
+		});
+		type('Second room draft');
+		transaction(tx => {
+			facade.activeRoomId.set(first.id, tx);
+			facade.activeRoom.set(first, tx);
+			facade.messages.set(firstPage, tx);
+		});
+		assert.deepStrictEqual({
+			text: input.value, audience: draft.audience, secondDraft: facade.getDraft('second').text,
+			scroll: getMessageList().scrollTop, focused: document.activeElement === input, starts,
+		}, {
+			text: 'Original note', audience: { kind: 'member', memberId: 'member-1' }, secondDraft: 'Second room draft',
+			scroll: originalScroll, focused: true, starts: [],
+		});
+	});
 	test('the home screen shows the creation card without transcript rows', () => {
 		const { container, widget } = setup('created', 0, true);
 		assert.deepStrictEqual({
 			home: container.querySelector<HTMLElement>('.room-home')!.hidden,
 			messages: container.querySelectorAll('.room-message').length,
+			budgetHidden: container.querySelector<HTMLElement>('.room-budget-status')!.hidden,
+			budgetText: container.querySelector('.room-budget-status')?.textContent,
 			listsSavedRooms: widget.getAccessibleContent().includes('Saved room: Peer room.'),
-		}, { home: false, messages: 0, listsSavedRooms: true });
+		}, { home: false, messages: 0, budgetHidden: true, budgetText: '', listsSavedRooms: true });
+	});
+
+	test('a selected created room retains its budget status until returning to the home screen', async () => {
+		const { container, facade } = setup('created', 0, true);
+		const budget = container.querySelector<HTMLElement>('.room-budget-status')!;
+		await facade.selectRoom('room');
+		const selected = { hidden: budget.hidden, text: budget.textContent };
+		await facade.selectRoom(undefined);
+		assert.deepStrictEqual({
+			selected, home: { hidden: budget.hidden, text: budget.textContent },
+		}, {
+			selected: { hidden: false, text: 'No run authorized. Choose a turn budget before Start.' },
+			home: { hidden: true, text: '' },
+		});
+	});
+
+	test('the empty folder field keeps usable width beside Browse at wide and narrow home sizes', () => {
+		const { container, widget } = setup('created', 0, true);
+		const row = container.querySelector<HTMLElement>('.room-home-row')!;
+		const folder = row.querySelector<HTMLInputElement>('input')!;
+		const browse = row.querySelector<HTMLElement>('.monaco-button')!;
+		const sizes = [1100, 420].map(width => {
+			container.style.width = `${width}px`;
+			widget.layout(width, 760);
+			const rowBounds = row.getBoundingClientRect();
+			const fieldBounds = folder.getBoundingClientRect();
+			const buttonBounds = browse.getBoundingClientRect();
+			return {
+				fieldGetsRemainingWidth: fieldBounds.width > rowBounds.width / 2,
+				browseFitsLabel: buttonBounds.width < rowBounds.width / 2,
+				noOverlap: fieldBounds.right <= buttonBounds.left,
+			};
+		});
+		assert.deepStrictEqual({
+			placeholder: folder.placeholder, value: folder.value, readOnly: folder.readOnly, sizes,
+		}, {
+			placeholder: 'Choose a folder', value: '', readOnly: true,
+			sizes: [
+				{ fieldGetsRemainingWidth: true, browseFitsLabel: true, noOverlap: true },
+				{ fieldGetsRemainingWidth: true, browseFitsLabel: true, noOverlap: true },
+			],
+		});
 	});
 
 	test('returning to a new-room form does not require a saved scroll position', () => {
@@ -407,7 +514,7 @@ suite('CollaborationRoomWidget', () => {
 		}
 		await selected.p;
 		const memberNames = [...home.querySelectorAll('.room-home-model-name')].map(element => element.textContent);
-		[...home.querySelectorAll<HTMLElement>('.monaco-button')].find(button => button.textContent === 'Create and Start')!.click();
+		[...home.querySelectorAll<HTMLElement>('.monaco-button')].find(button => button.textContent === 'Create Room')!.click();
 
 		assert.deepStrictEqual({ options: await created.p, starts }, {
 			options: {
@@ -451,43 +558,152 @@ suite('CollaborationRoomWidget', () => {
 		assert.strictEqual(input.getAttribute('aria-expanded'), 'false');
 	});
 
-	test('Reply targets the original post and names its peer without changing surfaces', () => {
+	test('Reply links to the original post while still addressing the whole room', () => {
 		const { container, input, draft, viewService } = setup('running', 1);
 		container.querySelector<HTMLElement>('.room-message [role="button"]')!.click();
 		assert.strictEqual(draft.replyTo, 'post-0');
-		assert.strictEqual(input.value, '@Copilot-1 ');
+		assert.deepStrictEqual(draft.audience, { kind: 'all' });
+		assert.strictEqual(input.value, '');
 		assert.strictEqual(viewService.visible.get(), true);
 	});
 
-	test('Send steers while a peer is mid-turn so guidance lands during that turn', () => {
-		const { container, facade, type, sendModes } = setup();
-		const room = facade.activeRoom.get()!;
-		facade.activeRoom.set({ ...room, members: room.members.map((member, index) => index === 0 ? { ...member, state: 'working' as const } : member) }, undefined);
+	test('Send uses the same ordinary inbox route for busy and idle peers', async () => {
+		const { container, facade, type, sentMessages } = setup();
 		type('Change direction');
-		container.querySelector<HTMLButtonElement>('.room-composer .room-send')!.click();
-		assert.deepStrictEqual(sendModes, ['steer']);
+		container.querySelector<HTMLElement>('.room-composer .room-send')!.click();
+		await timeout(0);
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({ ...room, members: room.members.map(member => ({ ...member, state: 'idle' })) }, undefined);
+		type('Another question');
+		container.querySelector<HTMLElement>('.room-composer .room-send')!.click();
+		assert.deepStrictEqual(sentMessages, [
+			{ text: 'Change direction', audience: { kind: 'all' }, replyTo: undefined },
+			{ text: 'Another question', audience: { kind: 'all' }, replyTo: undefined },
+		]);
 	});
 
-	test('Control+Enter steers from the composer and normal Enter still posts a message', () => {
-		const { input, type, sendModes } = setup();
+	test('Control+Enter sends an ordinary message without inferring recipients from text', () => {
+		const { input, type, sentMessages } = setup();
 		type('@Copilot-1 Change direction');
 		const event = new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true });
 		input.dispatchEvent(event);
-		assert.deepStrictEqual({ prevented: event.defaultPrevented, sendModes }, { prevented: true, sendModes: ['steer'] });
+		assert.deepStrictEqual({ prevented: event.defaultPrevented, sentMessages }, {
+			prevented: true, sentMessages: [{ text: '@Copilot-1 Change direction', audience: { kind: 'all' }, replyTo: undefined }],
+		});
 	});
 
-	test('Send posts a message when no peer is mid-turn, or when the host cannot steer', () => {
-		const { container, facade, type, sendModes } = setup();
-		const send = container.querySelector<HTMLButtonElement>('.room-composer .room-send')!;
-		const room = facade.activeRoom.get()!;
-		facade.activeRoom.set({ ...room, members: room.members.map(member => ({ ...member, state: 'idle' as const })) }, undefined);
-		type('Idle room');
+	test('the composer has no audience selector and clearly sends to all peers', () => {
+		const { container, input } = setup();
+		const send = container.querySelector<HTMLElement>('.room-send')!;
+		assert.deepStrictEqual({
+			selector: container.querySelector('.room-composer-audience'),
+			label: send.textContent,
+			placeholder: input.placeholder,
+			accessible: input.getAttribute('aria-label')?.includes('all peers'),
+		}, { selector: null, label: 'Send', placeholder: 'Message all peers', accessible: true });
+	});
+
+	for (const audience of [{ kind: 'note' }, { kind: 'member', memberId: 'member-1' }] as const) {
+		test(`a restored ${audience.kind} draft cannot silently restrict room delivery`, async () => {
+			const draft = new CollaborationDraft();
+			draft.update('Focus on URI formatting', undefined, audience);
+			const { container, sentMessages } = setup('stopped', 0, false, draft);
+			container.querySelector<HTMLElement>('.room-send')!.click();
+			await timeout(0);
+			assert.deepStrictEqual(sentMessages, [{
+				text: 'Focus on URI formatting', audience: { kind: 'all' }, replyTo: undefined,
+			}]);
+		});
+	}
+
+	test('hiding a human message preserves history and replies while removing it from both views', async () => {
+		const { container, facade, widget, input, getSends, starts, viewService } = setup('running', 2);
+		const original = facade.messages.get();
+		const human: IAgentHostRoomMessage = {
+			...original.messages[0], authorId: 'human', authorName: 'You', authorKind: 'human', text: 'My accidental room note',
+		};
+		const page = { ...original, messages: [human, { ...original.messages[1], replyTo: human.id }] };
+		facade.messages.set(page, undefined);
+		const message = container.querySelector<HTMLElement>(`[data-message-id="${human.id}"]`)!;
+		const hide = [...message.querySelectorAll<HTMLElement>('.monaco-button')].find(button => button.textContent === 'Hide for Me')!;
+		hide.focus();
+		hide.click();
+		await timeout(0);
+		const hidden = {
+			visible: [...container.querySelectorAll<HTMLElement>('.room-message')].map(message => message.dataset.messageId),
+			accessible: widget.getAccessibleContent().includes(human.text),
+			rawPage: facade.messages.get(),
+			focused: document.activeElement === input,
+			marker: viewService.hiddenMessages.get().get('room')?.has(human.id),
+		};
+		const restore = [...container.querySelectorAll<HTMLElement>('.room-history-controls .monaco-button')].find(button => button.textContent === 'Show Hidden Messages')!;
+		restore.click();
+		await timeout(0);
+		assert.deepStrictEqual({
+			hidden, restored: widget.getAccessibleContent().includes(human.text), rawPage: facade.messages.get(), starts, sends: getSends(),
+		}, {
+			hidden: { visible: ['post-1'], accessible: false, rawPage: page, focused: true, marker: true },
+			restored: true, rawPage: page, starts: [], sends: 0,
+		});
+	});
+
+	test('hiding the last visible post leaves restoration available without inventing new posts', async () => {
+		const { container, facade, widget } = setup('running', 1);
+		const page = facade.messages.get();
+		const message: IAgentHostRoomMessage = { ...page.messages[0], authorId: 'human', authorName: 'You', authorKind: 'human', text: 'Hide only this note' };
+		facade.messages.set({ ...page, messages: [message] }, undefined);
+		[...container.querySelectorAll<HTMLElement>('.room-message .monaco-button')].find(button => button.textContent === 'Hide for Me')!.click();
+		await timeout(0);
+		const controls = container.querySelector<HTMLElement>('.room-history-controls')!;
+		const restore = [...controls.querySelectorAll<HTMLElement>('.monaco-button')].find(button => button.textContent === 'Show Hidden Messages')!;
+		assert.deepStrictEqual({
+			count: container.querySelectorAll('.room-message').length,
+			controlsHidden: controls.hidden, restoreHidden: restore.hidden,
+			phantomPosts: controls.textContent?.includes('New Posts'),
+			accessible: widget.getAccessibleContent().includes(message.text),
+		}, { count: 0, controlsHidden: false, restoreHidden: false, phantomPosts: false, accessible: false });
+	});
+
+	test('room-start events can be hidden without cancelling their queued delivery', async () => {
+		const { container, facade, widget, getSends, starts } = setup('stopped', 1);
+		const page = facade.messages.get();
+		const event: IAgentHostRoomMessage = {
+			...page.messages[0], authorId: 'system', authorName: 'Room Start', authorKind: 'system', kind: 'system',
+			text: 'Begin work on the shared goal.', mentions: ['member-1'], deliveries: [{ memberId: 'member-1', state: 'pending' }],
+		};
+		const original = { ...page, messages: [event] };
+		facade.messages.set(original, undefined);
+		[...container.querySelectorAll<HTMLElement>('.room-message .monaco-button')].find(button => button.textContent === 'Hide for Me')!.click();
+		await timeout(0);
+		assert.deepStrictEqual({
+			rows: container.querySelectorAll('.room-message').length,
+			accessible: widget.getAccessibleContent().includes(event.text),
+			journal: facade.messages.get(), starts, sends: getSends(),
+		}, { rows: 0, accessible: false, journal: original, starts: [], sends: 0 });
+	});
+
+	test('Ask for Summary uses an existing chosen peer without opening or creating a chat', async () => {
+		const { container, summaries, starts, resolutions, created, type, draft } = setup();
+		type('Keep my draft');
+		[...container.querySelectorAll<HTMLElement>('.room-history-filter .monaco-button')].find(button => button.textContent === 'Ask for Summary')!.click();
+		await timeout(0);
+		assert.deepStrictEqual({
+			summaries, starts, resolutions, created: created.isSettled, draft: draft.text,
+		}, { summaries: ['member-2'], starts: [], resolutions: [], created: false, draft: 'Keep my draft' });
+	});
+
+	test('an unsupported inbox host disables all sending controls', () => {
+		const { facade, container, type, getSends } = setup();
+		type('Do not fall back to a raw turn');
+		facade.canSend.set(false, undefined);
+		const send = container.querySelector<HTMLElement>('.room-send')!;
 		send.click();
-		facade.activeRoom.set({ ...room, members: room.members.map((member, index) => index === 0 ? { ...member, state: 'working' as const } : member) }, undefined);
-		facade.canSteer.set(false, undefined);
-		type('Host without steering');
-		send.click();
-		assert.deepStrictEqual(sendModes, ['message', 'message']);
+		assert.deepStrictEqual({
+			input: container.querySelector<HTMLTextAreaElement>('.room-composer textarea')!.disabled,
+			send: send.getAttribute('aria-disabled'),
+			audience: container.querySelector('.room-composer-audience'),
+			sends: getSends(),
+		}, { input: true, send: 'true', audience: null, sends: 0 });
 	});
 
 	test('sending while reading older posts resumes following the latest conversation', async () => {
@@ -497,7 +713,7 @@ suite('CollaborationRoomWidget', () => {
 		const acknowledged = new DeferredPromise<void>();
 		facade.sendMessage = () => acknowledged.p;
 		type('Advice from older history');
-		container.querySelector<HTMLButtonElement>('.room-composer .room-send')!.click();
+		container.querySelector<HTMLElement>('.room-composer .room-send')!.click();
 		await acknowledged.complete();
 		await acknowledged.p;
 		assert.deepStrictEqual({
@@ -519,16 +735,16 @@ suite('CollaborationRoomWidget', () => {
 				kind: 'finding', text: 'Finished accessibility improvements and verified the tests.', timestamp: 0, mentions: [], deliveries: [],
 			}],
 		}, undefined);
-		const latest = [...container.querySelectorAll<HTMLButtonElement>('.room-history-controls button')].find(button => button.textContent === 'Jump to Latest')!;
+		const latest = [...container.querySelectorAll<HTMLElement>('.room-history-controls .monaco-button')].find(button => button.textContent === 'Jump to Latest')!;
 		assert.deepStrictEqual({
 			reportLoaded: widget.getAccessibleContent().includes('Finished accessibility improvements'),
 			firstPostVisible: feed.textContent?.includes('Shared post 0'),
 			anchorUnchanged: viewService.scrollState.get() === anchor,
-			jumpAvailable: !latest.hidden && !latest.disabled,
+			jumpAvailable: !latest.hidden && latest.getAttribute('aria-disabled') !== 'true',
 		}, { reportLoaded: true, firstPostVisible: true, anchorUnchanged: true, jumpAvailable: true });
 	});
 
-	test('structured results and independent verification render in the conversation and accessible view', () => {
+	test('findings and independent peer review retain text, reply links, and immutable patch navigation', () => {
 		const { container, facade, widget } = setup();
 		facade.activeRoom.set({
 			...facade.activeRoom.get()!,
@@ -538,20 +754,13 @@ suite('CollaborationRoomWidget', () => {
 			hasEarlier: false,
 			hasLater: false,
 			messages: [{
-				id: 'result-one', sequence: 1, authorId: 'member-1', authorName: 'Copilot-1', authorKind: 'agent',
-				kind: 'result', text: 'Parser result', timestamp: 0, mentions: [], deliveries: [],
-				result: {
-					title: 'Parser result',
-					summary: 'The parser accepts the intended syntax.',
-					outcome: 'success',
-					evidence: ['Focused parser tests passed.'],
-					artifactIds: ['patch-one'],
-					verificationState: 'verified',
-				},
+				id: 'finding-one', sequence: 1, authorId: 'member-1', authorName: 'Copilot-1', authorKind: 'agent',
+				kind: 'finding', text: 'Parser result: focused parser tests passed.', timestamp: 0, mentions: ['member-2'],
+				deliveries: [{ memberId: 'member-2', state: 'submitted' }], artifactIds: ['patch-one'],
 			}, {
 				id: 'review-one', sequence: 2, authorId: 'member-2', authorName: 'Copilot-2', authorKind: 'agent',
-				kind: 'verification', text: 'Verified Parser result', timestamp: 1, mentions: [], deliveries: [],
-				verification: { resultId: 'result-one', verdict: 'verified', evidence: ['Repeated the focused test.'] },
+				kind: 'finding', text: 'Repeated the focused test.', timestamp: 1, mentions: ['member-1'], deliveries: [],
+				replyTo: 'finding-one',
 			}],
 		}, undefined);
 		const buttons = [...container.querySelectorAll<HTMLElement>('.room-message-actions [role="button"]')]
@@ -559,53 +768,85 @@ suite('CollaborationRoomWidget', () => {
 			.filter(label => label !== 'Reply');
 		const accessible = widget.getAccessibleContent();
 		assert.deepStrictEqual({
-			result: container.querySelector('.room-result')?.textContent,
-			verification: container.querySelector('.room-verification')?.textContent,
+			legacyCards: container.querySelectorAll('.room-result, .room-verification, .room-assignment').length,
 			buttons,
 			accessible: [
 				accessible.includes('Parser result'),
-				accessible.includes('Focused parser tests passed.'),
+				accessible.includes('focused parser tests passed.'),
 				accessible.includes('Repeated the focused test.'),
 			],
 		}, {
-			result: 'Parser resultSuccessVerifiedThe parser accepts the intended syntax.EvidenceFocused parser tests passed.',
-			verification: 'VerifiedResult: result-oneRepeated the focused test.',
-			buttons: ['Review Patch: Parser patch', 'Review Result'],
+			legacyCards: 0,
+			buttons: ['Review Patch: Parser patch', 'Show Original'],
 			accessible: [true, true, true],
 		});
 	});
 
-	test('structured paired assignments expose objective, evidence, assignees and state', () => {
-		const { container, facade, widget } = setup();
+	test('labels, ARIA, and tooltips distinguish queued, reserved, and native-submitted transport', () => {
+		const { container, facade, widget, hovers } = setup();
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({
+			...room,
+			members: [...room.members, { ...room.members[0], id: 'member-3', name: 'Copilot-3', sessionUri: 'copilotcli:/member-3' }],
+		}, undefined);
 		facade.messages.set({
 			hasEarlier: false,
 			hasLater: false,
 			messages: [{
-				id: 'assignment-one', sequence: 1, authorId: 'coordinator', authorName: 'Coordinator', authorKind: 'agent',
-				kind: 'work', text: 'Pair on the parser.', timestamp: 0,
-				mentions: ['member-1', 'member-2'], deliveries: [
+				id: 'message-one', sequence: 1, authorId: 'human', authorName: 'You', authorKind: 'human',
+				kind: 'message', text: 'Review the parser together.', timestamp: 0,
+				mentions: ['member-1', 'member-2', 'member-3'], deliveries: [
 					{ memberId: 'member-1', state: 'pending' },
-					{ memberId: 'member-2', state: 'pending' },
+					{ memberId: 'member-2', state: 'reserved', turnId: 'reserved-turn' },
+					{ memberId: 'member-3', state: 'submitted' },
 				],
-				assignment: {
-					assigneeIds: ['member-1', 'member-2'],
-					kind: 'work',
-					description: 'Refactor the parser.',
-					expectedEvidence: ['Focused parser tests', 'Independent review'],
-					note: 'Share ownership and compare both approaches.',
-				},
 			}],
 		}, undefined);
+		const metadata = container.querySelector<HTMLElement>('.room-message .detail')!;
+		const tooltip = hovers.get(metadata);
+		const aria = container.querySelector('.room-feed .monaco-list-row')?.getAttribute('aria-label');
 		assert.deepStrictEqual({
-			card: container.querySelector('.room-assignment')?.textContent,
-			state: container.querySelector('.room-assignment')?.getAttribute('data-state'),
-			accessible: widget.getAccessibleContent().includes('Assigned to: Copilot-1, Copilot-2')
-				&& widget.getAccessibleContent().includes('Expected evidence: Focused parser tests; Independent review')
-				&& widget.getAccessibleContent().includes('Coordination note: Share ownership and compare both approaches.'),
+			queued: metadata.textContent?.includes('Copilot-1: Queued'),
+			reserved: metadata.textContent?.includes('Copilot-2: Reserved'),
+			submitted: metadata.textContent?.includes('Copilot-3: Submitted to native host'),
+			accessible: widget.getAccessibleContent().includes('To: Copilot-1, Copilot-2, Copilot-3'),
+			ariaReserved: aria?.includes('immutable input batch are durably assigned'),
+			ariaSubmission: aria?.includes('does not confirm provider acceptance or task completion'),
+			tooltipReserved: tooltip?.includes('This is not delivered input'),
+			tooltipSubmission: tooltip?.includes('Handed to the native host path'),
+			descriptionMatchesTooltip: metadata.getAttribute('aria-description') === tooltip,
+			completed: widget.getAccessibleContent().includes('Completed'),
+			retryOffered: container.querySelector('.room-message-actions')?.textContent?.includes('Retry Delivery'),
 		}, {
-			card: 'Paired AssignmentPendingRefactor the parser.Coordination note: Share ownership and compare both approaches.Paired agents: Copilot-1, Copilot-2Expected EvidenceFocused parser testsIndependent review',
-			state: 'pending',
-			accessible: true,
+			queued: true, reserved: true, submitted: true, accessible: true, ariaReserved: true, ariaSubmission: true,
+			tooltipReserved: true, tooltipSubmission: true, descriptionMatchesTooltip: true, completed: false, retryOffered: false,
+		});
+	});
+
+	test('reserved inbox messages remain counted while their batch consumes only the host-admitted budget', async () => {
+		const { facade, container, getMessageList, getSends, starts } = setup();
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({
+			...room, run: { ...room.run!, admittedTurns: 1 },
+			members: [{ ...room.members[0], state: 'starting', turns: 1 }],
+		}, undefined);
+		facade.messages.set({
+			hasEarlier: false, hasLater: false,
+			messages: [1, 2].map((sequence): IAgentHostRoomMessage => ({
+				id: `reserved-${sequence}`, sequence, authorId: 'human', authorName: 'You', authorKind: 'human', kind: 'message',
+				text: `Inbox message ${sequence}`, timestamp: sequence, mentions: ['member-1'],
+				deliveries: [{ memberId: 'member-1', state: 'reserved', turnId: 'one-reserved-batch' }],
+			})),
+		}, undefined);
+		await facade.selectInbox('member-1');
+		assert.deepStrictEqual({
+			inboxMessages: getMessageList().length,
+			remaining: container.querySelector('.room-budget-status')?.textContent,
+			receiptStates: facade.messages.get().messages.flatMap(message => message.deliveries.map(delivery => delivery.state)),
+			retryOffered: [...container.querySelectorAll('.room-message-actions')].some(actions => actions.textContent?.includes('Retry Delivery')),
+			starts, sends: getSends(),
+		}, {
+			inboxMessages: 2, remaining: '9 turns remaining of 10', receiptStates: ['reserved', 'reserved'], retryOffered: false, starts: [], sends: 0,
 		});
 	});
 
@@ -618,47 +859,68 @@ suite('CollaborationRoomWidget', () => {
 				kind: 'message', text: 'Any updates?', timestamp: 0, mentions: [], deliveries: [],
 			}],
 		}, undefined);
-		const explanation = 'Shared with room; no agents notified';
+		const explanation = 'Room note - no agents notified';
 		assert.deepStrictEqual({
 			visible: container.querySelector('.room-message .detail')?.textContent?.includes(explanation),
 			accessible: widget.getAccessibleContent().includes(explanation),
 		}, { visible: true, accessible: true });
 	});
 
-	test('Send remains available after Stop and explains that guidance waits for Resume', () => {
-		const { container } = setup('stopped');
-		const send = container.querySelector<HTMLButtonElement>('.room-composer .room-send')!;
+	test('Send requests resumption through the host without a separate Start call or budget extension', async () => {
+		const { container, type, starts, extensions, sentMessages } = setup('stopped');
+		type('Please review now');
+		const send = container.querySelector<HTMLElement>('.room-composer .room-send')!;
+		send.click();
+		await timeout(0);
 		assert.deepStrictEqual({
-			enabled: !send.disabled,
-			wakeUpExplained: send.getAttribute('aria-description')?.includes('Stopped peers receive saved guidance after Resume'),
-			defaultAudienceExplained: send.getAttribute('aria-description')?.includes('everyone when none are mentioned'),
-			mentionHint: container.querySelector('.room-composer-actions .room-hint')?.textContent,
-		}, { enabled: true, wakeUpExplained: true, defaultAudienceExplained: true, mentionHint: '@ to mention' });
+			enabled: send.getAttribute('aria-disabled') !== 'true',
+			resumeExplained: container.querySelector('.room-delivery-hint')?.textContent?.includes('Send starts or resumes'),
+			starts, extensions, sentMessages,
+		}, { enabled: true, resumeExplained: true, starts: [], extensions: [], sentMessages: [{ text: 'Please review now', audience: { kind: 'all' }, replyTo: undefined }] });
 	});
 
-	test('Start does not require a turn cap or deadline', () => {
-		const { container, starts } = setup('created');
-		container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!.click();
-		assert.strictEqual(starts.length, 1);
+	test('Start requires an explicitly chosen finite turn budget', async () => {
+		const { container, starts, setBudget } = setup('created');
+		const start = container.querySelector<HTMLElement>('.room-start')!;
+		for (const invalid of ['', '0', '-1', '1.5']) {
+			setBudget(invalid);
+			start.click();
+		}
+		const before = [...starts];
+		setBudget('7');
+		start.click();
+		await timeout(0);
+		assert.deepStrictEqual({
+			before, starts, budgetField: !!container.querySelector('.room-budget-field input'),
+		}, { before: [], starts: [{ maxTurns: 7 }], budgetField: true });
 	});
 
-	test('run settings contain actions without limit fields', () => {
-		const { container } = setup('created');
+	test('budget exhaustion exposes Extend and never lets Resume replenish turns', async () => {
+		const { facade, container, starts, extensions, setBudget } = setup('paused');
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({ ...room, pauseReason: 'budget', run: { ...room.run!, admittedTurns: 10 } }, undefined);
+		const resume = container.querySelector<HTMLElement>('.room-start')!;
+		const extend = container.querySelector<HTMLElement>('.room-extend')!;
+		const before = { resumeHidden: resume.hidden, extendDisabled: extend.getAttribute('aria-disabled') };
+		setBudget('4');
+		extend.click();
+		await timeout(0);
 		assert.deepStrictEqual({
-			start: container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')?.textContent,
-			limitFields: container.querySelectorAll('form.room-run-controls input').length,
-		}, { start: 'Start', limitFields: 0 });
+			before, starts, extensions, remaining: container.querySelector('.room-budget-status')?.textContent,
+		}, {
+			before: { resumeHidden: true, extendDisabled: 'true' }, starts: [], extensions: [4], remaining: '0 turns remaining of 10',
+		});
 	});
 
 	test('an idle room supports both Resume and Pause', () => {
 		const { container, starts } = setup('idle');
-		const resume = container.querySelector<HTMLButtonElement>('.room-run-controls-host button.primary')!;
-		const pause = [...container.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent === 'Pause')!;
+		const resume = container.querySelector<HTMLElement>('.room-start')!;
+		const pause = [...container.querySelectorAll<HTMLElement>('.room-run-controls-host .monaco-button')].find(button => button.textContent === 'Pause')!;
 		assert.strictEqual(resume.textContent, 'Resume');
-		assert.strictEqual(resume.disabled, false);
-		assert.strictEqual(pause.disabled, false);
+		assert.strictEqual(resume.getAttribute('aria-disabled'), 'false');
+		assert.strictEqual(pause.getAttribute('aria-disabled'), 'false');
 		resume.click();
-		assert.strictEqual(starts.length, 1);
+		assert.deepStrictEqual(starts, [{}]);
 	});
 
 	test('history has bounded DOM without discarding loaded accessible messages', () => {
@@ -720,14 +982,12 @@ suite('CollaborationRoomWidget', () => {
 		assert.strictEqual(loads, 1);
 	});
 
-	test('the room separates coordinator chat from worker activity and publishes settings to the side panel', () => {
+	test('the room has one conversation and publishes peer settings to the side panel', () => {
 		const { container, panel } = setup('running', 1);
 		const main = container.querySelector<HTMLElement>('.room-main')!;
 		const mainTabs = [...main.querySelectorAll<HTMLElement>('.room-main-tabs .room-tab')];
 		assert.deepStrictEqual({
 			mainTabs: mainTabs.map(tab => tab.textContent),
-			selectedMainTab: mainTabs.find(tab => tab.getAttribute('aria-selected') === 'true')?.textContent,
-			coordinatorPlaceholder: main.querySelector('.room-coordinator-placeholder')?.textContent,
 			mainHasChat: !!main.querySelector('.room-feed'),
 			mainHasComposer: !!main.querySelector('.room-composer'),
 			mainHasRoster: !!main.querySelector('.room-roster'),
@@ -736,9 +996,7 @@ suite('CollaborationRoomWidget', () => {
 			modelPickers: panel.querySelectorAll('.room-roster .room-model-picker').length,
 			oldPaging: [...container.querySelectorAll('button')].some(button => ['Older Posts', 'Newer Posts'].includes(button.textContent ?? '')),
 		}, {
-			mainTabs: ['Coordinator', 'Activity'],
-			selectedMainTab: 'Activity',
-			coordinatorPlaceholder: 'This local agent host does not support a coordinator.',
+			mainTabs: [],
 			mainHasChat: true,
 			mainHasComposer: true,
 			mainHasRoster: false,
@@ -749,39 +1007,169 @@ suite('CollaborationRoomWidget', () => {
 		});
 	});
 
-	test('Activity badges meaningful unread evidence but not ordinary chatter', () => {
-		const { container, facade } = setup('running', 1);
-		const tab = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('.room-main-tabs .room-tab')]
-			.find(button => button.textContent?.startsWith(label))!;
-		tab('Coordinator').click();
-		tab('Coordinator').focus();
-		const page = facade.messages.get();
-		const append = (message: IAgentHostRoomMessage) => facade.messages.set({ ...page, messages: [...facade.messages.get().messages, message] }, undefined);
-		append({
-			id: 'chatter', sequence: 2, authorId: 'member-1', authorName: 'Copilot-1', authorKind: 'agent',
-			kind: 'message', text: 'Still looking.', timestamp: 0, mentions: [], deliveries: [],
-		});
-		const afterChatter = tab('Activity').querySelector('.room-tab-badge')?.textContent;
-		append({
-			id: 'result', sequence: 3, authorId: 'member-1', authorName: 'Copilot-1', authorKind: 'agent',
-			kind: 'finding', text: 'Found the root cause.', timestamp: 0, mentions: [], deliveries: [],
-		});
-		const activity = tab('Activity');
-		const unread = {
-			badge: activity.querySelector('.room-tab-badge')?.textContent,
-			label: activity.getAttribute('aria-label'),
-			focusPreserved: document.activeElement === tab('Coordinator'),
-		};
-		activity.click();
+	test('inbox filters retain drafts and receipts without changing the composer audience', async () => {
+		const { container, facade, input, type, draft, chooseMenuItem, getSends, starts } = setup('running', 3);
+		const messages = facade.messages.get().messages.map((message, index) => ({
+			...message, mentions: [`member-${index % 2 + 1}`], deliveries: [{ memberId: `member-${index % 2 + 1}`, state: 'pending' as const }],
+		}));
+		facade.messages.set({ messages, hasEarlier: false, hasLater: false }, undefined);
+		type('Preserve this draft');
+		await chooseMenuItem('.room-history-filter .monaco-button', 'Inbox: Copilot-2');
+		const filtered = facade.messages.get().messages.map(message => message.id);
+		const focusPreserved = document.activeElement === container.querySelector('.room-history-filter .monaco-button');
+		await chooseMenuItem('.room-history-filter .monaco-button', 'All Messages');
 		assert.deepStrictEqual({
-			afterChatter,
-			unread,
-			afterOpen: tab('Activity').querySelector('.room-tab-badge')?.textContent,
+			filtered, focusPreserved, restored: facade.messages.get().messages === messages,
+			text: input.value, audience: draft.audience,
+			receipts: messages.flatMap(message => message.deliveries.map(delivery => delivery.state)), sends: getSends(), starts,
 		}, {
-			afterChatter: undefined,
-			unread: { badge: '1', label: 'Activity, 1 unread meaningful updates', focusPreserved: true },
-			afterOpen: undefined,
+			filtered: ['post-1'], focusPreserved: true, restored: true, text: 'Preserve this draft',
+			audience: { kind: 'all' }, receipts: ['pending', 'pending', 'pending'], sends: 0, starts: [],
 		});
+	});
+
+	test('panel tab badges preserve keyboard focus on unrelated updates', () => {
+		const { panel, facade } = setup();
+		const agents = [...panel.querySelectorAll<HTMLElement>('.room-tab')].find(tab => tab.textContent === 'Agents')!;
+		agents.click();
+		agents.focus();
+		facade.requests.set([approval()], undefined);
+		const updated = [...panel.querySelectorAll<HTMLElement>('.room-tab')].find(tab => tab.textContent === 'Agents')!;
+		assert.deepStrictEqual({
+			focused: document.activeElement === updated, selected: updated.getAttribute('aria-selected'),
+			approvals: [...panel.querySelectorAll<HTMLElement>('.room-tab')].find(tab => tab.textContent?.startsWith('Approvals'))?.textContent,
+		}, { focused: true, selected: 'true', approvals: 'Approvals1' });
+	});
+
+	test('archives project plain text and disable writes while keeping native session and artifact inspection', async () => {
+		const { container, facade, starts, extensions, opened, widget, getSends, type } = setup('stopped', 1);
+		type('Keep my draft');
+		const room = facade.activeRoom.get()!;
+		facade.activeRoom.set({
+			...room, archived: true,
+			archivedSessions: room.members.map(({ id, name, sessionUri, chatUri, worktreeUri }) => ({ id, name, sessionUri, chatUri, worktreeUri })),
+			artifacts: [{ id: 'patch', title: 'Preserved patch', memberId: 'member-1', baseRevision: 'base', sourceRevision: 'source', createdAt: 0, uri: 'file:///patch' }],
+		}, undefined);
+		facade.messages.set({
+			messages: [{ ...facade.messages.get().messages[0], text: '<b>Historical result</b>', artifactIds: ['patch'] }],
+			hasEarlier: false, hasLater: false,
+		}, undefined);
+		facade.requests.set([approval()], undefined);
+		const send = container.querySelector<HTMLElement>('.room-send')!;
+		const add = container.querySelector<HTMLElement>('.room-add-member')!;
+		send.click();
+		const snapshot = {
+			archiveLabel: container.querySelector('.room-subtitle')?.textContent?.includes('Archive - read-only'),
+			readOnly: container.querySelector<HTMLTextAreaElement>('.room-composer textarea')!.disabled,
+			disabled: [send, add, container.querySelector<HTMLElement>('.room-start')!, container.querySelector<HTMLElement>('.room-extend')!].every(button => button.getAttribute('aria-disabled') === 'true'),
+			plain: container.querySelector('.room-message-plain')?.textContent,
+			noHtml: container.querySelector('.room-message-plain b') === null,
+			patchLink: container.querySelector('.room-message-actions')?.textContent?.includes('Review Patch: Preserved patch'),
+			approvals: container.querySelectorAll('.room-request').length,
+			accessible: widget.getAccessibleContent().includes('<b>Historical result</b>'),
+			starts, extensions, sends: getSends(),
+		};
+		container.querySelector<HTMLElement>('.room-member-heading .monaco-button')!.click();
+		await opened.p;
+		assert.deepStrictEqual(snapshot, {
+			archiveLabel: true, readOnly: true, disabled: true, plain: '<b>Historical result</b>', noHtml: true, patchLink: true,
+			approvals: 0, accessible: true, starts: [], extensions: [], sends: 0,
+		});
+	});
+
+	test('historical nonworkers have inspect-only author and session links without joining the worker roster', async () => {
+		const { container, facade, opened, starts, resolutions, created, getSends, widget } = setup('stopped');
+		const room = facade.activeRoom.get()!;
+		const historical = {
+			id: 'historical-participant', name: 'Historical participant', sessionUri: 'copilotcli:/historical',
+			chatUri: 'opaque-chat:/historical/old?version=1', worktreeUri: 'file:///saved/historical-worktree',
+		};
+		const archive = {
+			...room, archived: true,
+			archivedSessions: [
+				...room.members.map(({ id, name, sessionUri, chatUri, worktreeUri }) => ({ id, name, sessionUri, chatUri, worktreeUri })),
+				historical,
+			],
+		};
+		facade.activeRoom.set(archive, undefined);
+		const diagnostic = 'Historical status "completed" does not establish provider acceptance or task completion.';
+		facade.messages.set({
+			hasEarlier: false, hasLater: false,
+			messages: [{
+				id: 'historical-post', sequence: 1, authorId: historical.id, authorName: historical.name, authorKind: 'agent',
+				kind: 'message', text: 'Historical assignment and result metadata are preserved as text.', timestamp: 0,
+				mentions: ['member-1'], deliveries: [{ memberId: 'member-1', state: 'interrupted', error: diagnostic }],
+			}, {
+				id: 'historical-reply', sequence: 2, authorId: 'member-1', authorName: 'Copilot-1', authorKind: 'agent',
+				kind: 'message', text: 'Historical review evidence.', timestamp: 1, replyTo: 'historical-post',
+				mentions: [historical.id], deliveries: [{ memberId: historical.id, state: 'interrupted', error: diagnostic }],
+			}],
+		}, undefined);
+		const authorSelector = '.room-message[data-message-id="historical-post"] .username .monaco-link';
+		container.querySelector<HTMLElement>(authorSelector)!.focus();
+		const updatedChat = 'opaque-chat:/historical/preserved?version=2';
+		facade.activeRoom.set({
+			...archive, revision: archive.revision + 1,
+			archivedSessions: archive.archivedSessions.map(session => session.id === historical.id ? { ...session, chatUri: updatedChat } : session),
+		}, undefined);
+		const author = container.querySelector<HTMLElement>(authorSelector)!;
+		const extra = container.querySelector<HTMLElement>('.room-archive-session')!;
+		const before = {
+			workers: container.querySelectorAll('.room-roster .room-member').length,
+			historicalRows: container.querySelectorAll('.room-archive-session').length,
+			historicalTurns: extra.querySelector('.room-member-state'),
+			worktree: extra.textContent?.includes(historical.worktreeUri),
+			focusedAuthor: document.activeElement === author,
+			nativeCalls: resolutions.length, starts: starts.length, created: created.isSettled, sends: getSends(),
+			diagnostic: widget.getAccessibleContent().includes(`Historical participant: Interrupted (${diagnostic})`),
+			recipient: container.querySelector('.room-message[data-message-id="historical-reply"] .detail')?.textContent?.includes('To: Historical participant'),
+		};
+		author.click();
+		await opened.p;
+		assert.deepStrictEqual({ before, resolutions }, {
+			before: {
+				workers: 2, historicalRows: 1, historicalTurns: null, worktree: true, focusedAuthor: true,
+				nativeCalls: 0, starts: 0, created: false, sends: 0, diagnostic: true, recipient: true,
+			},
+			resolutions: [{ session: historical.sessionUri, chat: URI.parse(updatedChat).toString() }],
+		});
+	});
+
+	test('archived worker navigation uses archive session identities even when the worker has no turns', async () => {
+		const { container, facade, opened, resolutions } = setup('stopped');
+		const room = facade.activeRoom.get()!;
+		const saved = {
+			id: 'member-1', name: 'Preserved worker', sessionUri: 'copilotcli:/preserved-worker',
+			chatUri: 'opaque-chat:/preserved-worker/primary?version=2', worktreeUri: 'file:///saved/worker',
+		};
+		facade.activeRoom.set({
+			...room, archived: true,
+			members: room.members.map(member => ({ ...member, state: 'stopped', turns: 0 })),
+			archivedSessions: [
+				saved,
+				...room.members.filter(member => member.id !== saved.id).map(({ id, name, sessionUri, chatUri, worktreeUri }) => ({ id, name, sessionUri, chatUri, worktreeUri })),
+			],
+		}, undefined);
+		const link = container.querySelector<HTMLElement>('.room-roster .room-member-heading .monaco-button')!;
+		link.click();
+		await opened.p;
+		assert.deepStrictEqual({
+			label: link.textContent, resolutions, duplicateRows: container.querySelectorAll('.room-archive-session').length,
+		}, {
+			label: 'Preserved worker', resolutions: [{ session: saved.sessionUri, chat: URI.parse(saved.chatUri).toString() }], duplicateRows: 0,
+		});
+	});
+
+	test('missing archive references never synthesize native session links from workers', () => {
+		const { facade, container, resolutions } = setup('stopped', 1);
+		facade.activeRoom.set({ ...facade.activeRoom.get()!, archived: true, archivedSessions: [] }, undefined);
+		const worker = container.querySelector<HTMLElement>('.room-member-heading .monaco-button')!;
+		worker.click();
+		assert.deepStrictEqual({
+			disabled: worker.getAttribute('aria-disabled'),
+			authorLinks: container.querySelectorAll('.room-message .username .monaco-link').length,
+			resolutions,
+		}, { disabled: 'true', authorLinks: 0, resolutions: [] });
 	});
 
 	test('the attention action opens the side panel and focuses the failed peer', async () => {
@@ -790,13 +1178,13 @@ suite('CollaborationRoomWidget', () => {
 		facade.activeRoom.set({
 			...room, members: room.members.map((member, index) => index === 0 ? { ...member, state: 'failed', error: 'Could not prepare the worktree' } : member),
 		}, undefined);
-		const attention = [...panel.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent === 'Needs Attention (1)')!;
+		const attention = [...panel.querySelectorAll<HTMLElement>('.room-run-controls-host .monaco-button')].find(button => button.textContent === 'Needs Attention (1)')!;
 		attention.click();
 		await timeout(0);
 		assert.deepStrictEqual({
 			openedContainers,
 			focusedAction: document.activeElement?.getAttribute('aria-label'),
-			settingsButtonInRoom: !!container.querySelector('.room-header button[aria-controls]'),
+			settingsButtonInRoom: !!container.querySelector('.room-header .monaco-button[aria-controls]'),
 		}, {
 			openedContainers: ['workbench.view.collaborationSettings'],
 			focusedAction: 'Retry Copilot-1',
@@ -813,7 +1201,7 @@ suite('CollaborationRoomWidget', () => {
 			} : member),
 		}, undefined);
 		await timeout(0);
-		[...container.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent === 'Needs Attention (1)')!.click();
+		[...container.querySelectorAll<HTMLElement>('.room-run-controls-host .monaco-button')].find(button => button.textContent === 'Needs Attention (1)')!.click();
 		await timeout(0);
 		assert.deepStrictEqual({
 			detail: container.querySelector('.room-roster .room-model-detail.error')?.textContent,
@@ -829,7 +1217,6 @@ suite('CollaborationRoomWidget', () => {
 		const draft: ICollaborationRoomCreationDraft = {
 			title: 'Mixed models', goal: 'Review the design', instructions: '', repositoryUri: 'file:///repo',
 			baseRevision: 'HEAD', workerCount: '3', model: '',
-			coordinatorModel: { id: 'model-b' },
 			memberNames: ['chaotic-cyborg', 'disciplined-neuron', 'caffeinated-compiler'],
 			memberModels: [{ id: 'model-a' }, undefined, { id: 'model-b' }],
 		};
@@ -840,20 +1227,17 @@ suite('CollaborationRoomWidget', () => {
 			select.dispatchEvent(new Event('change', { bubbles: true }));
 		}
 		const visibleNames = [...container.querySelectorAll('.room-home-model-name')].map(element => element.textContent);
-		[...container.querySelectorAll<HTMLElement>('.room-home .monaco-button')].find(button => button.textContent === 'Create and Start')!.click();
+		[...container.querySelectorAll<HTMLElement>('.room-home .monaco-button')].find(button => button.textContent === 'Create Room')!.click();
 		assert.deepStrictEqual({
 			visibleNames,
 			draftNames: viewService.creationDraft.get()?.memberNames,
 			draftModels: viewService.creationDraft.get()?.memberModels,
-			draftCoordinatorModel: viewService.creationDraft.get()?.coordinatorModel,
 			createdNames: (await created.p).memberNames,
 			createdModels: (await created.p).memberModels,
-			createdCoordinatorModel: (await created.p).coordinatorModel,
 			starts,
 		}, {
 			visibleNames: draft.memberNames, draftNames: draft.memberNames, draftModels: draft.memberModels,
-			draftCoordinatorModel: draft.coordinatorModel,
-			createdNames: draft.memberNames, createdModels: draft.memberModels, createdCoordinatorModel: draft.coordinatorModel, starts: [],
+			createdNames: draft.memberNames, createdModels: draft.memberModels, starts: [],
 		});
 	});
 
@@ -892,22 +1276,22 @@ suite('CollaborationRoomWidget', () => {
 
 	test('Add Agent grows the roster, survives a stopped room, and withdraws at capacity', async () => {
 		const { facade, panel } = setup('running', 1);
-		const add = panel.querySelector<HTMLButtonElement>('.room-add-member')!;
+		const add = panel.querySelector<HTMLElement>('.room-add-member')!;
 		const added: (ModelSelection | undefined)[] = [];
 		facade.addMember = async model => { added.push(model); };
 		const room = facade.activeRoom.get()!;
 
 		add.click();
 		await timeout(0);
-		const whileRunning = { hidden: add.hidden, disabled: add.disabled };
+		const whileRunning = { hidden: add.hidden, disabled: add.getAttribute('aria-disabled') === 'true' };
 
 		facade.activeRoom.set({ ...room, members: Array.from({ length: MAX_ROOM_WORKERS }, (_, index) => ({ ...room.members[0], id: `m${index}`, name: `Copilot-${index + 1}` })) }, undefined);
-		const atCapacity = { disabled: add.disabled, explained: add.title.includes(String(MAX_ROOM_WORKERS)) };
+		const atCapacity = { disabled: add.getAttribute('aria-disabled') === 'true', rosterSize: panel.querySelectorAll('.room-roster .room-member').length };
 
 		// A stopped room can be resumed, so it can still gain a peer; a cancellation
 		// in flight is the only state that withdraws the action.
 		facade.activeRoom.set({ ...room, state: 'stopped' }, undefined);
-		const whenStopped = { hidden: add.hidden, disabled: add.disabled };
+		const whenStopped = { hidden: add.hidden, disabled: add.getAttribute('aria-disabled') === 'true' };
 		facade.activeRoom.set({ ...room, state: 'stopping' }, undefined);
 
 		assert.deepStrictEqual({
@@ -919,7 +1303,7 @@ suite('CollaborationRoomWidget', () => {
 		}, {
 			calls: 1,
 			whileRunning: { hidden: false, disabled: false },
-			atCapacity: { disabled: true, explained: true },
+			atCapacity: { disabled: true, rosterSize: MAX_ROOM_WORKERS },
 			whenStopped: { hidden: false, disabled: false },
 			hiddenWhileStopping: true,
 		});
@@ -934,13 +1318,13 @@ suite('CollaborationRoomWidget', () => {
 			facade.activeRoom.set({ ...room, members: room.members.map(member => member.id === room.members[1].id ? { ...member, removed: true } : member) }, undefined);
 		};
 		const target = [...panel.querySelectorAll<HTMLElement>('.room-member')][1];
-		target.querySelector<HTMLButtonElement>('.room-member-actions button:last-child')!.click();
+		target.querySelector<HTMLElement>('.room-member-actions .monaco-button:last-child')!.click();
 		await timeout(0);
 
 		assert.deepStrictEqual({
 			confirmations,
 			removed,
-			roster: [...panel.querySelectorAll<HTMLElement>('.room-member')].map(m => (m.querySelector('.room-member-heading button')?.textContent ?? '').trim()),
+			roster: [...panel.querySelectorAll<HTMLElement>('.room-member')].map(m => (m.querySelector('.room-member-heading .monaco-button')?.textContent ?? '').trim()),
 			postsRemain: !!container.querySelector('.room-message'),
 			countsActiveOnly: container.querySelector('.room-subtitle')?.textContent?.includes('1 peers'),
 		}, {
@@ -956,7 +1340,7 @@ suite('CollaborationRoomWidget', () => {
 		const { facade, panel } = setup('running', 1);
 		const room = facade.activeRoom.get()!;
 		const labels = () => [...panel.querySelectorAll<HTMLElement>('.room-member')].map(member => [
-			...member.querySelectorAll<HTMLButtonElement>('.room-member-actions button'),
+			...member.querySelectorAll<HTMLElement>('.room-member-actions .monaco-button'),
 		].filter(button => !button.hidden).map(button => (button.textContent ?? '').trim()));
 		const withStates = (...states: string[]) => facade.activeRoom.set({
 			...room, members: room.members.map((member, index) => ({ ...member, state: states[index] as typeof member.state })),
@@ -975,15 +1359,15 @@ suite('CollaborationRoomWidget', () => {
 
 	test('the run tab offers only the actions the room state allows', () => {
 		const { facade, panel } = setup('running', 1);
-		const labels = () => [...panel.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')]
+		const labels = () => [...panel.querySelectorAll<HTMLElement>('.room-run-controls-host .monaco-button')]
 			.filter(button => !button.hidden).map(button => (button.textContent ?? '').trim());
 		const room = facade.activeRoom.get()!;
 		facade.activeRoom.set({ ...room, state: 'running' }, undefined);
 		const whileRunning = labels();
-		facade.activeRoom.set({ ...room, state: 'created' }, undefined);
+		facade.activeRoom.set({ ...room, state: 'created', run: undefined }, undefined);
 		assert.deepStrictEqual(
 			{ whileRunning, beforeStarting: labels() },
-			{ whileRunning: ['Pause', 'Stop All'], beforeStarting: ['Start'] });
+			{ whileRunning: ['Extend', 'Pause', 'Stop All'], beforeStarting: ['Start'] });
 	});
 
 	test('the panel keeps four tabs however many agents the room has', () => {
@@ -1110,7 +1494,7 @@ suite('CollaborationRoomWidget', () => {
 		}], undefined);
 		const field = container.querySelector<HTMLInputElement>('.room-request input')!;
 		field.value = 'Keep my answer';
-		[...panel.querySelectorAll<HTMLButtonElement>('.room-run-controls-host button')].find(button => button.textContent?.startsWith('Needs Attention'))!.click();
+		[...panel.querySelectorAll<HTMLElement>('.room-run-controls-host .monaco-button')].find(button => button.textContent?.startsWith('Needs Attention'))!.click();
 		await timeout(0);
 		container.style.width = '640px';
 		widget.layout(640, 760);
@@ -1211,7 +1595,7 @@ suite('CollaborationRoomWidget', () => {
 			state: 'untrusted', repositoryUri: 'file:///source/project',
 			worktreeUris: ['file:///rooms/room/member-1', 'file:///rooms/room/member-2'],
 		}, undefined);
-		const buttons = container.querySelectorAll<HTMLButtonElement>('.room-trust button');
+		const buttons = container.querySelectorAll<HTMLElement>('.room-trust .monaco-button');
 		buttons[0].click();
 		await timeout(0);
 		assert.deepStrictEqual({

@@ -10,8 +10,6 @@ import { ResolveSessionConfigResult } from '../common/state/protocol/commands.js
 import { ModelSelection } from '../common/state/sessionState.js';
 
 export const roomExcludedTools = ['task', 'search_code_subagent', 'runSubagent', 'run_subagent', 'run_agent', 'run_factory', 'create_session', 'send_message', 'delete_session', 'rubber_duck', 'fleet'];
-export const roomCoordinatorTools = ['room_coordinator_snapshot', 'room_assign', 'room_post'] as const;
-export const roomCoordinatorExclusiveTools = ['room_coordinator_snapshot', 'room_assign'] as const;
 
 export type RoomContentValidator = (relativePaths: readonly string[]) => Promise<void>;
 
@@ -29,24 +27,28 @@ export interface IRoomSessionParticipant {
 export interface IRoomMemberExecution {
 	readonly memberId: string;
 	readonly initialized: boolean;
-	readonly briefed?: boolean;
-	readonly briefingTurnId?: string;
-	readonly needsTurn: boolean;
 	readonly turnId?: string;
 	readonly runId?: string;
-	readonly readSequence?: number;
-	readonly nextAction?: 'continue' | 'wait';
 }
 
 export interface IRoomRecord {
-	readonly version: 1;
+	readonly version: 2;
 	readonly room: IAgentHostRoom;
 	readonly messages: readonly IAgentHostRoomMessage[];
 	readonly executions: readonly IRoomMemberExecution[];
 }
 
+/** Display-only projection of an untouched legacy journal. */
+export interface IRoomArchive {
+	readonly room: IAgentHostRoom;
+	readonly messages: readonly IAgentHostRoomMessage[];
+	/** Includes historical coordinator sessions, which also remain read-only. */
+	readonly sessionUris: readonly string[];
+}
+
 export interface IRoomStorage {
 	load(): Promise<readonly IRoomRecord[]>;
+	loadArchives(): Promise<readonly IRoomArchive[]>;
 	save(record: IRoomRecord): Promise<void>;
 	isRepository(folderUri: string): Promise<boolean>;
 	resolveRepository(repositoryUri: string, revision?: string, initialize?: boolean): Promise<{ repositoryUri: string; baseRevision: string }>;
@@ -64,6 +66,7 @@ export interface IRoomRuntimeEvent {
 	readonly error?: string;
 }
 
+/** The provider owns the model/tool loop; the room only submits bounded inbox input. */
 export interface IRoomRuntime extends IDisposable {
 	readonly onDidChange: Event<IRoomRuntimeEvent>;
 	validateModel(model: ModelSelection): void;
@@ -76,8 +79,6 @@ export interface IRoomRuntime extends IDisposable {
 	isIdle(sessionUri: string): boolean;
 	hasTurn(sessionUri: string, turnId: string): boolean;
 	submit(sessionUri: string, turnId: string, prompt: string): void;
-	/** Send guidance to the current turn; false means it is no longer accepting steering. */
-	steer(sessionUri: string, turnId: string, prompt: string): Promise<boolean>;
 	abort(sessionUri: string, turnId?: string): Promise<void>;
 	assertContentAccess?(sessionUri: string, paths: readonly string[]): Promise<void>;
 }

@@ -27,6 +27,8 @@ Do not turn those files into general Sessions guidance.
 
 ## Guides
 
+- [Native model teams](contrib/chat/browser/MODEL_TEAMS.md) - selecting a Lead,
+  Worker, and optional Scout in one local Copilot chat.
 - [Agent Collab guide and implementation overview](AGENT_COLLAB_GUIDE.md) -
   setup, everyday use, models, approvals, implementation pointers, validation,
   and the Gemma Challenge/Hugging Face references. This is a companion guide,

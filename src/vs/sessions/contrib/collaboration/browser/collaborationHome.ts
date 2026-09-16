@@ -25,7 +25,6 @@ export interface ICollaborationHomeDraft {
 	readonly count: string;
 	readonly instructions: string;
 	readonly baseRevision: string;
-	readonly coordinatorModel?: ModelSelection;
 	readonly memberNames?: readonly string[];
 	readonly memberModels: readonly (ModelSelection | undefined)[];
 }
@@ -57,14 +56,12 @@ export class CollaborationHome extends Disposable {
 	private readonly baseInput: InputBox;
 	private readonly countSelect: SelectBox;
 	private readonly createButton: Button;
-	private readonly coordinatorPicker: CollaborationModelPicker;
 	private readonly modelsContainer: HTMLElement;
 	private readonly errorElement: HTMLElement;
 	private readonly pickers = this._register(new DisposableMap<number, CollaborationModelPicker>());
 	private folder: URI | undefined;
 	private memberNames: string[] = [];
 	private memberModels: (ModelSelection | undefined)[] = [];
-	private coordinatorModel: ModelSelection | undefined;
 
 	constructor(
 		parent: HTMLElement,
@@ -96,18 +93,6 @@ export class CollaborationHome extends Disposable {
 		browse.label = localize('room.homeBrowse', "Browse");
 		this._register(browse.onDidClick(() => void this.browse()));
 
-		const coordinatorField = this.field(card, localize('room.homeCoordinator', "Coordinator"));
-		this.coordinatorPicker = this._register(this.instantiationService.createInstance(
-			CollaborationModelPicker,
-			coordinatorField,
-			localize('room.homeCoordinator', "Coordinator"),
-			this.catalog,
-			model => {
-				this.coordinatorModel = model;
-				this.save();
-			},
-		));
-
 		const agentsField = this.field(card, localize('room.homeAgents', "Agents"));
 		this.countSelect = this._register(new SelectBox(
 			Array.from({ length: MAX_ROOM_WORKERS }, (_, index) => ({ text: String(index + 1) })), 2,
@@ -135,8 +120,9 @@ export class CollaborationHome extends Disposable {
 		this.errorElement.setAttribute('role', 'alert');
 		this.errorElement.hidden = true;
 
-		this.createButton = this._register(new Button(card.appendChild($('.room-home-actions')), { ...defaultButtonStyles, title: localize('room.homeCreate', "Create and Start") }));
-		this.createButton.label = localize('room.homeCreate', "Create and Start");
+		card.appendChild($('p.room-hint')).textContent = localize('room.homeBudget', "Creating a room does not start agents. Choose a finite turn budget before Start.");
+		this.createButton = this._register(new Button(card.appendChild($('.room-home-actions')), { ...defaultButtonStyles, title: localize('room.homeCreate', "Create Room") }));
+		this.createButton.label = localize('room.homeCreate', "Create Room");
 		this._register(this.createButton.onDidClick(() => void this.create()));
 
 
@@ -168,8 +154,6 @@ export class CollaborationHome extends Disposable {
 		this.folder = draft.folder ? URI.file(draft.folder) : undefined;
 		this.memberNames = [...(draft.memberNames ?? [])];
 		this.memberModels = [...draft.memberModels];
-		this.coordinatorModel = draft.coordinatorModel;
-		this.coordinatorPicker.state.set({ selection: this.coordinatorModel, enabled: true }, undefined);
 		const count = Number(draft.count);
 		this.selectedCount = Number.isInteger(count) && count >= 1 && count <= MAX_ROOM_WORKERS ? count : 3;
 		this.countSelect.select(this.selectedCount - 1);
@@ -181,7 +165,6 @@ export class CollaborationHome extends Disposable {
 		this.delegate.saveDraft({
 			goal: this.goalInput.value, folder: this.folder?.fsPath ?? '', count: String(this.count),
 			instructions: this.instructionsInput.value, baseRevision: this.baseInput.value,
-			coordinatorModel: this.coordinatorModel,
 			memberNames: [...this.memberNames],
 			memberModels: [...this.memberModels],
 		});
@@ -233,7 +216,6 @@ export class CollaborationHome extends Disposable {
 		for (const picker of this.pickers.values()) {
 			picker.state.set({ ...picker.state.get(), enabled: !disabled && !modelDetail, detail: modelDetail }, undefined);
 		}
-		this.coordinatorPicker.state.set({ ...this.coordinatorPicker.state.get(), enabled: !disabled && !modelDetail, detail: modelDetail }, undefined);
 	}
 
 	focus(): void {
@@ -289,7 +271,6 @@ export class CollaborationHome extends Disposable {
 				repositoryUri: folderUri, workerCount: this.count,
 				...(base ? { baseRevision: base } : {}),
 				initializeRepository,
-				...(this.coordinatorModel ? { coordinatorModel: this.coordinatorModel } : {}),
 				memberNames: this.memberNames.slice(0, this.count),
 				memberModels: Array.from({ length: this.count }, (_, index) => this.memberModels[index]),
 			});

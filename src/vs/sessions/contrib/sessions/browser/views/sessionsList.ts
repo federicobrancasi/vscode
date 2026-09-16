@@ -3315,7 +3315,9 @@ export class SessionsList extends Disposable implements ISessionsList {
 						? rooms.map(room => ({
 							element: {
 								placeholder: true as const, sectionId: section.id, roomId: room.id, label: room.title,
-								detail: localize('roomRowDetail', "{0} agents", room.members.filter(member => !member.removed).length),
+								detail: room.archived
+									? localize('roomArchiveRowDetail', "Archive - read-only")
+									: localize('roomRowDetail', "{0} agents", room.members.filter(member => !member.removed).length),
 							},
 						}))
 						: [{ element: { placeholder: true as const, sectionId: section.id, label: localize('noRooms', "No rooms") } }],

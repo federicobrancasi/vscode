@@ -41,6 +41,8 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 	private readonly _sessionsByChat = new Map<string, string>();
 	private readonly _subscriptions = new Set<string>();
 	private readonly _appliedModels = new Map<string, ModelSelection>();
+	private readonly _aborts = new Map<string, Promise<void>>();
+	private readonly _unconfirmedAborts = new Set<string>();
 	private readonly _clientId = 'local-room-authority';
 
 	constructor(
@@ -276,7 +278,8 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 	}
 
 	isIdle(sessionUri: string): boolean {
-		return !this._stateManager.getActiveTurnId(buildDefaultChatUri(sessionUri));
+		return !this._aborts.has(sessionUri) && !this._unconfirmedAborts.has(sessionUri)
+			&& !this._stateManager.getActiveTurnId(buildDefaultChatUri(sessionUri));
 	}
 
 	hasTurn(sessionUri: string, turnId: string): boolean {
@@ -292,16 +295,11 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 		this._turnService.startTurnMessage(URI.parse(chat), { text: prompt, origin: { kind: MessageKind.User } }, turnId);
 	}
 
-	async steer(sessionUri: string, turnId: string, prompt: string): Promise<boolean> {
-		const chat = buildDefaultChatUri(sessionUri);
-		if (!this._sessionsByChat.has(chat) || this._stateManager.getActiveTurnId(chat) !== turnId) {
-			return false;
-		}
-		const provider = this._providers.getProviderForSession(sessionUri);
-		return await provider?.chats.sendSteeringInCurrentTurn?.(URI.parse(chat), turnId, prompt, createAgentChatContext(this._stateManager, sessionUri, chat)) ?? false;
-	}
-
 	async abort(sessionUri: string, turnId?: string): Promise<void> {
+		const pending = this._aborts.get(sessionUri);
+		if (pending) {
+			return pending;
+		}
 		const chat = buildDefaultChatUri(sessionUri);
 		const active = this._stateManager.getChatState(chat)?.activeTurn;
 		if (!active && !this._sessionsByChat.has(chat)) {
@@ -310,7 +308,18 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 		if (active && turnId && active.id !== turnId) {
 			return;
 		}
-		await this._lifecycle.abortTurn(URI.parse(chat), turnId);
+		this._unconfirmedAborts.add(sessionUri);
+		const operation = this._lifecycle.abortTurn(URI.parse(chat), turnId);
+		this._aborts.set(sessionUri, operation);
+		try {
+			await operation;
+			if (this._stateManager.getActiveTurnId(chat)) {
+				throw new Error(localize('rooms.stopUnconfirmed', "Cancellation returned without confirming that the member is idle."));
+			}
+			this._unconfirmedAborts.delete(sessionUri);
+		} finally {
+			this._aborts.delete(sessionUri);
+		}
 	}
 
 	async assertContentAccess(sessionUri: string, paths: readonly string[]): Promise<void> {
@@ -329,6 +338,8 @@ export class AgentHostRoomsRuntime extends Disposable implements IRoomRuntime {
 		this._subscriptions.clear();
 		this._sessionsByChat.clear();
 		this._appliedModels.clear();
+		this._aborts.clear();
+		this._unconfirmedAborts.clear();
 	}
 
 	override dispose(): void {

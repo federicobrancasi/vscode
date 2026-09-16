@@ -16,7 +16,6 @@ import { MarkUnreadContribution } from './markUnread/markUnreadContribution.js';
 import { PersistedTurnUsageContribution } from './persistedTurnUsage/persistedTurnUsageContribution.js';
 import { SessionWorkspaceConversionContribution } from './sessionWorkspaceConversion/sessionWorkspaceConversionContribution.js';
 import { QueueDrainContribution } from './queueDrain/queueDrainContribution.js';
-import { RoomCoordinatorContribution } from './rooms/roomCoordinatorContribution.js';
 import { RoomModelContribution } from './rooms/roomModelContribution.js';
 import { RoomTurnAdmissionContribution } from './rooms/roomTurnAdmissionContribution.js';
 import { SessionFlagsContribution } from './sessionFlags/sessionFlagsContribution.js';
@@ -34,7 +33,6 @@ export function registerBuiltInChatContributions(
 	const registrations = new DisposableStore();
 	registrations.add(contributions.registerContribution(RoomTurnAdmissionContribution));
 	registrations.add(contributions.registerContribution(RoomModelContribution));
-	registrations.add(contributions.registerContribution(RoomCoordinatorContribution));
 	registrations.add(contributions.registerContribution(LocalCommandContribution));
 	registrations.add(contributions.registerContribution(TurnAdmissionContribution));
 	registrations.add(contributions.registerContribution(TurnDelegationContribution));

@@ -42,12 +42,12 @@ suite('CollaborationRoomRequests', () => {
 		};
 	}
 
-	function setup(parts: ResponsePart[] = [toolPart()], authorize = async () => { }, readResource?: IAgentHostService['resourceRead']) {
+	function setup(parts: ResponsePart[] = [toolPart()], authorize = async () => { }, readResource?: IAgentHostService['resourceRead'], archived = false) {
 		const room = observableValue<IAgentHostRoom | undefined>('room', {
 			id: 'room', revision: 1, title: 'Peers', goal: 'Goal', instructions: '',
 			repositoryUri: 'file:///repo', baseRevision: 'base', createdAt: 0, updatedAt: 0, state: 'running',
 			members: [{ id: 'member-1', name: 'Copilot-1', sessionUri: 'copilotcli:/member', chatUri: explicitChatUri, state: 'needsInput', turns: 1 }],
-			artifacts: [], latestMessageSequence: 0,
+			artifacts: [], latestMessageSequence: 0, archived,
 		});
 		const generation = observableValue('generation', 0);
 		const changed = store.add(new Emitter<ChatState>());
@@ -107,6 +107,24 @@ suite('CollaborationRoomRequests', () => {
 			setOptimistic: (state: ChatState) => { optimistic = state; changed.fire(state); },
 		};
 	}
+
+	test('an archive never observes native approvals or requests authorization', () => {
+		let authorized = 0;
+		const { controller, acquisitions, sent } = setup([toolPart()], async () => { authorized++; }, undefined, true);
+		assert.deepStrictEqual({ requests: controller.requests.get(), acquisitions, sent, authorized }, {
+			requests: [], acquisitions: [], sent: [], authorized: 0,
+		});
+	});
+
+	test('becoming an archive invalidates live approval handles without submitting them', async () => {
+		const { controller, room, sent, getReleases } = setup();
+		const request = controller.requests.get()[0];
+		room.set({ ...room.get()!, archived: true }, undefined);
+		await assert.rejects(async () => controller.respond(request, { kind: 'tool', approved: true, selectedOptionId: 'once' }), /no longer current/);
+		assert.deepStrictEqual({ requests: controller.requests.get(), releases: getReleases(), sent }, {
+			requests: [], releases: 1, sent: [],
+		});
+	});
 
 	test('uses the exact host chat, submits once, and waits for the correlated server receipt', async () => {
 		const { controller, acquisitions, sent, receive, getState, setOptimistic } = setup();

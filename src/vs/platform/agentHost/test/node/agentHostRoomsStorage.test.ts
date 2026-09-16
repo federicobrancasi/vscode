@@ -15,12 +15,13 @@ import { URI } from '../../../../base/common/uri.js';
 import { isUUID } from '../../../../base/common/uuid.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { NullLogService } from '../../../log/common/log.js';
-import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomMember, IAgentHostRoomMessage } from '../../common/agentHostRooms.js';
+import { defaultAgentHostRoomConfiguration, IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomConfiguration, IAgentHostRoomMember, IAgentHostRoomMessage, MAX_ROOM_MESSAGE_LENGTH } from '../../common/agentHostRooms.js';
 import { platformSessionSchema } from '../../common/agentHostSchema.js';
 import { buildDefaultChatUri } from '../../common/state/sessionState.js';
 import { AgentSession } from '../../common/agentService.js';
 import { AgentHostRooms } from '../../node/agentHostRooms.js';
 import { AgentHostRoomsStorage } from '../../node/agentHostRoomsStorage.js';
+import { roomObject } from '../../node/agentHostRoomStorageUtils.js';
 import { IRoomRecord, IRoomRuntime, IRoomRuntimeEvent } from '../../node/agentHostRoomsTypes.js';
 
 suite('AgentHostRoomsStorage', function () {
@@ -28,6 +29,7 @@ suite('AgentHostRoomsStorage', function () {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 
 	let scratch: string;
+	let storageRoot: string;
 	let root: string;
 	let repository: string;
 	let storage: AgentHostRoomsStorage;
@@ -35,9 +37,10 @@ suite('AgentHostRoomsStorage', function () {
 	setup(async () => {
 		// Keep every fixture, private index and Git temporary file in the checkout.
 		scratch = await fs.realpath(await fs.mkdtemp(join(process.cwd(), '.agent-host-rooms-storage-test-')));
-		root = join(scratch, 'storage');
+		storageRoot = join(scratch, 'storage');
+		root = join(storageRoot, 'v2');
 		repository = join(scratch, 'repository');
-		storage = new AgentHostRoomsStorage(URI.file(root), new NullLogService());
+		storage = new AgentHostRoomsStorage(URI.file(storageRoot), new NullLogService());
 	});
 
 	teardown(async () => {
@@ -46,7 +49,7 @@ suite('AgentHostRoomsStorage', function () {
 
 	function record(id = 'room-one', baseRevision = 'a'.repeat(40)): IRoomRecord {
 		return {
-			version: 1,
+			version: 2,
 			room: {
 				id, revision: 1, title: 'Room', goal: 'Goal', instructions: '',
 				repositoryUri: URI.file(repository).toString(), baseRevision,
@@ -55,7 +58,7 @@ suite('AgentHostRoomsStorage', function () {
 					id: 'member-one', name: 'Worker', sessionUri: 'copilotcli:/member-one',
 					model: 'test-model', state: 'working', turns: 1,
 					worktreeUri: storage.worktreeUri(id, 'member-one'), activity: 'Working',
-					work: { description: 'Inspecting', nextStep: 'Report', blocked: false, updatedAt: 2 },
+					work: { description: 'Inspecting', blocked: false, updatedAt: 2 },
 				}],
 				artifacts: [],
 				latestMessageSequence: 2,
@@ -64,12 +67,12 @@ suite('AgentHostRoomsStorage', function () {
 			messages: [{
 				id: 'message-one', sequence: 1, authorId: 'human', authorName: 'Human', authorKind: 'human',
 				kind: 'message', text: 'Please inspect', timestamp: 1, mentions: ['member-one'],
-				deliveries: [{ memberId: 'member-one', state: 'completed', turnId: 'turn-one' }],
+				deliveries: [{ memberId: 'member-one', state: 'submitted', turnId: 'turn-two' }],
 			}, {
 				id: 'message-two', sequence: 2, authorId: 'member-one', authorName: 'Worker', authorKind: 'agent',
 				kind: 'finding', text: 'Inspecting', timestamp: 2, mentions: [], replyTo: 'message-one', deliveries: [],
 			}],
-			executions: [{ memberId: 'member-one', initialized: true, needsTurn: false, turnId: 'turn-two', runId: 'run-one', readSequence: 2, nextAction: 'continue' }],
+			executions: [{ memberId: 'member-one', initialized: true, turnId: 'turn-two', runId: 'run-one' }],
 		};
 	}
 
@@ -134,11 +137,17 @@ suite('AgentHostRoomsStorage', function () {
 	async function writeRecord(value: unknown, name = 'room-one'): Promise<string> {
 		await fs.mkdir(join(root, 'rooms'), { recursive: true });
 		const path = join(root, 'rooms', `${name}.json`);
-		await fs.writeFile(path, JSON.stringify(value));
+		const fixture = roomObject(value, 'fixture');
+		const messages = Array.isArray(fixture.messages) ? fixture.messages.map((message: Record<string, unknown>) => {
+			const { deliveries, ...content } = message;
+			return content;
+		}) : fixture.messages;
+		const receipts = Array.isArray(fixture.messages) ? fixture.messages.map((message: Record<string, unknown>) => ({ messageId: message.id, deliveries: message.deliveries })) : [];
+		await fs.writeFile(path, JSON.stringify({ ...fixture, messages, receipts }));
 		return path;
 	}
 
-	test('old journals retain session and worktree identity when the default chat is recorded', async () => {
+	test('journals retain session and worktree identity when the default chat is recorded', async () => {
 		const original = record();
 		await storage.save(original);
 		const upgraded: IRoomRecord = {
@@ -163,17 +172,15 @@ suite('AgentHostRoomsStorage', function () {
 		}), /preserved member identities/);
 	});
 
-	test('old journals remain valid and coordinator identity, assignments, and result linkage are immutable', async () => {
+	test('v1 archives preserve bytes, participant links, structured evidence and immutable patches', async () => {
 		const original = record();
-		await storage.save(original);
-		const oldJournalCoordinator = (await new AgentHostRoomsStorage(URI.file(root), new NullLogService()).load())[0].room.coordinator;
 		const coordinatorSession = 'copilotcli:/coordinator-one';
 		const coordinator = {
 			id: 'coordinator-one',
 			name: 'Coordinator',
 			sessionUri: coordinatorSession,
 			chatUri: buildDefaultChatUri(coordinatorSession),
-			worktreeUri: storage.worktreeUri(original.room.id, 'coordinator-one'),
+			worktreeUri: URI.file(join(storageRoot, 'worktrees', original.room.id, 'coordinator-one')).toString(),
 			desiredModel: { id: 'test-model' },
 			appliedModel: { id: 'test-model' },
 			state: 'idle' as const,
@@ -216,38 +223,59 @@ suite('AgentHostRoomsStorage', function () {
 				summary: 'The parser passed.',
 				outcome: 'success' as const,
 				evidence: ['Focused parser tests passed.'],
-				artifactIds: [],
+				artifactIds: [artifact().id],
 				assignmentId: assignment.id,
 			},
 			deliveries: [],
 		};
-		const coordinated: IRoomRecord = {
+		const patch = { ...artifact(), uri: URI.file(join(storageRoot, 'artifacts', original.room.id, `${artifact().id}.patch`)).toString() };
+		const coordinated = {
 			...original,
-			room: { ...original.room, revision: 2, coordinator, latestMessageSequence: 4 },
-			messages: [...original.messages, assignment, result],
+			version: 1,
+			room: {
+				...original.room, revision: 2, coordinator, latestMessageSequence: 5, continuous: true,
+				members: original.room.members.map(member => ({ ...member, worktreeUri: URI.file(join(storageRoot, 'worktrees', original.room.id, member.id)).toString() })),
+				artifacts: [patch],
+				run: { id: 'legacy-run', startedAt: 1, admittedTurns: 213, limits: {} },
+			},
+			messages: [
+				{ ...original.messages[0], deliveries: [{ memberId: 'member-one', state: 'completed', turnId: 'legacy-turn' }] },
+				original.messages[1], assignment, result,
+				{
+					id: 'review-one', sequence: 5, authorId: 'human', authorName: 'Human', authorKind: 'human',
+					kind: 'verification', text: 'Review evidence', timestamp: 5, mentions: [], deliveries: [],
+					verification: { resultId: result.id, verdict: 'verified', evidence: ['Repeated focused test.'] },
+				},
+			],
 		};
-		await storage.save(coordinated);
-		await assert.rejects(storage.save({
-			...coordinated,
-			room: { ...coordinated.room, revision: 3, coordinator: { ...coordinator, name: 'Other Coordinator' } },
-			messages: coordinated.messages.map(message => message.authorId === coordinator.id ? { ...message, authorName: 'Other Coordinator' } : message),
-		}), /preserved coordinator identity/);
-		await assert.rejects(storage.save({
-			...coordinated,
-			room: { ...coordinated.room, revision: 3 },
-			messages: coordinated.messages.map(message => message.id === assignment.id
-				? { ...message, assignment: { ...message.assignment!, expectedEvidence: ['Different evidence'] } }
-				: message),
-		}), /recorded room messages changed/);
-
+		await fs.mkdir(join(storageRoot, 'rooms'), { recursive: true });
+		await fs.mkdir(join(storageRoot, 'artifacts', original.room.id), { recursive: true });
+		const bytes = JSON.stringify(coordinated, null, '\t');
+		const path = join(storageRoot, 'rooms', `${original.room.id}.json`);
+		await fs.writeFile(path, bytes);
+		await fs.writeFile(URI.parse(patch.uri).fsPath, 'immutable legacy patch\n');
+		const [archive] = await storage.loadArchives();
+		await assert.rejects(storage.save(original), /archived room is read-only/);
 		assert.deepStrictEqual({
-			oldJournalCoordinator,
-			coordinator: (await storage.load())[0].room.coordinator,
-			assignmentId: (await storage.load())[0].messages.at(-1)?.result?.assignmentId,
-		}, { oldJournalCoordinator: undefined, coordinator, assignmentId: assignment.id });
+			active: await storage.load(),
+			archived: archive.room.archived,
+			sessions: archive.sessionUris,
+			coordinator: archive.room.archivedSessions?.find(session => session.id === coordinator.id),
+			references: archive.messages.slice(3).map(message => ({ replyTo: message.replyTo, artifacts: message.artifactIds })),
+			evidence: archive.messages[3].text.includes('Focused parser tests passed.') && archive.messages[4].text.includes('Repeated focused test.'),
+			legacyReceipt: archive.messages[0].deliveries[0].state,
+			patch: await storage.readArtifact(archive.room, archive.room.artifacts[0]),
+			bytes: await fs.readFile(path, 'utf8'),
+			directories: (await fs.readdir(storageRoot)).sort(),
+		}, {
+			active: [], archived: true, sessions: ['copilotcli:/member-one', coordinatorSession],
+			coordinator: { id: coordinator.id, name: coordinator.name, sessionUri: coordinatorSession, chatUri: coordinator.chatUri, worktreeUri: coordinator.worktreeUri },
+			references: [{ replyTo: assignment.id, artifacts: [patch.id] }, { replyTo: result.id, artifacts: undefined }],
+			evidence: true, legacyReceipt: 'interrupted', patch: 'immutable legacy patch\n', bytes, directories: ['artifacts', 'rooms'],
+		});
 	});
 
-	test('member configuration roundtrips and upgrades legacy journals without changing identities', async () => {
+	test('member configuration roundtrips without changing identities', async () => {
 		const original = record();
 		await storage.save(original);
 		const configuration: IAgentHostRoomConfiguration = { mode: 'interactive', autoApprove: 'autoApprove', sandboxEnabled: 'off' };
@@ -256,30 +284,19 @@ suite('AgentHostRoomsStorage', function () {
 			room: { ...original.room, revision: original.room.revision + 1, members: original.room.members.map(member => ({ ...member, configuration })) },
 		};
 		await storage.save(updated);
-		const restored = new AgentHostRoomsStorage(URI.file(root), new NullLogService());
+		const restored = new AgentHostRoomsStorage(URI.file(storageRoot), new NullLogService());
 		assert.deepStrictEqual(await restored.load(), [updated]);
 	});
 
-	test('briefed execution state roundtrips while legacy journals remain unbriefed', async () => {
+	test('initialized execution identity cannot regress', async () => {
 		const original = record();
 		await storage.save(original);
-		const legacyBriefed = (await storage.load())[0].executions[0].briefed;
-		const updated: IRoomRecord = {
+		await assert.rejects(storage.save({
 			...original,
 			room: { ...original.room, revision: original.room.revision + 1 },
-			executions: original.executions.map(execution => ({ ...execution, briefed: true })),
-		};
-		await storage.save(updated);
-
-		assert.deepStrictEqual({
-			legacyBriefed,
-			restoredBriefed: (await storage.load())[0].executions[0].briefed,
-			regressionRejected: await storage.save({
-				...updated,
-				room: { ...updated.room, revision: updated.room.revision + 1 },
-				executions: updated.executions.map(execution => ({ ...execution, briefed: false })),
-			}).then(() => false, () => true),
-		}, { legacyBriefed: undefined, restoredBriefed: true, regressionRejected: true });
+			executions: original.executions.map(execution => ({ ...execution, initialized: false })),
+		}), /initialization regressed/);
+		assert.deepStrictEqual(await storage.load(), [original]);
 	});
 
 	test('content exclusion denial preserves the worktree and real index without publishing a patch', async () => {
@@ -361,8 +378,6 @@ suite('AgentHostRoomsStorage', function () {
 
 			isIdle(sessionUri: string): boolean { return !this.turns.has(sessionUri); }
 			hasTurn(sessionUri: string, turnId: string): boolean { return this.turns.get(sessionUri) === turnId; }
-			async steer(): Promise<boolean> { throw new Error('Steering is not used by this worktree test'); }
-
 			submit(sessionUri: string, turnId: string): void {
 				this.turns.set(sessionUri, turnId);
 				this.changed.fire({ sessionUri, turnId, state: 'working' });
@@ -387,11 +402,15 @@ suite('AgentHostRoomsStorage', function () {
 		});
 		disposables.add(rooms.onDidChangeRoom(snapshot => {
 			const failed = snapshot.members.find(member => member.state === 'failed');
-			if (failed && !submitted.isSettled) {
-				void submitted.error(new Error(failed.error));
+			if (failed) {
+				if (!submitted.isSettled) {
+					void submitted.error(new Error(failed.error));
+				} else if (!resumed.isSettled) {
+					void resumed.error(new Error(failed.error));
+				}
 			}
 		}));
-		await rooms.startRoom(room.id, { maxTurns: 2, timeoutMinutes: 1 });
+		await rooms.startRoom(room.id, { maxTurns: 4, timeoutMinutes: 1 });
 		await submitted.p;
 		assert.deepStrictEqual(prepared.map(member => ({ state: member.state, turns: member.turns })), [
 			{ state: 'starting', turns: 1 },
@@ -408,11 +427,12 @@ suite('AgentHostRoomsStorage', function () {
 			await rooms.read(AgentSession.id(member.sessionUri));
 		}
 		assert.deepStrictEqual({
-			deliveries: (await rooms.getMessages(room.id)).messages[0].deliveries.map(delivery => delivery.state),
+			deliveries: (await rooms.getMessages(room.id)).messages.find(message => message.id === 'ordinary-followup')?.deliveries.map(delivery => delivery.state),
 			available: (await rooms.getCapabilities()).available,
-		}, { deliveries: ['submitted', 'submitted'], available: true });
+		}, { deliveries: ['pending', 'pending'], available: true });
 		await rooms.postMessage(room.id, { id: 'still-open', text: 'The room remains usable', mentions: [] });
 		await rooms.stopRoom(room.id);
+		await rooms.extendRun(room.id, 2);
 		await rooms.startRoom(room.id, {});
 		await resumed.p;
 		assert.deepStrictEqual({
@@ -425,13 +445,14 @@ suite('AgentHostRoomsStorage', function () {
 
 	test('empty storage does not create directories', async () => {
 		assert.deepStrictEqual(await storage.load(), []);
-		await assert.rejects(fs.stat(root), { code: 'ENOENT' });
+		assert.deepStrictEqual(await storage.loadArchives(), []);
+		await assert.rejects(fs.stat(storageRoot), { code: 'ENOENT' });
 	});
 
 	test('roundtrips complete nested records as immutable snapshots', async () => {
 		const snapshot = record();
 		await storage.save(snapshot);
-		const loaded = await new AgentHostRoomsStorage(URI.file(root), new NullLogService()).load();
+		const loaded = await new AgentHostRoomsStorage(URI.file(storageRoot), new NullLogService()).load();
 		assert.deepStrictEqual({
 			records: loaded,
 			frozen: [loaded, loaded[0], loaded[0].room, loaded[0].room.members[0].work, loaded[0].messages[0].deliveries, loaded[0].executions[0]].every(Object.isFrozen),
@@ -439,48 +460,89 @@ suite('AgentHostRoomsStorage', function () {
 		}, { records: [snapshot], frozen: true, files: ['room-one.json'] });
 	});
 
-	test('roundtrips an uncapped run without inventing limits or a deadline', async () => {
+	test('stores immutable message contents separately from delivery receipts and budgets', async () => {
+		const snapshot = record();
+		await storage.save(snapshot);
+		const contents = roomObject(JSON.parse(await fs.readFile(join(root, 'rooms', `${snapshot.room.id}.json`), 'utf8')), 'stored record');
+		assert.deepStrictEqual({
+			messages: contents.messages,
+			receipts: contents.receipts,
+		}, {
+			messages: snapshot.messages.map(({ deliveries, ...message }) => message),
+			receipts: snapshot.messages.map(message => ({ messageId: message.id, deliveries: message.deliveries })),
+		});
+	});
+
+	test('roundtrips a reserved batch and its charged turn without claiming submission', async () => {
+		const original = record();
+		const reserved: IRoomRecord = {
+			...original,
+			messages: original.messages.map(message => ({
+				...message, deliveries: message.deliveries.map(delivery => ({ ...delivery, state: 'reserved' as const })),
+			})),
+		};
+		await storage.save(reserved);
+		const restarted = new AgentHostRoomsStorage(URI.file(storageRoot), new NullLogService());
+		assert.deepStrictEqual(await restarted.load(), [reserved]);
+	});
+
+	test('refuses an uncapped writable run without inventing limits', async () => {
 		const snapshot = record();
 		const uncapped: IRoomRecord = {
 			...snapshot,
 			room: { ...snapshot.room, run: { id: 'run-one', startedAt: 1, admittedTurns: 15, limits: {} } },
 		};
-		await storage.save(uncapped);
-		assert.deepStrictEqual(await storage.load(), [uncapped]);
+		await assert.rejects(storage.save(uncapped), /limits.maxTurns/);
+		assert.deepStrictEqual(await storage.load(), []);
 	});
 
-	test('persists live human steering delivery while accepting legacy discussion records', async () => {
+	test('preserves run identity and charged turns when the budget is extended', async () => {
 		const original = record();
-		const steering: IRoomRecord = {
+		await storage.save(original);
+		const run = original.room.run!;
+		const extended: IRoomRecord = {
+			...original, room: { ...original.room, revision: 2, run: { ...run, limits: { ...run.limits, maxTurns: 15 } } },
+		};
+		await storage.save(extended);
+		for (const nextRun of [
+			undefined, { ...run, id: 'new-run' }, { ...run, admittedTurns: 0 }, run,
+		]) {
+			await assert.rejects(storage.save({
+				...extended, room: { ...extended.room, revision: 3, run: nextRun },
+				executions: nextRun ? extended.executions : [{ memberId: 'member-one', initialized: true }],
+			}), /run (identity|budget)|different run/);
+		}
+		assert.deepStrictEqual(await storage.load(), [extended]);
+	});
+
+	test('accepts the exact message limit and rejects a longer persisted message', async () => {
+		const original = record();
+		const boundary: IRoomRecord = {
 			...original,
-			messages: [{
-				...original.messages[0],
-				mode: 'steer',
-				deliveries: [{ memberId: 'member-one', state: 'delivered', turnId: 'turn-two' }],
-			}, original.messages[1]],
+			messages: [{ ...original.messages[0], text: 'a'.repeat(MAX_ROOM_MESSAGE_LENGTH) }, original.messages[1]],
 		};
-		await storage.save(steering);
-		assert.deepStrictEqual(await storage.load(), [steering]);
+		await storage.save(boundary);
+		await assert.rejects(storage.save({
+			...boundary, messages: [{ ...boundary.messages[0], text: 'a'.repeat(MAX_ROOM_MESSAGE_LENGTH + 1) }, boundary.messages[1]],
+		}), /message.text/);
+		assert.deepStrictEqual(await storage.load(), [boundary]);
 	});
 
-	test('roundtrips immutable structured results and attributed human verification', async () => {
+	test('roundtrips ordinary peer review messages with artifact and reply references', async () => {
 		const original = record();
-		const result = {
-			id: 'structured-result', sequence: 3, authorId: 'member-one', authorName: 'Worker', authorKind: 'agent' as const,
-			kind: 'result' as const, text: 'Parser result\n\nThe parser passed.', timestamp: 3, mentions: [], deliveries: [],
-			result: {
-				title: 'Parser result', summary: 'The parser passed.', outcome: 'success' as const,
-				evidence: ['Focused parser tests passed.'], artifactIds: [],
-			},
+		const result: IAgentHostRoomMessage = {
+			id: 'peer-result', sequence: 3, authorId: 'member-one', authorName: 'Worker', authorKind: 'agent',
+			kind: 'message', text: 'Parser patch; focused parser tests passed.', timestamp: 3, mentions: [], deliveries: [],
+			artifactIds: [artifact().id],
 		};
-		const verification = {
-			id: 'human-review', sequence: 4, authorId: 'human', authorName: 'Human', authorKind: 'human' as const,
-			kind: 'verification' as const, text: 'Verified parser result.', timestamp: 4, mentions: [], deliveries: [],
-			verification: { resultId: result.id, verdict: 'verified' as const, evidence: ['Repeated the focused test.'] },
+		const verification: IAgentHostRoomMessage = {
+			id: 'human-review', sequence: 4, authorId: 'human', authorName: 'Human', authorKind: 'human',
+			kind: 'message', text: 'Repeated the focused test; the parser passed.', timestamp: 4, mentions: [], deliveries: [],
+			replyTo: result.id,
 		};
 		const structured: IRoomRecord = {
 			...original,
-			room: { ...original.room, latestMessageSequence: 4 },
+			room: { ...original.room, latestMessageSequence: 4, artifacts: [artifact()] },
 			messages: [...original.messages, result, verification],
 		};
 		await storage.save(structured);
@@ -489,41 +551,9 @@ suite('AgentHostRoomsStorage', function () {
 			...structured,
 			room: { ...structured.room, revision: 2 },
 			messages: structured.messages.map(message => message.id === result.id
-				? { ...message, result: { ...message.result!, summary: 'Rewritten claim' } }
+				? { ...message, artifactIds: [] }
 				: message),
 		}), /recorded room messages changed/);
-	});
-
-	test('rejects invalid structured result and verification records', async () => {
-		const original = record();
-		const result = {
-			id: 'structured-result', sequence: 3, authorId: 'member-one', authorName: 'Worker', authorKind: 'agent' as const,
-			kind: 'result' as const, text: 'Parser result', timestamp: 3, mentions: [], deliveries: [],
-			result: {
-				title: 'Parser result', summary: 'The parser passed.', outcome: 'success' as const,
-				evidence: ['Focused parser tests passed.'], artifactIds: [], verificationState: 'pending' as const,
-			},
-		};
-		await assert.rejects(storage.save({
-			...original,
-			room: { ...original.room, latestMessageSequence: 3 },
-			messages: [...original.messages, result],
-		}), /persisted result has derived verification state/);
-		const persistedResult = { ...result, result: { ...result.result, verificationState: undefined } };
-		await assert.rejects(storage.save({
-			...original,
-			room: { ...original.room, latestMessageSequence: 4 },
-			messages: [...original.messages, persistedResult, {
-				id: 'self-review', sequence: 4, authorId: 'member-one', authorName: 'Worker', authorKind: 'agent',
-				kind: 'verification', text: 'Self review', timestamp: 4, mentions: [], deliveries: [],
-				verification: { resultId: result.id, verdict: 'verified', evidence: ['I checked it.'] },
-			}],
-		}), /result author verified its own result/);
-		await assert.rejects(storage.save({
-			...original,
-			room: { ...original.room, latestMessageSequence: 3 },
-			messages: [...original.messages, { ...persistedResult, mentions: ['member-one'] }],
-		}), /structured room record has mentions/);
 	});
 
 	test('persists model preferences independently of preserved member identities and configuration', async () => {
@@ -575,9 +605,9 @@ suite('AgentHostRoomsStorage', function () {
 
 		// Delivery state legitimately advances as a message reaches its recipients.
 		await revise(original.messages.map((message, index) => index === 0
-			? { ...message, deliveries: message.deliveries.map(delivery => ({ ...delivery, state: 'completed' as const })) }
+			? { ...message, deliveries: message.deliveries.map(delivery => ({ ...delivery, state: 'interrupted' as const })) }
 			: message));
-		assert.strictEqual((await storage.load())[0].messages[0].deliveries.every(delivery => delivery.state === 'completed'), true);
+		assert.strictEqual((await storage.load())[0].messages[0].deliveries.every(delivery => delivery.state === 'interrupted'), true);
 
 		// Rewriting an already-recorded post is refused: same count, same ordering, so
 		// only comparing the attributed content catches it.
@@ -618,7 +648,7 @@ suite('AgentHostRoomsStorage', function () {
 		const grown = {
 			...original,
 			room: { ...original.room, revision: 2, members: [first, joined] },
-			executions: [...original.executions, { memberId: joined.id, initialized: false, needsTurn: true }],
+			executions: [...original.executions, { memberId: joined.id, initialized: false }],
 		};
 		await storage.save(grown);
 		assert.deepStrictEqual((await storage.load())[0].room.members.map(member => member.id), [first.id, joined.id]);
@@ -631,6 +661,25 @@ suite('AgentHostRoomsStorage', function () {
 			...grown, room: { ...grown.room, revision: 3, members: [first] },
 			executions: original.executions,
 		}), /preserved member identities changed/);
+	});
+
+	test('retired identities are retained without consuming the active worker limit', async () => {
+		const original = record();
+		await storage.save(original);
+		const added: IAgentHostRoomMember[] = Array.from({ length: 10 }, (_, index) => ({
+			id: `added-${index}`, name: `Added ${index}`, sessionUri: `copilotcli:/added-${index}`,
+			state: 'pending', turns: 0, worktreeUri: storage.worktreeUri(original.room.id, `added-${index}`),
+		}));
+		const replaced: IRoomRecord = {
+			...original,
+			room: {
+				...original.room, revision: 2,
+				members: [{ ...original.room.members[0], removed: true, state: 'stopped' }, ...added],
+			},
+			executions: [{ memberId: 'member-one', initialized: true }, ...added.map(member => ({ memberId: member.id, initialized: false }))],
+		};
+		await storage.save(replaced);
+		assert.deepStrictEqual(await storage.load(), [replaced]);
 	});
 
 	test('loads legacy selections and unavailable catalog entries without treating them as journal corruption', async () => {
@@ -664,14 +713,14 @@ suite('AgentHostRoomsStorage', function () {
 			state: 'pending' as const, turns: 0,
 		}));
 		const snapshot: IRoomRecord = {
-			version: 1,
+			version: 2,
 			room: {
 				id: initial.room.id, revision: 0, title: 'New room', goal: 'Goal', instructions: '',
 				repositoryUri: initial.room.repositoryUri, baseRevision: initial.room.baseRevision,
 				createdAt: 0, updatedAt: 0, state: 'created', members, artifacts: [], latestMessageSequence: 0,
 			},
 			messages: [],
-			executions: members.map(member => ({ memberId: member.id, initialized: false, needsTurn: true })),
+			executions: members.map(member => ({ memberId: member.id, initialized: false })),
 		};
 		await storage.save(snapshot);
 		assert.deepStrictEqual(await storage.load(), [snapshot]);
@@ -698,6 +747,17 @@ suite('AgentHostRoomsStorage', function () {
 		await assert.rejects(storage.save(snapshot), /revision regressed/);
 		await storage.save({ ...newer, room: { ...newer.room, revision: 3 } });
 		assert.strictEqual((await storage.load())[0].room.revision, 3);
+	});
+
+	test('saves use the loaded index; a failed explicit reload disarms subsequent writes', async () => {
+		const snapshot = record();
+		await storage.save(snapshot);
+		const corrupt = join(root, 'rooms', 'new-corrupt-room.json');
+		await fs.writeFile(corrupt, '{ broken');
+		await storage.save({ ...snapshot, room: { ...snapshot.room, revision: 2 } });
+		await assert.rejects(storage.load(), SyntaxError);
+		await assert.rejects(storage.save({ ...snapshot, room: { ...snapshot.room, revision: 3 } }), SyntaxError);
+		assert.strictEqual(await fs.readFile(corrupt, 'utf8'), '{ broken');
 	});
 
 	test('rejects duplicate provider sessions across rooms on save and load', async () => {
@@ -782,7 +842,7 @@ suite('AgentHostRoomsStorage', function () {
 	const changeArtifact = (fields: Record<string, unknown>): Corruption => snapshot => ({ ...snapshot, room: { ...snapshot.room, artifacts: [{ ...artifact(), ...fields }] } });
 
 	const corruptions: readonly [string, Corruption][] = [
-		['unknown version', snapshot => ({ ...snapshot, version: 2 })],
+		['unknown version', snapshot => ({ ...snapshot, version: 3 })],
 		['missing version', snapshot => ({ ...snapshot, version: undefined })],
 		['unknown record fields', snapshot => ({ ...snapshot, unexpected: true })],
 		['non-object room', snapshot => ({ ...snapshot, room: null })],
@@ -852,10 +912,10 @@ suite('AgentHostRoomsStorage', function () {
 		['invalid author name', changeMessage({ authorName: false })],
 		['agent author name differs from roster', snapshot => ({ ...snapshot, messages: [snapshot.messages[0], { ...snapshot.messages[1], authorName: 'Different worker' }] })],
 		['unknown message kind', changeMessage({ kind: 'unknown' })],
+		['human impersonates system record', changeMessage({ kind: 'system' })],
 		['unknown message mode', changeMessage({ mode: 'unknown' })],
 		['agent impersonates steering', snapshot => ({ ...snapshot, messages: [snapshot.messages[0], { ...snapshot.messages[1], mode: 'steer' }] })],
-		['steering delivery on a discussion post', changeDelivery({ state: 'steering', turnId: 'turn-one' })],
-		['steering missing turn', changeMessage({ mode: 'steer', deliveries: [{ memberId: 'member-one', state: 'steering' }] })],
+		['legacy steering receipt', changeDelivery({ state: 'steering', turnId: 'turn-one' })],
 		['invalid message text', changeMessage({ text: 1 })],
 		['invalid message timestamp', changeMessage({ timestamp: null })],
 		['missing mention target', changeMessage({ mentions: ['missing-member'] })],
@@ -864,6 +924,7 @@ suite('AgentHostRoomsStorage', function () {
 		['forward reply', changeMessage({ replyTo: 'message-two' })],
 		['self reply', changeMessage({ replyTo: 'message-one' })],
 		['missing artifact reference', changeMessage({ artifactId: 'missing-artifact' })],
+		['missing linked artifact', changeMessage({ artifactIds: ['missing-artifact'] })],
 		['artifact message without artifact', changeMessage({ kind: 'artifact' })],
 		['missing delivery member', changeDelivery({ memberId: 'missing-member' })],
 		['unmentioned delivery recipient', changeMessage({ mentions: [] })],
@@ -871,26 +932,21 @@ suite('AgentHostRoomsStorage', function () {
 		['invalid delivery state', changeDelivery({ state: 'unknown' })],
 		['invalid delivery turn', changeDelivery({ turnId: false })],
 		['submitted delivery without turn', changeDelivery({ state: 'submitted' })],
+		['reserved delivery without turn', changeDelivery({ state: 'reserved' })],
 		['invalid delivery error', changeDelivery({ error: false })],
 		['duplicate delivery', changeMessage({ deliveries: [{ memberId: 'member-one', state: 'pending' }, { memberId: 'member-one', state: 'pending' }] })],
 		['missing executions', snapshot => ({ ...snapshot, executions: [] })],
 		['missing execution member', changeExecution({ memberId: 'missing-member' })],
 		['invalid initialized flag', changeExecution({ initialized: 1 })],
-		['invalid briefed flag', changeExecution({ briefed: 1 })],
-		['invalid briefing turn', changeExecution({ briefingTurnId: '' })],
-		['completed and pending brief', changeExecution({ briefed: true, briefingTurnId: 'brief-turn' })],
-		['invalid needsTurn flag', changeExecution({ needsTurn: 1 })],
-		['invalid announced flag', changeExecution({ announced: 1 })],
+		['legacy continuation state in a writable journal', changeExecution({ needsTurn: true, nextAction: 'continue', readSequence: 2, briefed: true })],
 		['invalid execution turn', changeExecution({ turnId: '' })],
-		['future read cursor', changeExecution({ readSequence: 3 })],
-		['negative read cursor', changeExecution({ readSequence: -1 })],
-		['fractional read cursor', changeExecution({ readSequence: 0.5 })],
 		['missing execution run', changeExecution({ runId: undefined })],
 		['wrong execution run', changeExecution({ runId: 'different-run' })],
 		['invalid run ID', changeRun({ id: false })],
 		['invalid run start', changeRun({ startedAt: -1 })],
 		['run deadline order', changeRun({ deadline: 0 })],
 		['invalid turn limit', changeRun({ limits: { maxTurns: 0, timeoutMinutes: 1 } })],
+		['missing turn limit', changeRun({ limits: { timeoutMinutes: 1 } })],
 		['invalid timeout', changeRun({ limits: { maxTurns: 10, timeoutMinutes: 0 } })],
 		['admitted turns exceed limit', changeRun({ admittedTurns: 11 })],
 		['invalid admitted turns', changeRun({ admittedTurns: false })],
@@ -972,7 +1028,7 @@ suite('AgentHostRoomsStorage', function () {
 		await git(worktree, ['commit', '-m', 'Preserved member commit']);
 		const head = (await git(worktree, ['rev-parse', 'HEAD'])).trim();
 		await fs.writeFile(join(worktree, 'preserved.txt'), 'keep me\n');
-		const reopened = new AgentHostRoomsStorage(URI.file(root), new NullLogService());
+		const reopened = new AgentHostRoomsStorage(URI.file(storageRoot), new NullLogService());
 		await reopened.ensureWorktree({ ...room, state: 'stopped' }, member);
 		assert.deepStrictEqual({
 			head: (await git(worktree, ['rev-parse', 'HEAD'])).trim(),
@@ -1103,7 +1159,7 @@ suite('AgentHostRoomsStorage', function () {
 		}
 		await fs.writeFile(join(worktree, 'untracked file.txt'), 'changed after publication\n');
 		const second = await storage.publishPatch(publishedRoom, member, 'Second patch');
-		const restoredStorage = new AgentHostRoomsStorage(URI.file(root), new NullLogService());
+		const restoredStorage = new AgentHostRoomsStorage(URI.file(storageRoot), new NullLogService());
 		const [restored] = await restoredStorage.load();
 		assert.deepStrictEqual({
 			sameFirstPatch: await storage.readArtifact(publishedRoom, published) === patch,
@@ -1195,5 +1251,18 @@ suite('AgentHostRoomsStorage', function () {
 		await fs.symlink(join(repository, 'committed.txt'), join(root, 'rooms', `${room.id}.json`));
 		await assert.rejects(storage.save(snapshot), /not a regular file/);
 		assert.strictEqual(await fs.readFile(join(repository, 'committed.txt'), 'utf8'), 'base\n');
+	});
+
+	test('rejects a symlinked namespace even after records were loaded', async function () {
+		if (process.platform === 'win32') {
+			this.skip();
+		}
+		const snapshot = record();
+		await storage.save(snapshot);
+		const preserved = join(scratch, 'preserved-v2');
+		await fs.rename(root, preserved);
+		await fs.symlink(preserved, root, 'dir');
+		await assert.rejects(storage.save({ ...snapshot, room: { ...snapshot.room, revision: 2 } }), /not a real directory/);
+		assert.deepStrictEqual(await fs.readdir(join(preserved, 'rooms')), ['room-one.json']);
 	});
 });

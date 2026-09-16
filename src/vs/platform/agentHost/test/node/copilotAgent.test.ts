@@ -41,6 +41,7 @@ import { NullTelemetryService, NullTelemetryServiceShape } from '../../../teleme
 import { AgentHostTelemetryService } from '../../node/agentHostTelemetryService.js';
 import { IAgentHostSessionOpenTelemetry } from '../../node/agentHostSessionOpenTelemetry.js';
 import { CopilotCliConfigKey, CopilotCliVSCodeAssignmentContextKey } from '../../common/copilotCliConfig.js';
+import { CopilotModelTeamConfigKey, CopilotModelTeamRememberedConfigKey } from '../../common/copilotModelTeam.js';
 import { AgentHostConfigKey } from '../../common/agentHostCustomizationConfig.js';
 import { AgentHostAutoApprovePolicyRestrictedConfigKey, AgentHostByokModelsEnabledConfigKey, AgentHostGitHubMcpServerEnabledConfigKey, AgentHostCopilotMultiRootEnabledConfigKey, AgentHostMigrateLegacyCopilotCliEnabledConfigKey, AgentHostProxyConfigKey, AgentHostSystemProxyEnabledConfigKey } from '../../common/agentHostSchema.js';
 import { IAgentPluginManager, ISyncedCustomization } from '../../common/agentPluginManager.js';
@@ -1320,6 +1321,40 @@ suite('CopilotAgent', () => {
 				fork: agent.getInheritedChatConfig(restored.values)?.sandboxEnabled,
 				mutable: restored.schema.properties.sandboxEnabled.sessionMutable,
 			}, { fresh: undefined, restored: 'off', fork: undefined, mutable: true });
+		} finally {
+			await disposeAgent(agent);
+		}
+	});
+
+	test('dormant team preferences survive resolution without activating helpers or inheriting into forks', async () => {
+		const agent = createTestAgent(disposables);
+		const remembered = { worker: { id: 'unavailable-worker', config: { thinkingLevel: 'high' } } };
+		try {
+			const resolved = await agent.resolveChatConfig({
+				config: { [CopilotModelTeamConfigKey]: {}, [CopilotModelTeamRememberedConfigKey]: remembered },
+			});
+			const inherited = agent.getInheritedChatConfig(resolved.values);
+			assert.deepStrictEqual({
+				active: resolved.values[CopilotModelTeamConfigKey],
+				remembered: resolved.values[CopilotModelTeamRememberedConfigKey],
+				inheritedActive: inherited?.[CopilotModelTeamConfigKey],
+				inheritedRemembered: inherited?.[CopilotModelTeamRememberedConfigKey],
+			}, { active: {}, remembered, inheritedActive: undefined, inheritedRemembered: undefined });
+		} finally {
+			await disposeAgent(agent);
+		}
+	});
+
+	test('restored teams retain their schema and preferences while model discovery is unavailable', async () => {
+		const agent = createTestAgent(disposables);
+		const team = { worker: { id: 'not-yet-discovered', config: { thinkingLevel: 'high' } } };
+		try {
+			const restored = await agent.resolveChatConfig({ config: { [CopilotModelTeamConfigKey]: team } }, 'restore');
+			assert.deepStrictEqual({
+				selection: restored.values[CopilotModelTeamConfigKey],
+				mutable: restored.schema.properties[CopilotModelTeamConfigKey]?.sessionMutable,
+				remembered: !!restored.schema.properties[CopilotModelTeamRememberedConfigKey],
+			}, { selection: team, mutable: true, remembered: true });
 		} finally {
 			await disposeAgent(agent);
 		}

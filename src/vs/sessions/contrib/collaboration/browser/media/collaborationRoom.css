@@ -60,50 +60,53 @@
 	overflow: hidden;
 }
 
-.collaboration-room .room-main-tabs-header {
-	flex: 0 0 auto;
-	padding: var(--vscode-spacing-size40) var(--vscode-spacing-size80);
-}
-
-.collaboration-room .room-main-tabs {
-	justify-content: flex-start;
-}
-
-.collaboration-room .room-main-tab-content {
+.collaboration-room .room-conversation-panel {
 	display: flex;
-	flex: 1 1 auto;
-	min-height: 0;
-	min-width: 0;
-	overflow: hidden;
-}
-
-.collaboration-room .room-main-tab-panel {
-	display: flex;
-	flex: 1 1 auto;
-	min-height: 0;
-	min-width: 0;
-	overflow: hidden;
-}
-
-.collaboration-room .room-main-tab-panel[hidden] {
-	display: none;
-}
-
-.collaboration-room .room-activity-panel {
 	flex-direction: column;
-}
-
-.collaboration-room .room-coordinator-placeholder {
-	align-self: center;
-	margin: auto;
-	color: var(--vscode-descriptionForeground);
-}
-
-.collaboration-room .room-coordinator-chat {
 	flex: 1 1 auto;
-	min-width: 0;
 	min-height: 0;
+	min-width: 0;
 	overflow: hidden;
+}
+
+.collaboration-room .room-history-filter {
+	display: flex;
+	align-items: center;
+	gap: var(--vscode-spacing-size80);
+	flex-wrap: wrap;
+	min-width: 0;
+}
+
+.collaboration-room .room-history-filter {
+	justify-content: space-between;
+	padding: var(--vscode-spacing-size80) var(--vscode-spacing-size200);
+}
+
+.collaboration-room .room-header > .monaco-button,
+.collaboration-room .room-history-filter > .monaco-button,
+.collaboration-room .room-member-heading .monaco-button,
+.collaboration-room .room-history-controls > .monaco-button,
+.collaboration-room .room-composer .monaco-button,
+.collaboration-room .room-run-controls-host > .monaco-button {
+	width: auto;
+}
+
+.collaboration-room .room-budget-field {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size80);
+}
+
+.collaboration-room .room-budget-label {
+	font-size: var(--vscode-fontSize-label1);
+	font-weight: var(--vscode-fontWeight-semiBold);
+}
+
+.collaboration-room .room-budget-status,
+.collaboration-room .room-delivery-hint {
+	font-size: var(--vscode-fontSize-label1);
+	color: var(--vscode-descriptionForeground);
+	margin-top: var(--vscode-spacing-size60);
 }
 
 .collaboration-room.room-side-panel {
@@ -209,28 +212,6 @@
 	border-bottom: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
 }
 
-.collaboration-room .room-coordinator-settings {
-	display: flex;
-	flex-direction: column;
-	gap: var(--vscode-spacing-size80);
-	padding-bottom: var(--vscode-spacing-size160);
-	margin-bottom: var(--vscode-spacing-size160);
-	border-bottom: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
-}
-
-.collaboration-room .room-coordinator-settings-heading {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: var(--vscode-spacing-size80);
-}
-
-.collaboration-room .room-coordinator-settings-heading h3 {
-	margin: 0;
-	font-size: var(--vscode-fontSize-heading3);
-	font-weight: var(--vscode-fontWeight-semiBold);
-}
-
 .collaboration-room .room-member-heading {
 	display: flex;
 	flex-wrap: wrap;
@@ -238,14 +219,11 @@
 	gap: var(--vscode-spacing-size80);
 }
 
-.collaboration-room .room-member-heading > button {
+.collaboration-room .room-member-heading > .monaco-button {
 	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	background: transparent;
-	padding-left: 0;
-	border-color: var(--vscode-contrastBorder, transparent);
-	color: var(--vscode-foreground);
+	white-space: nowrap;
 	font-weight: var(--vscode-fontWeight-semiBold);
 }
 
@@ -266,7 +244,7 @@
 	color: var(--vscode-descriptionForeground);
 }
 
-.collaboration-room .room-add-member:hover:not(:disabled) {
+.collaboration-room .room-add-member:hover:not(.disabled) {
 	color: var(--vscode-foreground);
 	border-color: var(--vscode-focusBorder);
 }
@@ -387,57 +365,9 @@
 	background: transparent;
 }
 
-.collaboration-room .room-result,
-.collaboration-room .room-assignment,
-.collaboration-room .room-verification {
-	display: flex;
-	flex-direction: column;
-	gap: var(--vscode-spacing-size80);
-	padding: var(--vscode-spacing-size120);
-	border: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
-	border-radius: var(--vscode-cornerRadius-medium);
-	background: var(--vscode-textBlockQuote-background, transparent);
-}
-
-.collaboration-room .room-result-heading,
-.collaboration-room .room-assignment-heading {
-	display: flex;
-	align-items: baseline;
-	flex-wrap: wrap;
-	gap: var(--vscode-spacing-size80);
-}
-
-.collaboration-room .room-result-title,
-.collaboration-room .room-assignment-title,
-.collaboration-room .room-assignment-assignees,
-.collaboration-room .room-assignment-evidence-heading,
-.collaboration-room .room-verification-verdict,
-.collaboration-room .room-result-evidence-heading {
-	font-weight: var(--vscode-fontWeight-semiBold);
-}
-
-.collaboration-room .room-result-outcome,
-.collaboration-room .room-result-verification,
-.collaboration-room .room-assignment-state,
-.collaboration-room .room-assignment-link,
-.collaboration-room .room-verification-result {
-	color: var(--vscode-descriptionForeground);
-	font-size: var(--vscode-fontSize-label1);
-}
-
-.collaboration-room .room-result-summary,
-.collaboration-room .room-result-evidence,
-.collaboration-room .room-assignment-objective,
-.collaboration-room .room-assignment-note,
-.collaboration-room .room-assignment-evidence {
-	margin: var(--vscode-spacing-sizeNone);
+.collaboration-room .room-message-plain {
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
-}
-
-.collaboration-room .room-result-evidence,
-.collaboration-room .room-assignment-evidence {
-	padding-left: var(--vscode-spacing-size200);
 }
 
 .collaboration-room .room-message {
@@ -507,10 +437,6 @@
 	border-top: var(--vscode-strokeThickness) solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
 }
 
-/*
- * The composer borrows the Agents window chat input's container and toolbar, so
- * its own field has to sit inside that box rather than draw a second one.
- */
 .collaboration-room .room-composer .new-chat-input-area {
 	max-width: none;
 }
@@ -539,29 +465,11 @@
 	padding: var(--vscode-spacing-size60) var(--vscode-spacing-size120) var(--vscode-spacing-size100);
 }
 
-/* Send matches the Agents window chat input: an icon button, not a labelled one. */
 .collaboration-room .room-composer-actions > .room-send {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	width: 24px;
-	height: 24px;
-	padding: var(--vscode-spacing-sizeNone);
-	border: none;
-	border-radius: var(--vscode-cornerRadius-circle);
-	background: var(--vscode-button-background);
-	color: var(--vscode-button-foreground);
+	padding: var(--vscode-spacing-size40) var(--vscode-spacing-size120);
 }
 
-.collaboration-room .room-composer-actions > .room-send:hover:not(:disabled) {
-	background: var(--vscode-button-hoverBackground);
-}
-
-.collaboration-room .room-composer-actions > .room-send:disabled {
-	opacity: 0.4;
-}
-
-.collaboration-room .room-composer-actions > .room-send.sending::before {
+.collaboration-room .room-composer-actions > .room-send.sending {
 	opacity: 0.6;
 }
 
@@ -623,10 +531,6 @@
 	flex: 1;
 }
 
-.collaboration-room .room-run-limits {
-	flex-basis: 100%;
-}
-
 .collaboration-room .room-goal {
 	display: flex;
 	flex-direction: column;
@@ -644,17 +548,6 @@
 	margin-bottom: var(--vscode-spacing-size80);
 	overflow-wrap: anywhere;
 	white-space: pre-wrap;
-}
-
-.collaboration-room .room-run-limits summary {
-	cursor: pointer;
-}
-
-.collaboration-room .room-run-limits label {
-	display: inline-flex;
-	flex-direction: column;
-	gap: 4px;
-	margin: 8px 12px 0 0;
 }
 
 .collaboration-room .room-subtitle {
@@ -690,7 +583,7 @@
 }
 
 .collaboration-room .room-notice {
-	border: 1px solid transparent;
+	border: var(--vscode-strokeThickness) solid transparent;
 	white-space: pre-wrap;
 }
 
@@ -731,6 +624,11 @@
 .collaboration-room .room-home-grow {
 	flex: 1;
 	min-width: 0;
+}
+
+.collaboration-room .room-home-row > .monaco-button {
+	width: auto;
+	flex-shrink: 0;
 }
 
 .collaboration-room .room-home-count {
@@ -906,7 +804,7 @@
 	margin-bottom: var(--vscode-spacing-size160);
 }
 
-.collaboration-room .room-run-controls-host > button {
+.collaboration-room .room-run-controls-host > .monaco-button {
 	justify-content: center;
 	min-width: 96px;
 }

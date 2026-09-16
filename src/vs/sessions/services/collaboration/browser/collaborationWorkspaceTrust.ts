@@ -36,7 +36,7 @@ export class CollaborationWorkspaceTrust extends Disposable {
 				room?.id,
 				room?.repositoryUri,
 				room?.members.map(member => [member.id, member.sessionUri, member.worktreeUri]),
-				room?.coordinator && [room.coordinator.id, room.coordinator.sessionUri, room.coordinator.worktreeUri],
+				room?.archived,
 			]);
 		});
 		const trustChanged = observableSignalFromEvent(this, management.onDidChangeTrustedFolders);
@@ -48,7 +48,7 @@ export class CollaborationWorkspaceTrust extends Disposable {
 	}
 
 	private assertCurrent(identity: string): void {
-		if (this._store.isDisposed || this.identity.get() !== identity || !this.room.get()) {
+		if (this._store.isDisposed || this.identity.get() !== identity || !this.room.get() || this.room.get()?.archived) {
 			throw new CancellationError();
 		}
 	}
@@ -65,10 +65,7 @@ export class CollaborationWorkspaceTrust extends Disposable {
 		if (room.members.length > MAX_ROOM_WORKERS) {
 			throw new Error(localize('room.trustTooManyPeers', "The local room contains too many peers."));
 		}
-		const participants = [
-			...room.members.map(member => ({ name: member.name, worktreeUri: member.worktreeUri })),
-			...(room.coordinator ? [{ name: room.coordinator.name, worktreeUri: room.coordinator.worktreeUri }] : []),
-		];
+		const participants = room.members.map(member => ({ name: member.name, worktreeUri: member.worktreeUri }));
 		const worktrees = participants.map(participant => {
 			if (!participant.worktreeUri) {
 				throw new Error(localize('room.trustMissingWorktree', "The local host has not supplied {0}'s worktree. Reload the room before authorizing work.", participant.name));
@@ -85,7 +82,7 @@ export class CollaborationWorkspaceTrust extends Disposable {
 	private async refresh(identity: string): Promise<void> {
 		const refresh = ++this.refreshGeneration;
 		const room = this.room.get();
-		if (!room) {
+		if (!room || room.archived) {
 			this.state.set({ state: 'unavailable' }, undefined);
 			return;
 		}
@@ -133,9 +130,8 @@ export class CollaborationWorkspaceTrust extends Disposable {
 			// Only this local, validated API may supply directories that inherit source trust.
 			const room = await this.getApi().getRoom(selected.id);
 			this.assertCurrent(identity);
-			if (room.id !== selected.id || room.repositoryUri !== selected.repositoryUri
-				|| JSON.stringify(room.members.map(member => [member.id, member.sessionUri, member.worktreeUri])) !== JSON.stringify(selected.members.map(member => [member.id, member.sessionUri, member.worktreeUri]))
-				|| JSON.stringify(room.coordinator && [room.coordinator.id, room.coordinator.sessionUri, room.coordinator.worktreeUri]) !== JSON.stringify(selected.coordinator && [selected.coordinator.id, selected.coordinator.sessionUri, selected.coordinator.worktreeUri])) {
+			if (room.archived || room.id !== selected.id || room.repositoryUri !== selected.repositoryUri
+				|| JSON.stringify(room.members.map(member => [member.id, member.sessionUri, member.worktreeUri])) !== JSON.stringify(selected.members.map(member => [member.id, member.sessionUri, member.worktreeUri]))) {
 				throw new Error(localize('room.trustIdentityChanged', "The room's workspace identity changed. Reload the room before authorizing work."));
 			}
 			const { repository, worktrees } = this.directories(room);
@@ -144,7 +140,7 @@ export class CollaborationWorkspaceTrust extends Disposable {
 			if (!sourceTrust.trusted) {
 				const granted = await this.requestService.requestResourcesTrust({
 					uri: repository,
-					message: localize('room.trustConsent', "Trust this room's source repository to run its Copilot participants? The coordinator and each worker use separate local worktrees. Trust will apply only to this repository and the exact participant directories below, not their shared parent folder.\n\nSource: {0}\n\nParticipant worktrees:\n{1}", repository.fsPath, worktrees.map(uri => uri.fsPath).join('\n')),
+					message: localize('room.trustConsent', "Trust this room's source repository to run its Copilot peers? Each peer uses a separate local worktree. Trust will apply only to this repository and the exact participant directories below, not their shared parent folder.\n\nSource: {0}\n\nParticipant worktrees:\n{1}", repository.fsPath, worktrees.map(uri => uri.fsPath).join('\n')),
 				});
 				this.assertCurrent(identity);
 				if (granted !== true) {

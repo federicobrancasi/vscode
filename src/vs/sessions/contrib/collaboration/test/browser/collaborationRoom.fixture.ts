@@ -33,7 +33,7 @@ import { CollaborationFixtureService, createCollaborationFixtureMessages, create
 import { stubCollaborationTestServices } from './collaborationTestServices.js';
 import '../../../../common/theme.js';
 
-type RoomFixtureState = 'new' | 'home' | 'running' | 'paused' | 'offline' | 'steering' | 'approvals' | 'approval-pending' | 'approval-failed' | 'untrusted' | 'one-peer' | 'three-peers' | 'settings' | 'narrow' | 'long-history' | 'mixed-setup' | 'pending-model' | 'model-error';
+type RoomFixtureState = 'new' | 'home' | 'created' | 'running' | 'paused' | 'offline' | 'queued' | 'reserved' | 'budget-exhausted' | 'archive' | 'inbox' | 'hidden' | 'approvals' | 'approval-pending' | 'approval-failed' | 'untrusted' | 'one-peer' | 'three-peers' | 'settings' | 'narrow' | 'long-history' | 'mixed-setup' | 'pending-model' | 'model-error';
 
 function renderRoom(ctx: ComponentFixtureContext, state: RoomFixtureState): void {
 	const width = state === 'narrow' ? 640 : 1160;
@@ -44,7 +44,7 @@ function renderRoom(ctx: ComponentFixtureContext, state: RoomFixtureState): void
 	const service = new CollaborationFixtureService();
 	const storage = ctx.disposableStore.add(new InMemoryStorageService());
 	const customViews = ctx.disposableStore.add(new CustomViewService(new NullLogService(), storage));
-	const views = ctx.disposableStore.add(new CollaborationRoomViewService(customViews));
+	const views = ctx.disposableStore.add(new CollaborationRoomViewService(customViews, storage, new NullLogService()));
 	const memberNames = ['chaotic-cyborg', 'disciplined-neuron', 'caffeinated-compiler'];
 	if (state === 'new' || state === 'home') {
 		views.saveCreationDraft({
@@ -85,14 +85,49 @@ function renderRoom(ctx: ComponentFixtureContext, state: RoomFixtureState): void
 						: history.messages[index % history.messages.length].text,
 				})),
 			});
-		} else if (state === 'steering') {
-			service.showRoom({ ...room, latestMessageSequence: 5 }, {
+		} else if (state === 'reserved') {
+			service.showRoom({
+				...room, latestMessageSequence: 2, artifacts: [],
+				run: { ...room.run!, deadline: undefined, limits: { maxTurns: 4 }, admittedTurns: 1 },
+				members: [{ ...room.members[0], state: 'starting', turns: 1, activity: 'Preparing the reserved input batch' }],
+			}, {
+				hasEarlier: false, hasLater: false,
+				messages: [1, 2].map(sequence => ({
+					id: `reserved-${sequence}`, sequence, authorId: 'human', authorName: 'You', authorKind: 'human', kind: 'message',
+					text: sequence === 1 ? 'Review the baseline before making changes.' : 'Include the measurement details in your reply.',
+					timestamp: room.updatedAt + sequence, mentions: [room.members[0].id],
+					deliveries: [{ memberId: room.members[0].id, state: 'reserved', turnId: 'reserved-batch' }],
+				})),
+			});
+		} else if (state === 'queued') {
+			service.showRoom({ ...room, latestMessageSequence: 7 }, {
 				...history,
 				messages: [...history.messages, {
-					id: 'guidance', sequence: 5, authorId: 'human', authorName: 'You', authorKind: 'human', kind: 'message', mode: 'steer',
+					id: 'guidance', sequence: 7, authorId: 'human', authorName: 'You', authorKind: 'human', kind: 'message',
 					text: '@Copilot-1 @Copilot-2 Pause the optimization ideas and fix the failing baseline first.',
 					timestamp: room.updatedAt, mentions: ['member-1', 'member-2'],
-					deliveries: [{ memberId: 'member-1', state: 'delivered', turnId: 'turn-1' }, { memberId: 'member-2', state: 'steering', turnId: 'turn-2' }],
+					deliveries: [{ memberId: 'member-1', state: 'submitted', turnId: 'turn-1' }, { memberId: 'member-2', state: 'pending' }],
+				}],
+			});
+		} else if (state === 'created') {
+			service.showRoom({ ...room, state: 'created', run: undefined, latestMessageSequence: 0, members: room.members.map(member => ({ ...member, state: 'pending', turns: 0 })) }, { messages: [], hasEarlier: false, hasLater: false });
+		} else if (state === 'budget-exhausted') {
+			service.showRoom({ ...room, state: 'paused', pauseReason: 'budget', run: { ...room.run!, admittedTurns: room.run!.limits.maxTurns! } }, history);
+		} else if (state === 'archive') {
+			service.showRoom({
+				...room, state: 'stopped', archived: true, latestMessageSequence: 7,
+				members: room.members.map(member => ({ ...member, state: 'stopped' })),
+				archivedSessions: [
+					...room.members.map(({ id, name, sessionUri, chatUri, worktreeUri }) => ({ id, name, sessionUri, chatUri, worktreeUri })),
+					{ id: 'historic-session', name: 'Historical participant', sessionUri: 'copilotcli:/historic', chatUri: 'opaque-chat:/historic/preserved', worktreeUri: 'file:///workspace/worktrees/historic' },
+				],
+			}, {
+				...history,
+				messages: [...history.messages, {
+					id: 'historical-post', sequence: 7, authorId: 'historic-session', authorName: 'Historical participant', authorKind: 'agent', kind: 'message',
+					text: 'Historical assignment and review metadata remain readable here. The preserved patch is available for inspection.',
+					timestamp: room.updatedAt + 1, mentions: ['member-1'], replyTo: 'review-cache', artifactIds: ['patch-1'],
+					deliveries: [{ memberId: 'member-1', state: 'interrupted', error: 'Historical status "completed" does not establish provider acceptance or task completion.' }],
 				}],
 			});
 		} else {
@@ -101,6 +136,15 @@ function renderRoom(ctx: ComponentFixtureContext, state: RoomFixtureState): void
 				state: 'paused',
 				members: room.members.map(member => ({ ...member, state: 'idle' })),
 			} : room, history);
+			if (state === 'inbox') {
+				void service.selectInbox('member-2');
+			} else if (state === 'hidden') {
+				const message = history.messages.find(message => message.authorKind === 'human');
+				if (!message) {
+					throw new Error('The hidden-message fixture requires a human post');
+				}
+				views.hideMessage(room.id, message.id);
+			}
 		}
 	}
 	if (state === 'offline') {
@@ -183,7 +227,13 @@ export default defineThemedFixtureGroup({ path: 'sessions/collaboration/' }, {
 	LongConversation: defineComponentFixture({ render: ctx => renderRoom(ctx, 'long-history') }),
 	Paused: defineComponentFixture({ render: ctx => renderRoom(ctx, 'paused') }),
 	Disconnected: defineComponentFixture({ render: ctx => renderRoom(ctx, 'offline') }),
-	LiveGuidance: defineComponentFixture({ render: ctx => renderRoom(ctx, 'steering') }),
+	QueuedMail: defineComponentFixture({ render: ctx => renderRoom(ctx, 'queued') }),
+	ReservedInputBatch: defineComponentFixture({ render: ctx => renderRoom(ctx, 'reserved'), additionalThemes: ['darkHighContrast', 'lightHighContrast'] }),
+	BeforeFirstStart: defineComponentFixture({ render: ctx => renderRoom(ctx, 'created') }),
+	BudgetExhausted: defineComponentFixture({ render: ctx => renderRoom(ctx, 'budget-exhausted') }),
+	ReadOnlyArchive: defineComponentFixture({ render: ctx => renderRoom(ctx, 'archive'), additionalThemes: ['darkHighContrast', 'lightHighContrast'] }),
+	PeerInbox: defineComponentFixture({ render: ctx => renderRoom(ctx, 'inbox') }),
+	HiddenHumanMessage: defineComponentFixture({ render: ctx => renderRoom(ctx, 'hidden'), additionalThemes: ['darkHighContrast', 'lightHighContrast'] }),
 	RoomApprovals: defineComponentFixture({ render: ctx => renderRoom(ctx, 'approvals') }),
 	ApprovalPending: defineComponentFixture({ render: ctx => renderRoom(ctx, 'approval-pending') }),
 	ApprovalFailed: defineComponentFixture({ render: ctx => renderRoom(ctx, 'approval-failed') }),

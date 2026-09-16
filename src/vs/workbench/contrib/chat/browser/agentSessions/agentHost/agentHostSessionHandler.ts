@@ -30,7 +30,7 @@ import { IModelService } from '../../../../../../editor/common/services/model.js
 import { localize } from '../../../../../../nls.js';
 import { AgentHostAllowSignedOutWhenUsableSettingId, AgentProvider, AgentSession, CODEX_AGENT_PROVIDER_ID, type IAgentConnection } from '../../../../../../platform/agentHost/common/agentService.js';
 import { IAgentHostRoom, OpenCollaborationRoomCommandId } from '../../../../../../platform/agentHost/common/agentHostRooms.js';
-import { forwardRoomFollowUp } from './agentHostRoomFollowUp.js';
+import { findRoomForSession, forwardRoomFollowUp } from './agentHostRoomFollowUp.js';
 import { agentHostAuthority, LOCAL_AGENT_HOST_AUTHORITY } from '../../../../../../platform/agentHost/common/agentHostUri.js';
 import { isCustomizationEnabled } from '../../../../../../platform/agentHost/common/customizationEnablement.js';
 import { findDeepestContainingWorkingDirectory } from '../../../../../../platform/agentHost/common/agentHostWorkingDirectories.js';
@@ -731,6 +731,7 @@ class AgentHostChatSession extends Disposable implements IChatSession {
 		readonly history: readonly IChatSessionHistoryItem[],
 		readonly title: string | undefined,
 		room: IAgentHostRoom | undefined,
+		roomReadOnly: boolean,
 		sessionSubscription: IAgentSubscription<SessionState> | undefined,
 		chatSubscription: IAgentSubscription<ChatState> | undefined,
 		private readonly _promptCacheNotification: AgentHostPromptCacheNotification | undefined,
@@ -755,7 +756,10 @@ class AgentHostChatSession extends Disposable implements IChatSession {
 				telemetryId: 'agentHost.collaborationRoom',
 				severity: ChatInputNotificationSeverity.Info,
 				message: localize('room.memberInput', "This peer belongs to {0}", room.title),
-				description: localize('room.memberInputDescription', "Send follow-ups here when the peer is idle. To send guidance while it is working, open the collaboration room and use Steer Agents."),
+				description: room.archived
+					? localize('room.archiveInputDescription', "This room is a read-only archive. Session history and patches are available for inspection only.")
+					: roomReadOnly ? localize('room.unsupportedInputDescription', "This host does not support inbox collaboration. The room session is read-only; update or reconnect the host before sending follow-ups.")
+						: localize('room.memberInputDescription', "Text follow-ups are shared with this peer through the room inbox. During an active turn, use Back to Room to queue a message for its next turn. Sending never adds to the turn budget."),
 				actions: CommandsRegistry.getCommand(OpenCollaborationRoomCommandId) ? [{
 					kind: ChatInputNotificationActionKind.Command,
 					label: localize('room.memberBack', "Back to Room"),
@@ -772,7 +776,7 @@ class AgentHostChatSession extends Disposable implements IChatSession {
 		this.isReadOnly = derived(this, reader => {
 			const sessionArchived = Boolean((this._sessionState.read(reader).read(reader)?.status ?? 0) & SessionStatus.IsArchived);
 			const chat = this._chatState.read(reader).read(reader);
-			return (!chat && new URLSearchParams(this.sessionResource.query).has(CHAT_SUBAGENT_RESOURCE_QUERY_PARAM))
+			return roomReadOnly || (!chat && new URLSearchParams(this.sessionResource.query).has(CHAT_SUBAGENT_RESOURCE_QUERY_PARAM))
 				|| isChatReadOnly(chat?.interactivity, sessionArchived);
 		});
 
@@ -786,13 +790,10 @@ class AgentHostChatSession extends Disposable implements IChatSession {
 		this._register(historySubagentObservations);
 		this._register(toDisposable(onDispose));
 
-		// Always provide an interrupt callback so the chat UI's stop button
-		// can cancel a remote turn at any time. The callback resolves the
-		// current active turn at call time and dispatches ChatTurnCancelled.
-		this.interruptActiveResponseCallback = async () => interruptActiveResponse();
-
-		this.forkSession = this._forkSession;
-		this.renameSession = this._renameSession;
+		// Read-only room links also exclude chat-level mutation actions.
+		this.interruptActiveResponseCallback = roomReadOnly ? undefined : async () => interruptActiveResponse();
+		this.forkSession = roomReadOnly ? undefined : this._forkSession;
+		this.renameSession = roomReadOnly ? undefined : this._renameSession;
 	}
 
 	setStateSubscriptions(sessionSubscription: IAgentSubscription<SessionState> | undefined, chatSubscription: IAgentSubscription<ChatState> | undefined): void {
@@ -1480,7 +1481,10 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 		// arrives so the user-selected model is available. The chat resource still
 		// carries the raw session id that will be used when createSession runs.
 		const resolvedSession = this._resolveSessionUri(sessionResource);
-		const room = (await this._config.connection.rooms?.listRooms())?.find(room => room.members.some(member => member.sessionUri === resolvedSession.toString()));
+		const rooms = this._config.connection.rooms;
+		const room = await findRoomForSession(rooms, resolvedSession);
+		const roomCapabilities = room && !room.archived ? await rooms?.getCapabilities() : undefined;
+		const roomReadOnly = !!room && (room.archived === true || roomCapabilities?.version !== 2 || !roomCapabilities.available || !roomCapabilities.supportsInbox);
 		let chatURI: string | undefined;
 
 		// The point of this is to check with the session provider or controller
@@ -1678,6 +1682,7 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 				history,
 				chatTitle,
 				room,
+				roomReadOnly,
 				sessionSubscription,
 				chatSubscription,
 				this._config.promptCacheNotification,

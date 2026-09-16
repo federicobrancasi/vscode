@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { toAction } from '../../../../../../../../base/common/actions.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../../../base/test/common/utils.js';
 import { Codicon } from '../../../../../../../../base/common/codicons.js';
 import { IStringDictionary } from '../../../../../../../../base/common/collections.js';
@@ -11,6 +12,7 @@ import { MarkdownString } from '../../../../../../../../base/common/htmlContent.
 import { ActionListItemKind, IActionListItem } from '../../../../../../../../platform/actionWidget/browser/actionList.js';
 import { IActionWidgetDropdownAction } from '../../../../../../../../platform/actionWidget/browser/actionWidgetDropdown.js';
 import { StateType } from '../../../../../../../../platform/update/common/update.js';
+import { IModelPickerAdditionalActionGroup } from '../../../../../browser/widget/input/modelPicker/modelPickerActionItem.js';
 import { buildModelPickerItems, getControlModelsForEntitlement, getModelPickerAccessibilityProvider, getModelPickerControlModels } from '../../../../../browser/widget/input/modelPicker/modelPickerItems.js';
 import { filterModelsForSession } from '../../../../../browser/widget/input/chatInputModelUtils.js';
 import { ChatAgentLocation, ChatModeKind } from '../../../../../common/constants.js';
@@ -127,6 +129,9 @@ function callBuild(
 	models: ILanguageModelChatMetadataAndIdentifier[],
 	opts: {
 		selectedModelId?: string;
+		suppressModelSelection?: boolean;
+		additionalActionGroups?: readonly IModelPickerAdditionalActionGroup[];
+		useGroupedModelPicker?: boolean;
 		recentModelIds?: string[];
 		pinnedModelIds?: string[];
 		controlModels?: IStringDictionary<IModelControlEntry>;
@@ -156,6 +161,8 @@ function callBuild(
 	return buildModelPickerItems({
 		models,
 		selectedModelId: opts.selectedModelId,
+		suppressModelSelection: opts.suppressModelSelection,
+		additionalActionGroups: opts.additionalActionGroups,
 		recentModelIds: opts.recentModelIds ?? [],
 		pinnedModelIds: opts.pinnedModelIds ?? [],
 		controlModels: opts.controlModels ?? {},
@@ -167,7 +174,7 @@ function callBuild(
 		languageModelsService: opts.languageModelsService ?? stubLanguageModelsService,
 		openerService: undefined,
 		presentation: {
-			useGroupedModelPicker: true,
+			useGroupedModelPicker: opts.useGroupedModelPicker ?? true,
 			showUnavailableFeatured: opts.showUnavailableFeatured ?? true,
 			showFeatured: opts.showFeatured ?? true,
 			showAutoModel: opts.showAutoModel ?? true,
@@ -295,6 +302,124 @@ suite('buildModelPickerItems', () => {
 		const item = getActionItems(callBuild([createModel('gpt-4.1', 'GPT-4.1')])).find(a => a.label === 'GPT-4.1')!;
 
 		assert.strictEqual(provider.getAriaLabel(item), 'GPT-4.1');
+	});
+
+	suite('additional action groups', () => {
+		for (const useGroupedModelPicker of [false, true]) {
+			suite(useGroupedModelPicker ? 'grouped models' : 'flat models', () => {
+				const model = createModel('example', 'Example Model');
+				const selectedAction = toAction({ id: 'savedChoice', label: 'Saved Choice', checked: true, run: () => { } });
+				const disabledAction = toAction({ id: 'unavailableChoice', label: 'Unavailable Choice', checked: false, enabled: false, run: () => { } });
+				const commandAction = toAction({ id: 'editChoices', label: 'Edit Choices', run: () => { } });
+				const groups: readonly IModelPickerAdditionalActionGroup[] = [
+					{ label: 'Empty', actions: [] },
+					{ label: 'Saved choices', actions: [selectedAction, disabledAction] },
+					{ label: 'Commands', actions: [commandAction] },
+				];
+
+				test('absent and empty groups preserve the existing rows', () => {
+					const snapshot = (additionalActionGroups: readonly IModelPickerAdditionalActionGroup[] | undefined) =>
+						callBuild([model], { useGroupedModelPicker, selectedModelId: model.identifier, additionalActionGroups })
+							.map(item => ({ kind: item.kind, label: item.label, checked: item.item?.checked, icon: item.group?.icon?.id }));
+					const expected = snapshot(undefined);
+
+					assert.deepStrictEqual([snapshot([]), snapshot([{ label: 'Empty', actions: [] }])], [expected, expected]);
+				});
+
+				test('prepends labelled groups with the original actions and their checked and disabled states', () => {
+					const items = callBuild([model], { useGroupedModelPicker, selectedModelId: model.identifier, additionalActionGroups: groups });
+					assert.deepStrictEqual(items.slice(0, 6).map(item => ({
+						kind: item.kind,
+						label: item.label,
+						action: item.item,
+						disabled: item.disabled,
+						icon: item.group?.icon?.id,
+						hideIcon: item.hideIcon,
+					})), [
+						{ kind: ActionListItemKind.Separator, label: 'Saved choices', action: undefined, disabled: undefined, icon: undefined, hideIcon: undefined },
+						{ kind: ActionListItemKind.Action, label: 'Saved Choice', action: selectedAction, disabled: false, icon: 'check', hideIcon: false },
+						{ kind: ActionListItemKind.Action, label: 'Unavailable Choice', action: disabledAction, disabled: true, icon: 'blank', hideIcon: false },
+						{ kind: ActionListItemKind.Separator, label: 'Commands', action: undefined, disabled: undefined, icon: undefined, hideIcon: undefined },
+						{ kind: ActionListItemKind.Action, label: 'Edit Choices', action: commandAction, disabled: false, icon: 'blank', hideIcon: true },
+						{ kind: ActionListItemKind.Separator, label: undefined, action: undefined, disabled: undefined, icon: undefined, hideIcon: undefined },
+					]);
+				});
+
+				test('runs additional actions without selecting a model', async () => {
+					const calls: string[] = [];
+					const action = toAction({ id: 'extra', label: 'Extra Action', run: () => { calls.push('action'); } });
+					const items = callBuild([model], {
+						useGroupedModelPicker,
+						additionalActionGroups: [{ label: 'Actions', actions: [action] }],
+						onSelect: model => { calls.push(model.identifier); },
+					});
+					await items.find(item => item.item === action)?.item?.run();
+
+					assert.deepStrictEqual(calls, ['action']);
+				});
+
+				test('suppresses the model checkmark without changing its placement or additional actions', () => {
+					const snapshot = (suppressModelSelection: boolean) => {
+						const items = getActionItems(callBuild([model, createModel('other', 'Other Model')], {
+							useGroupedModelPicker, selectedModelId: model.identifier, additionalActionGroups: groups, suppressModelSelection,
+						}));
+						const selectedModel = items.find(item => item.item?.id === model.identifier);
+						return {
+							modelChecked: selectedModel?.item?.checked,
+							modelIcon: selectedModel?.group?.icon?.id,
+							modelSection: selectedModel?.section,
+							actionChecked: items.find(item => item.item === selectedAction)?.item?.checked,
+						};
+					};
+					assert.deepStrictEqual([snapshot(true), snapshot(false)], [
+						{ modelChecked: false, modelIcon: 'blank', modelSection: undefined, actionChecked: true },
+						{ modelChecked: true, modelIcon: 'check', modelSection: undefined, actionChecked: true },
+					]);
+				});
+
+				test('suppresses the fallback Auto checkmark as well', () => {
+					const items = getActionItems(callBuild([], { useGroupedModelPicker, suppressModelSelection: true, additionalActionGroups: groups }));
+					assert.deepStrictEqual(items.filter(item => item.item?.checked).map(item => item.label), ['Saved Choice']);
+				});
+
+				test('keeps actions available alongside the ordinary no-models row', () => {
+					const items = callBuild([], { useGroupedModelPicker, showAutoModel: false, additionalActionGroups: groups });
+					assert.deepStrictEqual(getActionLabels(items), ['Saved Choice', 'Unavailable Choice', 'Edit Choices', 'No models available']);
+				});
+
+				for (const state of ['restrictedMode', 'setupRequired'] as const) {
+					test(`does not expose additional groups through ${state}`, () => {
+						const options = { useGroupedModelPicker, [state]: true };
+						const snapshot = (additionalActionGroups?: readonly IModelPickerAdditionalActionGroup[]) =>
+							callBuild([model], { ...options, additionalActionGroups }).map(item => ({ kind: item.kind, label: item.label }));
+						assert.deepStrictEqual(snapshot(groups), snapshot());
+					});
+				}
+			});
+		}
+
+		test('uses action semantics and never announces an extra action as the current model', () => {
+			const actions = [
+				toAction({ id: 'checked', label: 'Checked Action', checked: true, run: () => { } }),
+				toAction({ id: 'unchecked', label: 'Unchecked Action', checked: false, run: () => { } }),
+				toAction({ id: 'command', label: 'Command', run: () => { } }),
+			];
+			const items = getActionItems(callBuild([createModel('example', 'Example Model')], {
+				additionalActionGroups: [{ label: 'Actions', actions }],
+			})).slice(0, actions.length);
+			const menu = getModelPickerAccessibilityProvider();
+			const search = getModelPickerAccessibilityProvider(true);
+			assert.deepStrictEqual(items.map(item => ({
+				role: menu.getRole(item),
+				checked: menu.isChecked(item),
+				searchRole: search.getRole(item),
+				searchLabel: search.getAriaLabel(item),
+			})), [
+				{ role: 'menuitemcheckbox', checked: true, searchRole: 'option', searchLabel: 'Checked Action, Selected' },
+				{ role: 'menuitemcheckbox', checked: false, searchRole: 'option', searchLabel: 'Unchecked Action' },
+				{ role: 'menuitem', checked: undefined, searchRole: 'option', searchLabel: 'Command' },
+			]);
+		});
 	});
 
 	test('auto model always appears first', () => {

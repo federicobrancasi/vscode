@@ -9,7 +9,7 @@ import { isCancellationError } from '../../../../../../base/common/errors.js';
 import { URI } from '../../../../../../base/common/uri.js';
 import { mock, upcastPartial } from '../../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../base/test/common/utils.js';
-import { IAgentHostRoom, IAgentHostRoomPostOptions, IAgentHostRoomsService, OpenCollaborationRoomCommandId } from '../../../../../../platform/agentHost/common/agentHostRooms.js';
+import { IAgentHostRoom, IAgentHostRoomMessage, IAgentHostRoomPostOptions, IAgentHostRoomsCapabilities, IAgentHostRoomsService, OpenCollaborationRoomCommandId } from '../../../../../../platform/agentHost/common/agentHostRooms.js';
 import { CommandsRegistry } from '../../../../../../platform/commands/common/commands.js';
 import { forwardRoomFollowUp } from '../../../browser/agentSessions/agentHost/agentHostRoomFollowUp.js';
 import { IChatProgress } from '../../../common/chatService/chatService.js';
@@ -31,7 +31,8 @@ suite('AgentHostRoomFollowUp', () => {
 		const posts: { roomId: string; message: IAgentHostRoomPostOptions }[] = [];
 		const rooms = new class extends mock<IAgentHostRoomsService>() {
 			override async listRooms(): Promise<readonly IAgentHostRoom[]> { return [room]; }
-			override async postMessage(roomId: string, message: IAgentHostRoomPostOptions) {
+			override async getCapabilities(): Promise<IAgentHostRoomsCapabilities> { return { version: 2, available: true, maxWorkers: 10, supportsInbox: true }; }
+			override async postMessage(roomId: string, message: IAgentHostRoomPostOptions): Promise<IAgentHostRoomMessage> {
 				posts.push({ roomId, message });
 				return {
 					...message, sequence: 1, authorId: 'human', authorName: 'You', authorKind: 'human' as const, kind: 'message' as const,
@@ -82,10 +83,78 @@ suite('AgentHostRoomFollowUp', () => {
 		});
 	}
 
-	test('paused rooms explain that delivery waits for the pause to end', async () => {
+	test('paused-room follow-ups explain that sending requests resumption', async () => {
 		const { rooms, request, progress } = setup('paused');
 		await forwardRoomFollowUp(rooms, session, request, parts => progress.push(...parts), CancellationToken.None, authenticated);
-		assert.ok(progress.some(part => part.kind === 'markdownContent' && part.content.value.includes('room is paused or stopping')));
+		assert.ok(progress.some(part => part.kind === 'markdownContent' && part.content.value.includes('Sending resumes the addressed peer')));
+	});
+
+	test('busy-member follow-ups stay ordinary queued inbox messages without a live-steering mode', async () => {
+		const { rooms, room, request, progress, posts } = setup('running', Date.now() + 60000);
+		rooms.listRooms = async () => [{ ...room, members: room.members.map(member => ({ ...member, state: 'working' })) }];
+		await forwardRoomFollowUp(rooms, session, request, parts => progress.push(...parts), CancellationToken.None, authenticated);
+		assert.deepStrictEqual({
+			payload: posts[0].message,
+			queued: progress.some(part => part.kind === 'markdownContent' && part.content.value.includes('Busy peers finish their current turn first')),
+		}, { payload: { id: 'followup-request-a', text: 'The page does not work.', mentions: ['member-a'] }, queued: true });
+	});
+
+	test('reserved follow-ups are not reported as submitted or told to replenish their already assigned budget', async () => {
+		const { rooms, room, request, progress } = setup('paused', Date.now() + 60000, 3);
+		rooms.listRooms = async () => [{ ...room, pauseReason: 'budget' }];
+		rooms.postMessage = async (_id, options) => ({
+			...options, authorId: 'human', authorName: 'You', authorKind: 'human', kind: 'message', timestamp: 0, sequence: 1,
+			deliveries: [{ memberId: 'member-a', state: 'reserved', turnId: 'reserved-turn' }],
+		});
+		await forwardRoomFollowUp(rooms, session, request, parts => progress.push(...parts), CancellationToken.None, authenticated);
+		const text = progress.filter(part => part.kind === 'markdownContent').map(part => part.content.value).join('\n');
+		assert.deepStrictEqual({
+			reserved: text.includes('Reserved. Turn budget and an immutable input batch are durably assigned'),
+			notDelivered: text.includes('This is not delivered input'),
+			submitted: text.includes('Submitted to native host'),
+			extend: text.includes('use Extend'),
+		}, { reserved: true, notDelivered: true, submitted: false, extend: false });
+	});
+
+	test('submitted receipts do not claim provider acceptance or completed work', async () => {
+		const { rooms, request, progress } = setup('running', Date.now() + 60000);
+		rooms.postMessage = async (_id, options) => ({
+			...options, authorId: 'human', authorName: 'You', authorKind: 'human', kind: 'message', timestamp: 0, sequence: 1,
+			deliveries: [{ memberId: 'member-a', state: 'submitted', turnId: 'turn' }],
+		});
+		await forwardRoomFollowUp(rooms, session, request, parts => progress.push(...parts), CancellationToken.None, authenticated);
+		assert.ok(progress.some(part => part.kind === 'markdownContent' && part.content.value.includes('does not confirm provider acceptance or task completion')));
+	});
+
+	test('exhausted budget errors propagate without reporting a successful send', async () => {
+		const { rooms, room, request, progress, posts } = setup('paused', Date.now() + 60000, 3);
+		rooms.listRooms = async () => [{ ...room, pauseReason: 'budget' }];
+		rooms.postMessage = async () => { throw new Error('The turn budget is exhausted. Extend it before sending.'); };
+		await assert.rejects(forwardRoomFollowUp(rooms, session, request, parts => progress.push(...parts), CancellationToken.None, authenticated), /budget is exhausted/);
+		assert.deepStrictEqual({ posts, progress }, { posts: [], progress: [] });
+	});
+
+	for (const historicalSession of [false, true]) {
+		test(`archive ${historicalSession ? 'historical session' : 'member'} writes are rejected before authentication`, async () => {
+			const { rooms, room, request, progress, posts } = setup();
+			rooms.listRooms = async () => [{
+				...room, archived: true, members: historicalSession ? [] : room.members,
+				archivedSessions: historicalSession ? [{ id: 'historical', name: 'Historical participant', sessionUri: session.toString() }] : undefined,
+			}];
+			let authCalls = 0;
+			await assert.rejects(forwardRoomFollowUp(rooms, session, request, parts => progress.push(...parts), CancellationToken.None, async () => { authCalls++; }), /read-only room archive/);
+			assert.deepStrictEqual({ posts, progress, authCalls }, { posts: [], progress: [], authCalls: 0 });
+		});
+	}
+
+	test('removed peers and unsupported hosts cannot fall back to direct native turns', async () => {
+		const { rooms, room, request, progress, posts } = setup();
+		rooms.listRooms = async () => [{ ...room, members: room.members.map(member => ({ ...member, removed: true })) }];
+		await assert.rejects(forwardRoomFollowUp(rooms, session, request, parts => progress.push(...parts), CancellationToken.None, authenticated), /removed/);
+		rooms.listRooms = async () => [room];
+		rooms.getCapabilities = async () => ({ version: 1, available: true, maxWorkers: 10 });
+		await assert.rejects(forwardRoomFollowUp(rooms, session, request, parts => progress.push(...parts), CancellationToken.None, authenticated), /does not support inbox collaboration/);
+		assert.deepStrictEqual({ posts, progress }, { posts: [], progress: [] });
 	});
 
 	test('non-room sessions retain their ordinary send path', async () => {

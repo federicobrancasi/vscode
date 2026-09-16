@@ -9,7 +9,7 @@ import { autorun, constObservable } from '../../../../../base/common/observable.
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
-import { InMemoryStorageService } from '../../../../../platform/storage/common/storage.js';
+import { InMemoryStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
 import { AbstractCustomView } from '../../../customView/browser/customView.js';
 import { CustomViewService } from '../../../customView/browser/customViewService.js';
 import { COLLABORATION_CUSTOM_VIEW_ID, CollaborationRoomViewService } from '../../browser/collaborationRoomView.js';
@@ -24,10 +24,42 @@ suite('CollaborationRoomView', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 
 	function setup() {
-		const customViews = disposables.add(new CustomViewService(new NullLogService(), disposables.add(new InMemoryStorageService())));
-		const service = disposables.add(new CollaborationRoomViewService(customViews));
-		return { customViews, service };
+		const storage = disposables.add(new InMemoryStorageService());
+		const customViews = disposables.add(new CustomViewService(new NullLogService(), storage));
+		const service = disposables.add(new CollaborationRoomViewService(customViews, storage, new NullLogService()));
+		return { customViews, service, storage };
 	}
+
+	test('hidden message markers survive recreation and remain scoped to their room', () => {
+		const { customViews, service, storage } = setup();
+		service.hideMessage('room-one', 'message');
+		service.hideMessage('room-one', 'message');
+		service.hideMessage('room-two', 'another-message');
+		const restored = disposables.add(new CollaborationRoomViewService(customViews, storage, new NullLogService()));
+		const before = [...restored.hiddenMessages.get()].map(([room, messages]) => [room, [...messages]]);
+		service.restoreHiddenMessages('room-one');
+		assert.deepStrictEqual({
+			before,
+			after: [...restored.hiddenMessages.get()].map(([room, messages]) => [room, [...messages]]),
+			viewOpened: customViews.activeCustomView.get(),
+		}, {
+			before: [['room-one', ['message']], ['room-two', ['another-message']]],
+			after: [['room-two', ['another-message']]],
+			viewOpened: undefined,
+		});
+	});
+
+	test('malformed visibility preferences are reported without hiding unrelated history', () => {
+		const { customViews, storage } = setup();
+		storage.store('collaboration.hiddenMessages', JSON.stringify([['room', [1]]]), StorageScope.PROFILE, StorageTarget.MACHINE);
+		const warnings: string[] = [];
+		const log = new class extends NullLogService {
+			override warn(message: string): void { warnings.push(message); }
+		}();
+		const service = disposables.add(new CollaborationRoomViewService(customViews, storage, log));
+		assert.deepStrictEqual({ hidden: [...service.hiddenMessages.get()], warnings: warnings.length }, { hidden: [], warnings: 1 });
+		assert.throws(() => service.hideMessage('', 'message'), /room and message are required/);
+	});
 
 	test('does not open before the desktop custom view is registered', () => {
 		const { service } = setup();

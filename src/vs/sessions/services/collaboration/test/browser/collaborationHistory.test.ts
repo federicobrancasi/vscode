@@ -68,13 +68,14 @@ function delivered(record: IAgentHostRoomMessage, state: AgentHostRoomDeliverySt
 }
 
 function selectPage(messages: readonly IAgentHostRoomMessage[], query: IAgentHostRoomMessageQuery): IAgentHostRoomMessagePage {
-	const matching = messages.filter(message => (query.after === undefined || message.sequence > query.after) && (query.before === undefined || message.sequence < query.before));
+	const source = messages.filter(message => !query.memberId || message.mentions.includes(query.memberId));
+	const matching = source.filter(message => (query.after === undefined || message.sequence > query.after) && (query.before === undefined || message.sequence < query.before));
 	const limit = Math.min(query.limit ?? 100, 200);
 	const page = query.after === undefined ? matching.slice(-limit) : matching.slice(0, limit);
 	return {
 		messages: page,
-		hasEarlier: !!page.length && messages[0].sequence < page[0].sequence,
-		hasLater: !!page.length && messages[messages.length - 1].sequence > page[page.length - 1].sequence,
+		hasEarlier: !!page.length && source[0].sequence < page[0].sequence,
+		hasLater: !!page.length && source[source.length - 1].sequence > page[page.length - 1].sequence,
 	};
 }
 
@@ -92,6 +93,43 @@ function snapshot(history: CollaborationHistory) {
 
 suite('CollaborationHistory', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('inbox history pages sparse sequences, bridges new mail, and never mutates receipts', async () => {
+		const queries: IAgentHostRoomMessageQuery[] = [];
+		let records = [2, 6, 9, 20, 45].map(sequence => ({
+			...message(sequence), mentions: ['member'], deliveries: [{ memberId: 'member', state: 'pending' as const }],
+		}));
+		const original = JSON.stringify(records);
+		const history = store.add(new CollaborationHistory(async query => {
+			queries.push(query);
+			return selectPage(records, query);
+		}, 2, 'member'));
+		await history.loadLatest();
+		await history.loadEarlier();
+		await history.loadEarlier();
+		const readOnly = JSON.stringify(records) === original;
+		records = [...records, ...[60, 80, 90, 110, 140].map(sequence => ({
+			...message(sequence), mentions: ['member'], deliveries: [{ memberId: 'member', state: 'pending' as const }],
+		}))];
+		await history.refresh();
+		history.acceptMessage({ ...message(150), mentions: ['another-member'] });
+		assert.deepStrictEqual({
+			state: snapshot(history), readOnly,
+			queriesAreBounded: queries.every(query => query.memberId === 'member' && query.limit === 2),
+			receipts: history.page.get().messages.flatMap(message => message.deliveries.map(delivery => delivery.state)),
+		}, {
+			state: { sequences: [2, 6, 9, 20, 45, 60, 80, 90, 110, 140], hasEarlier: false, hasLater: false, loading: false, loadingEarlier: false, error: undefined },
+			readOnly: true, queriesAreBounded: true, receipts: Array(10).fill('pending'),
+		});
+	});
+
+	test('an inbox rejects a page for another recipient rather than marking it handled', async () => {
+		const history = store.add(new CollaborationHistory(async () => ({
+			messages: [{ ...message(3), mentions: ['another-member'] }], hasEarlier: false, hasLater: false,
+		}), 2, 'member'));
+		await assert.rejects(history.loadLatest(), /inconsistent message history/);
+		assert.deepStrictEqual(history.page.get().messages, []);
+	});
 
 	function setup(pageSize?: number) {
 		const fetcher = new PageFetcher();
@@ -285,7 +323,7 @@ suite('CollaborationHistory', () => {
 		await loadEarlier(history, fetcher, original);
 		await loadEarlier(history, fetcher, original);
 		const updated = original.map(message => message.sequence === 1
-			? delivered(message, 'completed') : message.sequence === 4 ? delivered(message, 'pending') : message);
+			? delivered(message, 'submitted') : message.sequence === 4 ? delivered(message, 'pending') : message);
 		const pending = history.refresh();
 		await fetcher.respond(updated);
 		await fetcher.respond(updated);
@@ -339,7 +377,7 @@ suite('CollaborationHistory', () => {
 		test(`merges an earlier load and live refresh when the earlier response finishes ${earlierFirst ? 'first' : 'last'}`, async () => {
 			const { history, fetcher } = setup(2);
 			const original = messages(1, 8).map(message => message.sequence === 5 ? delivered(message, 'pending') : message);
-			const updated = original.map(message => message.sequence === 5 ? delivered(message, 'completed') : message);
+			const updated = original.map(message => message.sequence === 5 ? delivered(message, 'submitted') : message);
 			await load(history, fetcher, original.slice(0, 6));
 			const earlier = history.loadEarlier();
 			const earlierRequest = await fetcher.next();
@@ -404,19 +442,21 @@ suite('CollaborationHistory', () => {
 		});
 	}
 
-	test('does not roll back an acknowledged delivery update with a request started earlier', async () => {
-		const { history, fetcher } = setup(2);
-		const original = [message(1), delivered(message(2), 'pending')];
-		await load(history, fetcher, original);
-		const refresh = history.refresh();
-		const request = await fetcher.next();
-		const acknowledgement = delivered(original[1], 'completed');
-		history.acceptMessage(acknowledgement);
-		await request.result.complete(selectPage(original, request.query));
-		await refresh;
+	for (const state of ['reserved', 'submitted'] as const) {
+		test(`does not roll back a ${state} receipt with a request started earlier`, async () => {
+			const { history, fetcher } = setup(2);
+			const original = [message(1), delivered(message(2), 'pending')];
+			await load(history, fetcher, original);
+			const refresh = history.refresh();
+			const request = await fetcher.next();
+			const acknowledgement = delivered(original[1], state);
+			history.acceptMessage(acknowledgement);
+			await request.result.complete(selectPage(original, request.query));
+			await refresh;
 
-		assert.deepStrictEqual(history.page.get(), { messages: [original[0], acknowledgement], hasEarlier: false, hasLater: false });
-	});
+			assert.deepStrictEqual(history.page.get(), { messages: [original[0], acknowledgement], hasEarlier: false, hasLater: false });
+		});
+	}
 
 	test('keeps an acknowledgement received before an empty initial snapshot completes', async () => {
 		const { history, fetcher } = setup(2);
@@ -718,7 +758,7 @@ suite('CollaborationHistory', () => {
 		const { history, fetcher } = setup(2);
 		const original = [delivered(message(1), 'pending'), message(2)];
 		await load(history, fetcher, original);
-		const records = [delivered(original[0], 'completed'), original[1], message(3)];
+		const records = [delivered(original[0], 'submitted'), original[1], message(3)];
 		const first = history.refresh();
 		const rejected = assert.rejects(first, /Delivery unavailable/);
 		await fetcher.respond(records);

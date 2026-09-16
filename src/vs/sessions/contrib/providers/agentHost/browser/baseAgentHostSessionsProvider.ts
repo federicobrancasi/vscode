@@ -3,14 +3,15 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { disposableTimeout, raceCancellation, raceCancellationError } from '../../../../../base/common/async.js';
+import { disposableTimeout, raceCancellation, raceCancellationError, SequencerByKey } from '../../../../../base/common/async.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { arrayEquals, structuralEquals } from '../../../../../base/common/equals.js';
+import { CancellationError, isCancellationError } from '../../../../../base/common/errors.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { IMarkdownString, MarkdownString, markdownStringEqual } from '../../../../../base/common/htmlContent.js';
 import { Disposable, DisposableMap, DisposableStore, IDisposable, IReference, MutableDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
-import { mapsStrictEqualIgnoreOrder } from '../../../../../base/common/map.js';
+import { mapsStrictEqualIgnoreOrder, ResourceMap } from '../../../../../base/common/map.js';
 import { equals } from '../../../../../base/common/objects.js';
 import { constObservable, derived, derivedOpts, IObservable, IReader, ISettableObservable, ITransaction, observableFromEvent, observableValueOpts, subtransaction, transaction, waitForState, autorun, observableValue } from '../../../../../base/common/observable.js';
 import { basename, dirname, getComparisonKey, isEqual, isEqualOrParent, joinPath, relativePath } from '../../../../../base/common/resources.js';
@@ -33,6 +34,8 @@ import { getEffectiveAgents } from '../../../../../platform/agentHost/common/cus
 import { KNOWN_MODE_VALUES, omitAutomationSessionTemplateConfigValues, SessionConfigKey } from '../../../../../platform/agentHost/common/sessionConfigKeys.js';
 import { applyLegacyAutomationSessionConfig } from '../../../../../platform/agentHost/common/automationMigration.js';
 import { migrateLegacyAutopilotConfig } from '../../../../../platform/agentHost/common/agentHostSchema.js';
+import { parseAgentHostModelSelection } from '../../../../../platform/agentHost/common/agentHostModelSelection.js';
+import { CopilotModelTeamAppliedConfigKey, CopilotModelTeamConfigKey, CopilotModelTeamLeadAppliedConfigKey, CopilotModelTeamRememberedConfigKey, CopilotModelTeamSupportConfigKey, ICopilotModelTeam, omitCopilotModelTeamConfig, parseCopilotModelTeam } from '../../../../../platform/agentHost/common/copilotModelTeam.js';
 import { readAgentDevContainerWorktreeMetadata, withAgentDevContainerWorktreeMetadata, type IAgentDevContainerWorktreeMetadata } from '../../../../../platform/agentHost/common/meta/agentDevContainerWorktreeMeta.js';
 import type { IAgentSubscription } from '../../../../../platform/agentHost/common/state/agentSubscription.js';
 import { ResolveSessionConfigResult, type SessionConfigPropertySchema } from '../../../../../platform/agentHost/common/state/protocol/commands.js';
@@ -51,6 +54,7 @@ import { IAgentCustomizationScope, IAgentHostActiveClientService } from '../../.
 import { IChatWidgetService } from '../../../../../workbench/contrib/chat/browser/chat.js';
 import { ChatMode } from '../../../../../workbench/contrib/chat/common/chatModes.js';
 import { IChatSendRequestOptions, IChatService, type IChatModelReference } from '../../../../../workbench/contrib/chat/common/chatService/chatService.js';
+import { filterConfigurationToSchema } from '../../../../../workbench/contrib/chat/browser/widget/input/chatModelConfigurationLogic.js';
 import { IChatSessionFileChange, IChatSessionFileChange2, IChatSessionsService } from '../../../../../workbench/contrib/chat/common/chatSessionsService.js';
 import { assertAutomationSessionTemplate, IAutomationSessionTemplate } from '../../../../../workbench/contrib/chat/common/automations/automation.js';
 import { AutomationModelConfiguration } from '../../../automations/browser/automationModelConfiguration.js';
@@ -58,14 +62,14 @@ import { ChatAgentLocation, ChatConfiguration, ChatModeKind, ChatPermissionLevel
 import { isAutoApprovePolicyRestricted, normalizeSessionConfigValue } from '../../../../../workbench/contrib/chat/common/agentHostConfigPolicy.js';
 import { ILanguageModelChatMetadata, ILanguageModelsService } from '../../../../../workbench/contrib/chat/common/languageModels.js';
 import { getRegisteredLanguageModels, resolveConfiguredModel, resolveModelIdentifier, resolveModelIdentifierFromLanguageModels } from '../../../../../workbench/contrib/chat/common/modelSelection.js';
-import { buildMutableConfigSchema, IAgentHostMcpServer, IAgentHostSessionsProvider, IAgentMergeClientState, resolvedConfigsEqual } from '../../../../common/agentHostSessionsProvider.js';
+import { buildMutableConfigSchema, IAgentHostMcpServer, IAgentHostSessionsProvider, IAgentMergeClientState, LOCAL_AGENT_HOST_PROVIDER_ID, resolvedConfigsEqual } from '../../../../common/agentHostSessionsProvider.js';
 import { agentHostSessionWorkspaceKey } from '../../../../common/agentHostSessionWorkspace.js';
 import { isSessionConfigComplete } from '../../../../common/sessionConfig.js';
 import { linkKey } from '../../../../common/sessionLinks.js';
 import { ChatInteractivity, ChatModelSource, ChatOriginKind, DEFAULT_CHAT_CAPABILITIES, effectiveChatInteractivity, getGitHubPullRequestRefs, getHighestPriorityPullRequestIcon, IChat, IChatCapabilities, IGitHubInfo, IGitHubIssueRef, IGitHubPullRequestRef, isActiveSessionStatus, ISession, ISessionAgentRef, ISessionArtifact, ISessionCapabilities, ISessionChangesSummary, ISessionChatCustomization, ISessionChangeset, ISessionCreationReference, ISessionFileChange, ISessionTurnFileChange, ISessionType, ISessionWorkspace, ISessionWorkspaceBrowseAction, ISideChatSelection, sessionFileChangesEqual, sessionWorkspaceEqual, SessionRemoteConnectionFailureReason, SessionRemoteConnectionStatus, SessionStatus, SessionTypeAuthRequirement, toSessionId, TURN_CHANGES_CHANGESET_ID } from '../../../../services/sessions/common/session.js';
 import { dedupeLinks, partitionSessionArtifacts } from './agentHostSessionArtifacts.js';
 import { ISessionsService } from '../../../../services/sessions/browser/sessionsService.js';
-import { IAutomationSessionConfiguration, IDeleteChatOptions, ISendRequestOptions, ISessionChangeEvent, ISessionModelPickerOptions, ISessionModelsSnapshot, ISessionsProviderCreateSessionOptions, ISessionWorktreeConfiguration } from '../../../../services/sessions/common/sessionsProvider.js';
+import { IAutomationSessionConfiguration, IDeleteChatOptions, ISendRequestOptions, ISessionChangeEvent, ISessionModelPickerOptions, ISessionModelsSnapshot, ISessionModelTeam, ISessionModelTeamState, ISessionsProviderCreateSessionOptions, ISessionWorktreeConfiguration } from '../../../../services/sessions/common/sessionsProvider.js';
 import { IGitHubService } from '../../../github/browser/githubService.js';
 import { computePullRequestRefPresentation } from '../../../github/browser/pullRequestIconStatus.js';
 import { IPullRequestIconCache } from '../../../github/browser/pullRequestIconCache.js';
@@ -2219,7 +2223,7 @@ class NewSession extends Disposable {
 
 	// -- Picker mutations ----------------------------------------------------
 
-	setSelectedModelId(modelId: string, source: ChatModelSource): void {
+	setSelectedModelId(modelId: string | undefined, source: ChatModelSource): void {
 		this._selectedModelId = modelId;
 		transaction(tx => {
 			this._modelSource.set(source, tx);
@@ -2395,6 +2399,12 @@ class NewSession extends Disposable {
 		if (explicitlySet) {
 			this._explicitlySetConfigProperties.add(property);
 		}
+		this._syncWorktreePending();
+	}
+
+	restoreConfig(config: ResolveSessionConfigResult): void {
+		this._config = config;
+		this._unresolvedConfigValues = undefined;
 		this._syncWorktreePending();
 	}
 
@@ -2759,6 +2769,10 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 	protected readonly _onDidChangeCustomizations = this._register(new Emitter<void>());
 	readonly onDidChangeCustomizations = this._onDidChangeCustomizations.event;
 	readonly onDidChangeModels: Event<void>;
+	private readonly _onDidChangeModelTeam = this._register(new Emitter<void>());
+	readonly onDidChangeModelTeam: Event<void>;
+	private readonly _modelTeamSequencer = new SequencerByKey<string>();
+	private readonly _modelTeamOperations = new ResourceMap<Promise<void>>();
 	/** Last-known root config state (schema + values), seeded from `RootState.config`. */
 	protected _rootConfig: RootConfigState | undefined;
 
@@ -3006,6 +3020,11 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		this.onDidChangeModels = Event.defer(Event.any(
 			this._languageModelsService.onDidChangeLanguageModels,
 			this._languageModelsService.onDidChangeModelVisibility,
+		), false, this._store);
+		this.onDidChangeModelTeam = Event.defer(Event.any(
+			this._onDidChangeModelTeam.event,
+			Event.map(this._onDidChangeSessionConfig.event, () => undefined),
+			this._onDidChangeRootConfig.event,
 		), false, this._store);
 		this._downloadProgress = this._register(this._instantiationService.createInstance(AgentHostDownloadProgress));
 		this._register(toDisposable(() => {
@@ -3678,7 +3697,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		if (configuration.sessionTemplate) {
 			const template = configuration.sessionTemplate;
 			assertAutomationSessionTemplate(template);
-			const config = omitAutomationSessionTemplateConfigValues({ ...template.config });
+			const config = omitCopilotModelTeamConfig(omitAutomationSessionTemplateConfigValues({ ...template.config }));
 			return {
 				...(template.modelId ? { modelId: template.modelId } : {}),
 				...(template.modelConfiguration !== undefined ? { modelConfiguration: template.modelConfiguration } : {}),
@@ -3961,7 +3980,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 				config[key] = value;
 			}
 		}
-		const templateConfig = omitAutomationSessionTemplateConfigValues(config);
+		const templateConfig = omitCopilotModelTeamConfig(omitAutomationSessionTemplateConfigValues(config));
 		const modelId = newSession.getSelectedModelId();
 		const modelConfiguration = newSession.modelConfiguration.captureModelConfiguration(modelId);
 		const agent = newSession.getSelectedAgent();
@@ -4194,9 +4213,12 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		});
 	}
 
-	private async _resolveRunningSessionConfig(sessionId: string, cached: AgentHostSessionAdapter, values: Record<string, unknown>): Promise<void> {
+	private async _resolveRunningSessionConfig(sessionId: string, cached: AgentHostSessionAdapter, values: Record<string, unknown>, options: { readonly strict?: boolean; readonly publish?: boolean } = {}): Promise<ResolveSessionConfigResult | undefined> {
 		const connection = this.connection;
 		if (!connection) {
+			if (options.strict) {
+				throw new Error(localize('modelTeam.connectionUnavailable', "The agent host connection is unavailable."));
+			}
 			return;
 		}
 		const seq = (this._runningSessionConfigResolveSeq.get(sessionId) ?? 0) + 1;
@@ -4208,12 +4230,22 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 				config: values,
 			});
 			if (this._runningSessionConfigResolveSeq.get(sessionId) !== seq) {
+				if (options.strict) {
+					throw new Error(localize('modelTeam.configurationChanged', "The chat configuration changed while the team was being saved. Open the team picker and try again."));
+				}
 				return;
 			}
-			this._runningSessionConfigs.set(sessionId, resolved);
-			this._onDidChangeSessionConfig.fire(sessionId);
+			if (options.publish !== false) {
+				this._runningSessionConfigs.set(sessionId, resolved);
+				this._onDidChangeSessionConfig.fire(sessionId);
+			}
+			return resolved;
 		} catch (err) {
+			if (options.strict) {
+				throw err;
+			}
 			this._logService.warn(`[${this.id}] Failed to re-resolve session config for ${sessionId}: ${err}`);
+			return undefined;
 		}
 	}
 
@@ -4394,6 +4426,226 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 
 	// -- Model selection ------------------------------------------------------
 
+	private _modelTeamTarget(sessionId: string, chatResource: URI): { readonly draft?: NewSession; readonly cached?: AgentHostSessionAdapter; readonly resourceScheme: string } | undefined {
+		if (this.id !== LOCAL_AGENT_HOST_PROVIDER_ID) {
+			return undefined;
+		}
+		const draft = this._getNewSession(sessionId);
+		const rawId = this._rawIdFromChatId(sessionId);
+		const cached = rawId ? this._sessionCache.get(rawId) : undefined;
+		const session = draft?.session ?? cached;
+		if (!session || session.isQuickChat?.get() || !isEqual(session.mainChat.get().resource, chatResource)
+			|| (draft?.agentProvider ?? cached?.agentProvider) !== 'copilotcli') {
+			return undefined;
+		}
+		return { draft, cached, resourceScheme: session.resource.scheme };
+	}
+
+	getModelTeam(sessionId: string, chatResource: URI): ISessionModelTeamState | undefined {
+		const target = this._modelTeamTarget(sessionId, chatResource);
+		if (!target) {
+			return undefined;
+		}
+		const supported = this._rootConfig?.values[CopilotModelTeamSupportConfigKey] === 1;
+		const knownConfig = target.draft?.getConfig() ?? this._runningSessionConfigs.get(sessionId) ?? this._lastSessionStates.get(sessionId)?.config;
+		if (!supported && !knownConfig?.schema.properties[CopilotModelTeamConfigKey]) {
+			return undefined;
+		}
+		const config = this.getSessionConfig(sessionId);
+		if (!config && supported) {
+			return { supported: true, loading: true, pending: false };
+		}
+		if (!config?.schema.properties[CopilotModelTeamConfigKey]) {
+			return undefined;
+		}
+		try {
+			const team = parseCopilotModelTeam(config.values[CopilotModelTeamConfigKey]);
+			const remembered = parseCopilotModelTeam(config.values[CopilotModelTeamRememberedConfigKey]);
+			const models = this.getModelsSnapshot(sessionId).models;
+			const identifier = (id: string) => models.find(model => model.metadata.id === id)?.identifier ?? `${target.resourceScheme}:${id}`;
+			const project = (value: ICopilotModelTeam): ISessionModelTeam => ({
+				workerModelId: identifier(value.worker.id),
+				...(value.worker.config !== undefined ? { workerModelConfiguration: value.worker.config } : {}),
+				...(value.scout ? {
+					scoutModelId: identifier(value.scout.id),
+					...(value.scout.config !== undefined ? { scoutModelConfiguration: value.scout.config } : {}),
+				} : {}),
+			});
+			const inputState = target.cached ? this._chatService.getSession(chatResource)?.inputModel.state.get() : undefined;
+			const leadModelId = target.draft?.getSelectedModelId() ?? target.cached?.getChatModelId(chatResource) ?? inputState?.selectedModel?.identifier;
+			const leadModelConfiguration = target.draft?.getSelectedModel()?.config
+				?? (inputState?.selectedModel?.identifier === leadModelId ? inputState?.modelConfiguration : undefined);
+			const leadConfigurationState = leadModelConfiguration !== undefined ? { leadModelConfiguration } : {};
+			const appliedValues = supported ? this._lastSessionStates.get(sessionId)?.config?.values : undefined;
+			const applied = parseCopilotModelTeam(appliedValues?.[CopilotModelTeamAppliedConfigKey]);
+			if (!team) {
+				return {
+					supported,
+					pending: this._modelTeamOperations.has(chatResource) || !!applied,
+					...leadConfigurationState,
+					...(remembered ? { rememberedSelection: project(remembered) } : {}),
+				};
+			}
+			const appliedLeadValue = appliedValues?.[CopilotModelTeamLeadAppliedConfigKey];
+			const appliedLead = appliedLeadValue === undefined ? undefined : parseAgentHostModelSelection(appliedLeadValue);
+			const selectedLead = models.find(model => model.identifier === leadModelId)?.metadata.id;
+			const unavailable = [team.worker, team.scout].find(selection => selection && !models.some(model => model.metadata.id === selection.id && model.metadata.isUserSelectable !== false));
+			const error = !supported
+				? localize('modelTeam.runtimeUnavailable', "This runtime does not support native model teams. Update the runtime or choose an ordinary model.")
+				: unavailable
+					? localize('modelTeam.helperUnavailable', "The selected helper model '{0}' is unavailable. Choose a replacement in the team picker.", unavailable.id)
+					: undefined;
+			return {
+				supported,
+				selection: project(team),
+				...leadConfigurationState,
+				pending: this._modelTeamOperations.has(chatResource) || !equals(team, applied) || !selectedLead || appliedLead?.id !== selectedLead
+					|| (leadModelConfiguration !== undefined && !equals(leadModelConfiguration, appliedLead?.config)),
+				...(error ? { error } : {}),
+			};
+		} catch (error) {
+			return { supported: false, pending: false, error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	setModelTeam(sessionId: string, chatResource: URI, leadModelId: string, team: ISessionModelTeam | undefined, leadModelConfiguration?: Readonly<Record<string, unknown>>): Promise<void> {
+		return this._queueModelTeamSelection(sessionId, chatResource, leadModelId, team, leadModelConfiguration);
+	}
+
+	private _queueModelTeamSelection(sessionId: string, chatResource: URI, leadModelId: string, team: ISessionModelTeam | undefined, leadModelConfiguration?: Readonly<Record<string, unknown>>): Promise<void> {
+		const operation = this._modelTeamSequencer.queue(getComparisonKey(chatResource), () => this._applyModelTeamSelection(sessionId, chatResource, leadModelId, team, leadModelConfiguration));
+		this._modelTeamOperations.set(chatResource, operation);
+		this._getNewSession(sessionId)?.trackConfigOperation(operation);
+		this._onDidChangeModelTeam.fire();
+		const clear = () => {
+			if (this._modelTeamOperations.get(chatResource) === operation) {
+				this._modelTeamOperations.delete(chatResource);
+				this._onDidChangeModelTeam.fire();
+			}
+		};
+		void operation.then(clear, clear);
+		return operation;
+	}
+
+	private async _applyModelTeamSelection(sessionId: string, chatResource: URI, leadModelId: string, selection: ISessionModelTeam | undefined, leadModelConfiguration?: Readonly<Record<string, unknown>>): Promise<void> {
+		const target = this._modelTeamTarget(sessionId, chatResource);
+		const teamState = this.getModelTeam(sessionId, chatResource);
+		if (teamState?.loading) {
+			throw new Error(localize('modelTeam.configurationLoading', "Wait for the chat configuration to finish loading before choosing a model."));
+		}
+		if (!target || (selection && !teamState?.supported)) {
+			throw new Error(localize('modelTeam.unsupportedChat', "Model teams are not available for this chat."));
+		}
+		const { draft, cached } = target;
+		if (draft) {
+			await draft.waitForConfigResolution();
+			if (this._getNewSession(sessionId) !== draft) {
+				throw new CancellationError();
+			}
+		}
+		const models = this.getModelsSnapshot(sessionId).models;
+		const leadModel = models.find(model => model.identifier === leadModelId);
+		if (!leadModel) {
+			throw new Error(localize('modelTeam.leadUnavailable', "The selected Lead model is unavailable. Choose a replacement."));
+		}
+		const leadConfiguration = leadModelConfiguration === undefined ? undefined : parseAgentHostModelSelection({ id: leadModel.metadata.id, config: leadModelConfiguration }).config ?? {};
+		if (leadConfiguration !== undefined && (!equals(leadConfiguration, filterConfigurationToSchema(leadConfiguration, leadModel.metadata.configurationSchema))
+			|| Object.keys(leadConfiguration).some(key => leadModel.metadata.configurationSchema?.properties?.[key]?.readOnly))) {
+			throw new Error(localize('modelTeam.leadConfigurationUnavailable', "The Lead model does not support the selected configuration."));
+		}
+		const previousConfig = this.getSessionConfig(sessionId);
+		const previousTeam = teamState?.selection ? parseCopilotModelTeam(previousConfig?.values[CopilotModelTeamConfigKey]) : undefined;
+		const previousRemembered = teamState?.rememberedSelection ? parseCopilotModelTeam(previousConfig?.values[CopilotModelTeamRememberedConfigKey]) : undefined;
+		const previousHelpers = previousTeam ?? previousRemembered;
+		const resolveHelper = (identifier: string, configuration: Readonly<Record<string, unknown>> | undefined, previous: ModelSelection | undefined): ModelSelection => {
+			const model = models.find(model => model.identifier === identifier && model.metadata.isUserSelectable !== false);
+			if (!model || model.metadata.id === 'auto' || model.metadata.isBYOK || ILanguageModelChatMetadata.getAgentHostByokManageModelsIdentifier(model.metadata) !== undefined) {
+				throw new Error(localize('modelTeam.invalidHelper', "Choose an available, specific model for each helper."));
+			}
+			if (configuration !== undefined) {
+				return parseAgentHostModelSelection({ id: model.metadata.id, config: configuration });
+			}
+			return previous?.id === model.metadata.id ? previous : { id: model.metadata.id };
+		};
+		const team: ICopilotModelTeam | undefined = selection ? {
+			worker: resolveHelper(selection.workerModelId, selection.workerModelConfiguration, previousHelpers?.worker),
+			...(selection.scoutModelId ? { scout: resolveHelper(selection.scoutModelId, selection.scoutModelConfiguration, previousHelpers?.scout) } : {}),
+		} : undefined;
+		const changedValues = {
+			[CopilotModelTeamConfigKey]: team ?? {},
+			...(previousConfig?.schema.properties[CopilotModelTeamRememberedConfigKey]
+				? { [CopilotModelTeamRememberedConfigKey]: team ?? previousHelpers ?? {} }
+				: {}),
+		};
+		if (draft) {
+			if (!previousConfig?.schema.properties[CopilotModelTeamConfigKey]) {
+				throw new Error(localize('modelTeam.configurationUnavailable', "The chat configuration is unavailable. Open the team picker and try again."));
+			}
+			const previousModelId = draft.getSelectedModelId();
+			const previousModelSource = draft.session.mainChat.get().modelSource.get() ?? ChatModelSource.CarriedOver;
+			const previousLeadConfiguration = draft.modelConfiguration.getModelConfigurationForRequest(leadModelId);
+			transaction(() => {
+				draft.beginResolveConfigSync();
+				for (const [key, value] of Object.entries(changedValues)) {
+					draft.setConfigValue(key, value, true);
+				}
+				draft.setSelectedModelId(leadModelId, ChatModelSource.Chosen);
+				if (leadConfiguration !== undefined) {
+					draft.modelConfiguration.setModelConfigurationForRequest(leadModelId, leadConfiguration);
+				}
+				this._onDidChangeSessionConfig.fire(sessionId);
+			});
+			try {
+				await draft.trackConfigResolution(this._refreshNewSessionConfig(draft, { expected: changedValues }));
+			} catch (error) {
+				if (this._getNewSession(sessionId) === draft) {
+					transaction(() => {
+						draft.restoreConfig(previousConfig);
+						draft.setSelectedModelId(previousModelId, previousModelSource);
+						if (leadConfiguration !== undefined) {
+							draft.modelConfiguration.setModelConfigurationForRequest(leadModelId, previousLeadConfiguration);
+						}
+						this._onDidChangeSessionConfig.fire(sessionId);
+					});
+				}
+				throw error;
+			}
+			return;
+		}
+		const connection = this.connection;
+		if (!cached || !connection) {
+			throw new Error(localize('modelTeam.connectionUnavailable', "The agent host connection is unavailable."));
+		}
+		const values = { ...previousConfig?.values, ...changedValues };
+		const resolved = await this._resolveRunningSessionConfig(sessionId, cached, values, { strict: true, publish: false });
+		if (!resolved || Object.entries(changedValues).some(([key, value]) => !equals(resolved.values[key], value))) {
+			throw new Error(localize('modelTeam.notAccepted', "The agent host did not accept the model team configuration."));
+		}
+		const store = new DisposableStore();
+		try {
+			const modelRef = await this._chatService.acquireOrLoadSession(chatResource, ChatAgentLocation.Chat, CancellationToken.None);
+			if (modelRef) {
+				store.add(modelRef);
+			}
+			if (!modelRef?.object.inputModel) {
+				throw new Error(localize('modelTeam.inputUnavailable', "The chat input is unavailable. Open the chat before changing its team."));
+			}
+			if (this.connection !== connection || this._modelTeamTarget(sessionId, chatResource)?.cached !== cached) {
+				throw new CancellationError();
+			}
+			transaction(() => {
+				this._runningSessionConfigs.set(sessionId, resolved);
+				connection.dispatch(cached.backendUri.toString(), { type: ActionType.SessionConfigChanged, config: changedValues });
+				cached.setChatModelId(chatResource, leadModelId, ChatModelSource.Chosen);
+				this._applyChatSessionState(modelRef, leadModelId, cached.getChatMode(chatResource)?.id, { modelConfiguration: leadConfiguration });
+				this._onDidChangeSessionConfig.fire(sessionId);
+				this._onDidChangeSessions.fire({ added: [], removed: [], changed: [cached] });
+			});
+		} finally {
+			store.dispose();
+		}
+	}
+
 	getModelsSnapshot(sessionId: string, desiredModelId?: string): ISessionModelsSnapshot {
 		// Agent-host models are registered against the session's resource
 		// scheme (the per-host/per-agent `targetChatSessionType`). Resolve the
@@ -4454,7 +4706,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 	 * (rather than `undefined`, which would leave an already-running chat pinned
 	 * to its stale backend model) so the request is explicitly reset to Auto.
 	 */
-	private _resolveSendModelId(sessionId: string, selectedModelId: string | undefined): string | undefined {
+	private _resolveSendModelId(sessionId: string, selectedModelId: string | undefined, chatResource?: URI): string | undefined {
 		if (!selectedModelId) {
 			return selectedModelId;
 		}
@@ -4462,6 +4714,9 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		if (snapshot.desiredModelResolution.kind !== 'unavailable') {
 			// Available, pending (list not yet populated) or not requested: keep the selection.
 			return selectedModelId;
+		}
+		if (chatResource && this.getModelTeam(sessionId, chatResource)?.selection) {
+			throw new Error(localize('modelTeam.leadUnavailable', "The selected Lead model is unavailable. Choose a replacement."));
 		}
 		const resourceScheme = this._resolveSessionResourceScheme(sessionId);
 		const supportsAuto = !resourceScheme || this._chatSessionsService.supportsAutoModelForSessionType(resourceScheme);
@@ -4487,6 +4742,19 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 	}
 
 	setModel(sessionId: string, chatResource: URI, modelId: string, source: ChatModelSource): void {
+		const team = this.getModelTeam(sessionId, chatResource);
+		if (team?.loading) {
+			throw new Error(localize('modelTeam.configurationLoading', "Wait for the chat configuration to finish loading before choosing a model."));
+		}
+		if (source === ChatModelSource.Chosen && (team?.selection || team?.error || this._modelTeamOperations.has(chatResource))) {
+			void this._queueModelTeamSelection(sessionId, chatResource, modelId, undefined).catch(error => {
+				if (!isCancellationError(error)) {
+					this._logService.error(`[${this.id}] Failed to leave the model team`, error);
+					void this._dialogService.error(localize('modelTeam.exitFailed', "Could Not Change the Model Team"), error instanceof Error ? error.message : String(error));
+				}
+			});
+			return;
+		}
 		const newSession = this._getNewSession(sessionId);
 		if (newSession) {
 			const previousModelId = newSession.getSelectedModelId();
@@ -4585,11 +4853,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		}
 	}
 
-	async resolveSessionChat(sessionResource: URI, chatResource: URI | undefined, token: CancellationToken, reserved?: {
-		readonly title: string;
-		readonly createdAt: number;
-		readonly worktreeUri: URI;
-	}): Promise<{ readonly session: ISession; readonly chat: IChat } | undefined> {
+	async resolveSessionChat(sessionResource: URI, chatResource: URI | undefined, token: CancellationToken): Promise<{ readonly session: ISession; readonly chat: IChat } | undefined> {
 		const connection = this.connection;
 		if (!connection) {
 			return undefined;
@@ -4600,41 +4864,6 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 			await this._refreshSessions();
 			entry = [...this._sessionCache].find(([, session]) => isEqual(session.backendUri, sessionResource));
 		}
-		if (!entry && reserved) {
-			const ref = connection.getSubscription(StateComponents.Session, sessionResource, 'BaseAgentHostSessionsProvider.resolveReserved');
-			const waitDisposables = new DisposableStore();
-			try {
-				const stateEvent = Event.any(
-					ref.object.onDidChange,
-					Event.map(ref.object.onDidError ?? Event.None, error => error as SessionState | Error),
-				);
-				const state = ref.object.value ?? await raceCancellation(Event.toPromise(stateEvent, waitDisposables), token);
-				const expectedChat = chatResource?.toString();
-				if (!state || state instanceof Error || (state.lifecycle !== SessionLifecycle.Ready && state.lifecycle !== SessionLifecycle.Creating)
-					|| state.workingDirectories?.length !== 1 || !isEqual(URI.parse(state.workingDirectories[0]), reserved.worktreeUri)
-					|| (expectedChat !== undefined && !state.chats.some(chat => chat.resource === expectedChat))) {
-					return undefined;
-				}
-				const rawId = AgentSession.id(sessionResource);
-				const meta = this._adoptSessionMeta({
-					session: sessionResource,
-					startTime: reserved.createdAt,
-					modifiedTime: reserved.createdAt,
-					summary: reserved.title,
-					workingDirectories: [reserved.worktreeUri],
-				});
-				const cached = this.createAdapter(meta);
-				this._sessionCache.set(rawId, cached);
-				this._cacheDirty = true;
-				this._applySessionStateUpdate(cached.sessionId, state);
-				this._ensureSessionStateSubscription(cached.sessionId);
-				this._onDidChangeSessions.fire({ added: [cached], removed: [], changed: [] });
-				entry = [rawId, cached];
-			} finally {
-				waitDisposables.dispose();
-				ref.dispose();
-			}
-		}
 		if (!entry) {
 			return undefined;
 		}
@@ -4642,8 +4871,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		this._keepSessionStateAlive(session.sessionId);
 		await waitForState(this._getChatCatalogLoading(rawId), loading => !loading, undefined, token);
 		const state = this._lastSessionStates.get(session.sessionId);
-		if (this.connection !== connection || this._sessionCache.get(rawId) !== session
-			|| (state?.lifecycle !== SessionLifecycle.Ready && !(reserved && state?.lifecycle === SessionLifecycle.Creating))) {
+		if (this.connection !== connection || this._sessionCache.get(rawId) !== session || state?.lifecycle !== SessionLifecycle.Ready) {
 			return undefined;
 		}
 		const chat = chatResource
@@ -5091,6 +5319,14 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 	}
 
 	async sendRequest(chatId: string, chatResource: URI, options: ISendRequestOptions): Promise<ISession> {
+		let modelTeamOperation: Promise<void> | undefined;
+		while ((modelTeamOperation = this._modelTeamOperations.get(chatResource))) {
+			await modelTeamOperation;
+		}
+		const team = this.getModelTeam(chatId, chatResource);
+		if (team?.error) {
+			throw new Error(team.error);
+		}
 		const newSession = this._getNewSession(chatId);
 		if (newSession) {
 			return this._sendNewSessionRequest(newSession, chatId, chatResource, options);
@@ -5110,7 +5346,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		const sessionType = chatResource.scheme;
 		const contribution = this._chatSessionsService.getChatSessionContribution(sessionType);
 
-		const selectedModelId = this._resolveSendModelId(chatId, cached.getChatModelId(chatResource));
+		const selectedModelId = this._resolveSendModelId(chatId, cached.getChatModelId(chatResource), chatResource);
 		const selectedAgentUri = cached.getChatMode(chatResource)?.id;
 
 		const sendOptions: IChatSendRequestOptions = {
@@ -5191,7 +5427,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		this._chatModelRetentionLeases.set(resourceKey, lease);
 	}
 
-	private _applyChatSessionState(modelRef: IChatModelReference, modelId: string | undefined, agentUri: string | undefined, options?: { readonly clearDraft?: boolean }): void {
+	private _applyChatSessionState(modelRef: IChatModelReference, modelId: string | undefined, agentUri: string | undefined, options?: { readonly clearDraft?: boolean; readonly modelConfiguration?: Readonly<Record<string, unknown>> }): void {
 		const inputModel = modelRef.object.inputModel;
 		if (!inputModel) {
 			return;
@@ -5199,7 +5435,10 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		if (modelId) {
 			const languageModel = this._languageModelsService.lookupLanguageModel(modelId);
 			if (languageModel) {
-				inputModel.setState({ selectedModel: { identifier: modelId, metadata: languageModel } });
+				inputModel.setState({
+					selectedModel: { identifier: modelId, metadata: languageModel },
+					...(options?.modelConfiguration !== undefined ? { modelConfiguration: { ...options.modelConfiguration } } : {}),
+				});
 			}
 		}
 		inputModel.setState({
@@ -5221,7 +5460,7 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 			throw new Error(this._notConnectedSendErrorMessage());
 		}
 
-		const selectedModelId = this._resolveSendModelId(chatId, newSession.getSelectedModelId());
+		const selectedModelId = this._resolveSendModelId(chatId, newSession.getSelectedModelId(), chatResource);
 		const selectedAgent = newSession.getSelectedAgent();
 
 		const { query, attachedContext } = options;

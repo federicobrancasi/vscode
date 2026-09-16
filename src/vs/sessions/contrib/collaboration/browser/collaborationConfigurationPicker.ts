@@ -78,12 +78,12 @@ export class CollaborationConfigurationPicker extends Disposable {
 				enablement.managedSandboxEnforced.read(reader);
 				enablement.managedSandboxAllowsBypass.read(reader);
 			}
-			this.update(room, collaboration.canConfigure.read(reader) && collaboration.availability.read(reader) === 'available' && !this.busy.read(reader));
+			this.update(room, !room?.archived && collaboration.canConfigure.read(reader) && collaboration.availability.read(reader) === 'available' && !this.busy.read(reader));
 		}));
 	}
 
 	private update(room: IAgentHostRoom | undefined, enabled: boolean): void {
-		this.element.hidden = !room || !this.collaboration.canConfigure.read(undefined);
+		this.element.hidden = !room || room.archived === true || !this.collaboration.canConfigure.read(undefined);
 		this.trigger.ariaDisabled = String(!enabled);
 		if (this.element.hidden || !room) {
 			if (this.menuOpen) {

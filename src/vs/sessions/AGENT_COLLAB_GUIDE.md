@@ -3,631 +3,221 @@ Copyright (c) Microsoft Corporation. All rights reserved.
 Licensed under the MIT License. See License.txt in the project root for license information.
 -->
 
-# Agent Collab: guide and implementation overview
+# Agent Collab: inbox-first guide
 
-Agent Collab brings a human, a dedicated coordinator, and **one to ten
-independent Copilot workers** into a shared room in the VS Code Agents Window.
-Each participant has its own session, model selection, and Git worktree. Workers
-remain equal peers: they work privately and share evidence directly, while the
-coordinator gives the human an evidence-backed overview and turns broad
-direction into explicit assignments without blocking peer collaboration.
+Imagine several agents working on the same problem, each in its own checkout,
+with a shared conversation and an inbox. One agent can ask another to review a
+patch, the recipient can test it independently, and everyone can see the
+exchange. The agents do not need a permanent manager model to pass messages.
 
-This guide describes the experimental implementation in this checkout, including
-the chat-first interface and follow-up behavior. It is not an announcement that
-the feature is available in every released VS Code build.
-[COLLABORATION.md](COLLABORATION.md) remains the authoritative architecture
-specification; this document is the practical guide and overview.
+Agent Collab implements that workflow in the VS Code Agents Window with **one
+to ten local Copilot-backed peers**. Each peer has its own session, model choice,
+and Git worktree. The host delivers messages; the normal Copilot runtime does
+the work. This is an experimental development feature, not a claim of
+availability in every released VS Code version.
 
-## Contents
+The inbox-first implementation is developed on `fb/agent-collab-inbox`. It
+replaces the coordinator experiment. Existing experiments remain read-only
+archives; they are not migrated into a new live run.
 
-- [Project branch](#project-branch)
-- [Inspiration and references](#inspiration-and-references)
-- [What was implemented](#what-was-implemented)
-- [Getting started](#getting-started)
-- [Talking to the agents](#talking-to-the-agents)
-- [Choosing models and permissions](#choosing-models-and-permissions)
-- [Using the room interface](#using-the-room-interface)
-- [How peers collaborate](#how-peers-collaborate)
-- [Implementation map](#implementation-map)
-- [Validation](#validation)
-- [Limitations and troubleshooting](#limitations-and-troubleshooting)
-- [Sources](#sources)
-
-## Project branch
-
-The coordinator experiment lives on **`fb/agent-collab-coordinator`**, based on
-the published `fb/agent-collab` branch in the fork of
-the [VS Code codebase][vscode] rather than to the upstream repository.
-
-| Reference | Value |
-|-----------|-------|
-| Branch | [`fb/agent-collab-coordinator`][branch] |
-| Fork | [`federicobrancasi/vscode`][fork] |
-| Upstream | [`microsoft/vscode`][vscode] |
-| Foundation commit | `ee704679f22997f5d18a64d83bfa93e76cdd336a` - Add local Copilot collaboration rooms |
-
-The branch is not proposed upstream. Clone the fork directly to work on it, or
-add it as a second remote on an existing VS Code checkout:
-
-```sh
-# fresh machine
-git clone --branch fb/agent-collab-coordinator https://github.com/federicobrancasi/vscode.git
-
-# or, on an existing microsoft/vscode checkout
-git remote add federicobrancasi https://github.com/federicobrancasi/vscode.git
-git fetch federicobrancasi fb/agent-collab-coordinator
-git switch fb/agent-collab-coordinator
-```
-
-## Inspiration and references
-
-The starting point was Hugging Face's
-[Gemma collaboration lessons][gemma-lessons], especially
-[How an Agent Collaboration Works][gemma-how], and the
-[huggingface/agent-collabs][agent-collabs] implementation.
-
-The [Fast Gemma Challenge][gemma-challenge] brought agents together to improve
-Gemma inference throughput while checking output quality. Its
-[dashboard][gemma-dashboard] combined a shared message board, submissions, and a
-leaderboard. The [lessons article][gemma-lessons] describes both useful
-collaboration and problems such as repeated ideas, excessive messages, and
-optimizations that improved a metric at the expense of quality.
-
-The idea adopted here is **collaboration through persistent, attributed messages
-and shared evidence, with humans able to redirect the work**. It is not a copy
-of the leaderboard, an implementation of Gemma inference optimization, or a
-claim that more agents automatically produce better results.
-
-| Idea | Hugging Face reference | Agent Collab in VS Code |
-|------|------------------------|-------------------------|
-| Shared objective | A research challenge with rules and evaluation | A room goal, shared rules, and a pinned repository baseline |
-| Independent work | Agent-owned scratch buckets | Separate local Git worktrees and ordinary Copilot sessions |
-| Shared knowledge | Message board, inboxes, artifacts, and results | Attributed room posts, recipient delivery states, structured results, reviews, and published patches |
-| Human participation | Dashboard messages and organizer guidance | Send, mentions, replies, live steering, and room-level approvals |
-| Coordination | Agents discover related work and organize around topics | Workers collaborate directly while a separate coordinator projects room evidence and creates explicit assignments |
-| Evaluation | Challenge-specific scoring, verification, and optional jobs | Evidence-backed result claims and independent peer/human verdicts; no leaderboard or scoring service |
-
-These are analogous workflows, not equivalent isolation mechanisms. Hugging
-Face's backend and bucket ownership enforce its collaboration access model.
-A local Git worktree separates working files but is **not an OS sandbox or an
-access-control boundary**.
-
-[github/copilot-agent-runtime][copilot-runtime] was also examined as the runtime
-behind GitHub Copilot CLI and SDK. This feature uses VS Code's existing local
-Copilot agent-host integration and its declared dependencies in
-[package.json](../../../package.json); it does not deploy Hugging Face
-infrastructure or require a separate clone of the runtime repository.
-Capabilities must come from the installed SDK and connected host, not from
-assuming everything on the runtime repository's current main branch is present.
-
-## What was implemented
-
-The work covers the room backend, its integration with existing Copilot sessions,
-and a native Agents Window interface:
-
-- **Persistent rooms and equal peers:** a shared goal, stable room/member
-  identities, independent sessions, and up to ten overlapping peer executions.
-- **Hybrid coordinator:** a persistent standard chat with its own model,
-  deterministic room snapshot, event-driven follow-ups, explicit assignments
-  and pairings, and no lifecycle or approval authority.
-- **Separate worktrees:** a committed baseline for each peer, with no automatic
-  edits, commits, or merges into the human's original working tree.
-- **Shared conversation:** completed findings, replies, mentions, delivery
-  status, and published patch references.
-- **Explicit continuation:** each worker requests another turn only with a
-  concrete actionable next step; otherwise it waits for guidance or assignments
-  instead of polling.
-- **One Send:** a post reaches a working peer as human guidance during its
-  current or next turn. Guidance for a stopped peer is saved until Resume.
-- **Independent model choices:** compact, searchable menus before creation and
-  afterwards, with pending changes and application errors shown honestly.
-- **Persistent configuration:** room-wide and per-peer mode, permissions, and
-  sandbox choices no longer snap back to manual settings on the next turn.
-- **Room-level requests:** workspace trust, tool/result approvals, questions,
-  and plan reviews can be handled without opening every peer.
-- **Coordinator-first layout:** the main view defaults to the coordinator's
-  standard Sessions chat. Activity keeps the direct worker log and composer;
-  settings remain in four fixed side-panel tabs (Run, Agents, Rules, Approvals).
-- **Patch sharing that works:** peers publish Git patches of their own work and
-  read each other's, so a room can build on a result rather than only hear
-  about it.
-- **Structured results and verification:** peers publish evidence-backed
-  success, negative, inconclusive, or blocked results. Other peers or the human
-  can verify or reject them without applying a patch or waking an agent.
-- **Continuous history:** virtualized messages, earlier-history loading, stable
-  scroll anchors, author colors, and wrapping for long messages. No duplicate
-  "Reported work" cards or Older/Newer Posts controls.
-- **Reliability and accessibility:** corrected read receipts, Resume/retry
-  handling, stale-response protection, retained drafts, keyboard navigation,
-  accessibility help, and an Accessible View.
+See [COLLABORATION.md](COLLABORATION.md) for the architecture and invariants.
 
 ## Getting started
 
-### Prerequisites
-
-Use a desktop development build containing this implementation, a working local
-Copilot agent host, an appropriate Copilot sign-in, and a local Git repository
-with at least one commit. AI features and the required models/tools must be
-permitted by the user's configuration and organizational policy.
-
-This is not a standalone Marketplace extension; it has to be run from source.
-On a machine that has never built VS Code, follow the
-[VS Code contribution instructions][vscode-development] for the platform
-toolchain first, then:
-
-```sh
-git clone --branch fb/agent-collab-coordinator https://github.com/federicobrancasi/vscode.git
-cd vscode
-npm install          # do not symlink node_modules from another checkout
-npm run compile      # builds the client and the built-in extensions
-./scripts/code.sh --agents
-```
-
-`npm run compile` is required rather than `npm run transpile-client`: the
-latter populates `out/` but not `extensions/*/out/`, and the Agents window needs
-the built-in extensions. Use `npm run watch` while iterating.
-
-Sign in to Copilot in the launched build before starting a room. A room that
-cannot reach an authenticated host can be read and stopped, but not started.
-
-### Create a room
-
-1. Enable the application setting:
+1. Use a desktop build containing the feature, with the local Copilot agent host
+   enabled, an appropriate sign-in, and AI features enabled.
+2. Enable the experimental setting:
 
    ```json
-   {
-     "chat.agentHost.collaboration.enabled": true
-   }
+   { "chat.agentHost.collaboration.enabled": true }
    ```
 
-   The experimental setting does not override disabled AI features, policy,
-   authentication, or an unsupported host.
-2. Open **Agent Collab** in the Sessions sidebar, or run
-   **Agents: Open Collaboration Room** from the Command Palette. Rooms you have
-   already created are listed underneath it; the row's **New Collaboration**
-   action (or **Agents: New Collaboration**) clears the selection and leaves the
-   creation form ready, so a second room can be started without leaving the one
-   you are in.
-3. Describe the shared goal. The room title is taken from it.
-4. Choose a folder. Peers work in Git worktrees, so a plain folder is offered a
-   one-time setup (`git init` plus a baseline commit) with its exact path shown;
-   it is never initialized silently. Uncommitted source-folder changes are not
-   silently included, committed, or discarded.
-5. Choose a coordinator model, then one to ten workers and a model for each
-   named slot. The form assigns
-   stable, unique AI-themed names such as `chaotic-cyborg`; names and model
-   choices stay associated with their slots if the peer count changes.
-6. Shared rules and the branch/tag/commit are under **Advanced**.
-7. Select **Create and Start**. Creation records the room; it does not start paid
-   inference.
-8. Review workspace trust when requested. A source-repository decision can cover
-   this room's exact coordinator and worker worktrees, never their shared parent
-   directory.
-9. Select **Start**.
+3. Open **Agent Collab** in the Sessions sidebar, or use **Agents: Open
+   Collaboration Room** in the Command Palette.
+4. Enter a shared goal, select a local working folder, and choose the peers and
+   their models. Shared rules and the committed baseline are advanced options.
+5. Create the room. **Creation and navigation do not authorize inference.**
+6. Review workspace trust and select a finite automatic-turn budget before
+   starting the run.
 
-Rooms support multi-turn work without forcing endless turns. Each peer receives
-the full room brief once. Before ending a turn it uses `room_yield`: Continue
-requires a concrete next step that can proceed immediately, while Wait yields
-until new guidance or an assignment arrives. The next continuation prompt tells
-the peer to share completed work and read newer evidence without polling. Only
-**Resume** or **Retry** sends
-`Continue working in the existing collaboration room.` Pending human guidance
-uses its own prompt instead. Agents stop when you select **Pause** or **Stop**,
-or when a member is blocked or fails.
+Worktrees require a Git repository with a committed baseline. A plain folder can
+be prepared only after explicit consent. An existing repository's uncommitted
+changes are not silently included in the baseline, committed, or discarded.
+Worktree provisioning must not fall back to the original working folder.
 
-## Talking to the agents
+## Talking to peers
 
-Use **Coordinator** for broad direction and room questions:
+The room has one shared conversation. **Send addresses all non-removed peers**,
+without an audience selector. Mention completion inserts a peer's name, but
+does not change recipients. A reply links to an earlier message and still goes
+to the whole room. To address one peer, use its individual chat.
 
-```text
-How is the work going? Pair two workers on the parser and ask another to verify
-the first result.
-```
+Agent tools still use explicit recipient IDs; their empty-recipient posts are
+passive room notes and wake nobody. A reply or mention does not grant
+permissions or prove that a request has been fulfilled.
 
-The coordinator reads deterministic worker, assignment, result, verification,
-blocker, and evidence-ID state. It may create structured work or verification
-assignments, redirect an assignment by superseding it, pair workers by naming
-multiple assignees, or post an informational note in Activity. It cannot Stop,
-Resume, Add, Remove, answer approvals, grant permissions, edit worker files, or
-make workers wait for permission. Those controls remain human-owned.
+**Hide for Me** on a human post or room event removes it from this profile's conversation and
+Accessible View, including after reopening the window. **Show Hidden Messages**
+restores hidden posts for the current room. Hiding is not deletion or recall:
+the room journal, delivery receipts, and any context already seen by agents stay
+unchanged. To turn an old passive note into a request for the team, send it as a
+new message.
 
-Use **Activity** for the shared worker log and direct `@worker` guidance. Direct
-messages bypass the coordinator and keep the existing delivery behavior below.
+An idle peer is still addressable. Addressed mail can start its next turn if the
+run is enabled and budget remains. A busy peer finishes its current turn first:
+new mail is queued, not injected midway through its work. An ordinary turn
+ending with no new mail leaves the peer idle, without a continuation or polling
+turn.
 
-**A new message is guidance for its recipients.** It can consume additional
-model tokens while the room is running. Merely opening a room, reading its
-history, creating it, or choosing a model does not start a turn.
+**Human Send is also the resume action.** With an existing run and remaining
+budget, sending to peers reopens a paused or stopped room and re-enables the
+addressed peers. There is no separate Resume step. Busy recipients keep their
+current turn and receive the queued input afterward. Passive notes and
+agent-authored messages cannot reopen a stopped run.
 
-Sending is one action. When a peer is mid-turn and the host supports steering,
-the post is delivered as live guidance so it lands during that turn; otherwise
-the same guidance is available on the next admitted turn. Guidance sent after
-Stop stays pending until Resume. Control/Command+Enter always steers.
-
-| Action | Recipients | Effect |
-|--------|------------|--------|
-| Send without `@mentions` | Every peer in the room | Delivers guidance to running peers; saves it for stopped peers until Resume |
-| Send with `@caffeinated-compiler` | Only the mentioned peers | The same guidance behavior for only those peers |
-| Reply | Determined by the mentions in the composer | Links the post to an earlier message; check the inserted mention before sending |
-| Retry Delivery | Undelivered recipients of that saved human message | Marks delivery pending without adding a duplicate post; Stop still requires Resume |
-
-For example:
+For example, in a peer's individual chat:
 
 ```text
-What did each of you verify, and what is still blocked?
+Review the patch Ada published. Apply it only in your own worktree, run the
+focused test, and send Ada the command and result.
 ```
 
-Send gives the guidance to every running peer.
+To get an overview, use **Ask for Summary** with an existing peer, or send it an
+ordinary message asking for a summary. This uses the same inbox and budget as
+any other request. It does not create an always-running coordinator.
 
-```text
-@caffeinated-compiler Please check the mobile navigation once more.
-```
+Individual worker chats show detailed tool output. Text follow-ups sent there
+are shared back into the room and addressed to that worker. Unsupported
+attachments are rejected explicitly. Use the room inbox instead of the native
+Queue/Steer path for room members; ordinary non-room chats are unchanged.
 
-Send requests a follow-up only from `caffeinated-compiler`, and reaches it
-during its current turn if it is working.
+## Budgets and controls
 
-Text follow-ups from an idle peer's individual chat are also shared in the room
-and addressed to that peer. During an active turn, use the room composer rather
-than the individual chat's native Queue/Steer path. Unsupported attachments on
-that follow-up path are rejected explicitly instead of silently dropped.
-
-Important boundaries:
-
-- **Pause holds delivery.** Resume releases the deliberately paused room.
-- **Stop blocks delivery.** New guidance stays pending and does not restart
-  agents until Resume.
-- **Stopping is not Stopped.** Wait for cancellation to finish before retrying
-  work; a new message must not defeat an in-progress Stop.
-- Peer messages are different from human Send. Agents notify explicit
-  recipients; their posts cannot restart a stopped room or recursively launch
-  new teams.
-- Old context-only posts are not retroactively broadcast. Retrying the same
-  completed message does not run it again.
-
-Delivery labels describe transport and execution, not the quality of an answer.
-**Submitted** means a queued message was assigned to a turn;
-**Sent to active turn** means the runtime accepted steering. Neither proves
-that the model understood the request or completed it correctly. Errors,
-cancellation, and interrupted delivery remain visible.
-
-### Run controls
-
-These live in the **Run** tab of the side panel, which offers only the actions
-the room's current state allows rather than showing them all and disabling most.
+The budget counts **host-admitted turns**, including initial activations. A
+native turn may itself make many model/tool calls: this is **not a guaranteed
+token or currency cap**.
 
 | Control or state | Meaning |
-|------------------|---------|
-| Start | Begin continuous team work with the selected configuration |
-| Resume | Resume held work, or start a fresh run for stopped/failed peers without replacing their sessions or worktrees |
-| Pause | Stop admitting new turns; current work can finish |
-| Stop All / Stop | Request cancellation for the room or one peer |
-| Waiting | No active work is being performed; this is not proof that the goal is solved |
-| Needs Attention | A request, trust decision, or failure needs human review |
+| --- | --- |
+| Start | Enqueue each peer's initial task and admit within the chosen finite budget |
+| Pause | Hold new admissions while current work settles; retain queued mail |
+| Stop | Close admission before requesting cancellation; preserve mail and worktrees |
+| Resume / Retry | Explicitly re-enable held or failed work, using the existing budget |
+| Extend | Explicitly add turns to the existing run; do not reset its identity or counter |
+| Idle | No current work; not a declaration that the goal is solved |
+| Budget exhausted | Keep mail queued and require an explicit budget extension |
+| Interrupted | Delivery or cancellation needs attention; inspect before retrying |
 
-A peer has at most one admitted turn at a time. Ten peers can execute
-concurrently, but real concurrency remains subject to account capacity, model
-availability, quotas, and local resources.
+Sending a message, adding a peer, or resuming cannot replenish an exhausted
+budget. Addressed sends require an existing finite budget and are refused while
+stopping is still in progress. A later Pause or Stop still supersedes a send.
+An unresponsive cancellation is an error to inspect, not a false report of
+successful termination. Already-running external processes may have their own
+lifetime.
 
-## Choosing models and permissions
+Delivery labels describe transport, not task success. **Reserved** means a
+batch and its budget charge were saved before native submission; **Submitted**
+means it was handed to the host's native turn path, not accepted or fulfilled
+by the provider. Retrying the same saved send
+does not add another copy to the shared conversation. After an ambiguous crash,
+however, the model might already have processed the input: there is no
+exactly-once-processing guarantee.
 
-### A model for every Copilot
+## Models, approvals, and trust
 
-The coordinator and each setup slot or saved worker have independent searchable
-model popups in Room Settings.
-The menu uses the local host's actual catalog; selecting a model for one peer
-does not change the active chat's global selection or another peer's choice.
+Each peer has its own model picker backed by the connected host's catalog.
+Changes preserve session and worktree identity. A busy peer finishes with its
+current model; its pending choice applies between turns. Unavailable or
+policy-rejected choices remain errors, not silent fallback selections.
 
-- Before Start, the selection is saved for that peer's first turn.
-- An idle peer's selection can be applied or recorded without starting work.
-- A busy peer keeps its current model for the active turn. A pending selection
-  applies when it starts its next turn.
-- The UI distinguishes the selected model from the last provider-confirmed
-  model. **Provider Default** or an unconfirmed selection is not proof that a
-  particular model is running.
-- An unavailable or policy-rejected model produces an error rather than silently
-  switching to another model. Model changes preserve session, chat, and worktree
-  identity.
+New rooms use Autopilot with assisted approvals. Autopilot governs the native
+agent loop, not the room's admission budget, and is not blanket permission to
+execute tools. Room-wide and per-peer choices still use normal provider and
+managed-setting enforcement.
 
-The desired/current/pending storage contract is documented in
-[COLLABORATION.md](COLLABORATION.md). The picker does not expose extra model
-configuration controls unless their persistence is supported.
+The **Approvals** panel shows the actual peer requests: tool approvals,
+questions, and plan reviews. Responses remain pending until acknowledged by the
+host. Disconnection, rejection, or timeout must not look like success.
 
-### Autopilot is separate from approval level
+Trust applies to the source repository and exact room-owned worktrees, not their
+shared parent directory. Peer messages cannot change permissions, policy,
+membership, or lifecycle controls. Git worktrees prevent ordinary editing
+collisions; **they are not an OS sandbox or an access-control boundary**.
 
-New rooms start in **Autopilot with assisted approvals**, so routine tool calls
-are not interrupted while elevated decisions still reach you; existing rooms keep
-the level they already had. The **All peers**
-menu changes the team's mode, permissions, and terminal sandbox choices when
-those options are available. Individual choices made through peer sessions
-remain synchronized with the room.
+## Exchanging useful work
 
-Autopilot controls how the agent continues work. It is not blanket permission
-to execute every tool. **Manual permissions**, **Assisted permissions** when
-available, and **Allow all** are separate choices. Elevated choices use the
-existing warnings and policy checks; neither Autopilot nor Allow all overrides
-mandatory managed approvals.
-
-Configuration is saved and applied through the host. Rejected changes are
-reported instead of briefly appearing selected and then silently reverting.
-
-### Approvals and workspace trust
-
-Use the header's **Needs Attention** action to reveal pending requests, even
-when Room Settings is collapsed. Cards identify the peer and show the actual
-tool request, result, question, or plan to review.
-
-Responses stay pending until the host acknowledges and applies them. Rejection,
-timeout, or disconnect is an error, not a successful approval. Hiding the panel
-does not destroy form drafts. Changing rooms or ending a turn invalidates stale
-requests.
-
-Sending, starting, resuming, retrying, steering, and allowing work require the
-appropriate authentication and workspace trust. These checks are not bypassed
-to make collaboration more convenient.
-
-## Using the room interface
-
-```text
-Sessions sidebar | Room title/status      Room Settings | Run | Agents | Rules | Approvals
-                 |                                      |
-                 | Coordinator | Activity               | Start / Pause / Stop All
-                 |                                      | Coordinator model/state
-                 | Standard coordinator chat            | Worker roster
-                 | or shared worker Activity             | Needs Attention
-```
-
-The room's main tab list has **Coordinator** and **Activity**. Coordinator hosts
-the real standard Sessions chat and becomes the default after its persistent
-chat resolves. Activity holds the shared worker journal, direct-message
-composer, structured assignment cards, results, and verification. Its badge
-counts unread meaningful evidence rather than routine chatter. Settings live in
-the Agents window **side panel**.
-
-The panel has four tabs, whatever the room's size:
-
-| Tab | Holds |
-|-----|-------|
-| Run | The available Start, Resume, Pause, and Stop actions |
-| Agents | Coordinator model/state above every worker and its model, state, and Stop/Retry actions |
-| Rules | The room's goal, rules, folder and pinned base, plus shared configuration |
-| Approvals | Workspace trust and anything awaiting a decision |
-
-Giving each member its own tab made the strip grow with the room until it
-scrolled, so members are a list inside one tab instead. Pending approvals and
-member failures are badged, so an inactive tab still reports that it needs
-attention.
-
-Messages retain visible author names as well as stable accents. Body text uses
-normal theme foreground colors, long paragraphs wrap, and agent-authored
-Markdown uses the chat-safe rendering rules. Shared reports appear in the
-conversation, not repeated in expanded roster cards.
-
-Scroll upward to load earlier messages. New posts and delivery updates continue
-to arrive without moving a reader who is above the live tail. **Jump to Latest**
-returns to the newest content; virtualized rendering avoids creating a DOM row
-for every loaded message.
-
-Open a peer for its detailed transcript or changes, then use **Back to Room**
-or the **Agent Collab** sidebar entry to return. Navigation does not restart
-agents. Closing the room view does not delete its history or stop the host;
-quitting VS Code is not a guarantee that work continues in an always-on service.
-
-Keyboard support includes:
-
-- Tab and Shift+Tab between controls; arrow keys and Page Up/Page Down in history.
-- Left/Right Arrow, Home, and End between Coordinator and Activity.
-- Enter to send, Shift+Enter for a newline, and Control/Command+Enter to steer.
-- Arrow keys and Enter to choose a mention; Escape to dismiss suggestions.
-- Room Settings, and Needs Attention, bring the side panel forward; Escape in
-  the panel returns to the conversation.
-- Accessibility Help and Accessible View for instructions and a plain-text view
-  of evidence-linked coordinator state, participants, requests, and loaded
-  Activity messages.
-- **Review Result** opens a verdict picker and an evidence input. The review is
-  attributed in room history; it does not approve or merge referenced patches.
-
-## How peers collaborate
-
-The expected cycle is: read the room once, work privately in the assigned
-worktree for as many turns as needed, implement and verify a meaningful result,
-publish concise evidence, then read newer peer messages and choose the next
-useful action. Peer ideas are optional; an agent may keep improving its own
-approach.
-
-The host binds these tools to the caller's member identity:
+The four session-bound room tools are:
 
 | Tool | Purpose |
-|------|---------|
-| `room_read` | Read identity, goal, peer work, inbox, human guidance, paged messages, published artifacts, results, and reviews |
-| `room_post` | Post an attributed question, informal finding, or reply; explicitly mention peers when addressing them |
-| `room_read_artifact` | Inspect the metadata and contents of a previously published patch |
-| `room_publish_result` | Publish an immutable completed result with outcome, evidence, and optional author-owned patch references |
-| `room_verify_result` | Independently verify or reject another peer's result with evidence |
-| `room_share_patch` | Publish an immutable Git patch of the peer's contribution relative to the room baseline |
+| --- | --- |
+| `room_post` | Send a useful attributed message, with explicit recipients, reply and artifact references |
+| `room_read` | Read bounded, paginated room history and member state without consuming mail |
+| `room_share_patch` | Publish an immutable patch from the sender's own worktree |
+| `room_read_artifact` | Inspect the metadata and contents of a published patch |
 
-The coordinator receives only these room tools:
+The recipient's next input contains the actual addressed message text and
+provenance, not just an instruction to call `room_read`. Repeated history reads
+do not acknowledge mail or start turns.
 
-| Tool | Purpose |
-|------|---------|
-| `room_coordinator_snapshot` | Read deterministic room status and evidence IDs |
-| `room_assign` | Create a work or verification assignment, an explicit multi-worker pair, or a superseding redirect |
-| `room_post` | Add a visible informational Activity note without notifying workers |
+Review requests and results are ordinary messages referencing patches. There
+is no mandatory assignment/result-verdict workflow or `room_yield` tool.
+Share evidence rather than acknowledgement-only chatter. A peer may inspect and
+apply a published patch in its own worktree using normally approved tools;
+publication does not merge anything into another peer or the human's branch.
 
-`room_read` accepts a bounded `limit`. Use `after` with the last seen sequence
-for newer messages and `before` for older history. Sequence cursors avoid the
-gaps and duplicates that timestamp cursors can create.
+## History, navigation, and accessibility
 
-Every structured result begins **Pending**, even when its author reports
-**Success**. Another peer can append an evidence-backed **Verified** or
-**Rejected** verdict only after reading the result, and cannot review its own.
-The latest human verdict is authoritative; otherwise a peer rejection takes
-precedence over peer verification. Results and reviews are immutable room
-records and do not notify or wake peers.
+Filter the conversation to a selected peer's inbox or return to all messages.
+Filters are views of the same shared history and never consume deliveries.
+Scroll upward for older messages; incoming posts preserve a reader's position
+above the live tail. Draft text and peer selection should survive navigation.
 
-Published patches are evidence for review, **not automatic integration**.
-Another peer may inspect and explicitly apply a patch in its own worktree using
-normally approved tools. Applying or merging it into the human's branch is a
-separate decision. Missing or failed worktrees must not silently fall back to
-the original repository.
+Room Settings retains the Run, Agents, Rules, and Approvals controls. Open a
+peer's ordinary chat for details, then return to the room. Closing the view does
+not delete its data or stop a live host.
 
-The room is not a concatenation of private transcripts. Reports are explicit
-shared posts; the UI does not extract hidden reasoning to invent progress.
-Human requests take priority over an older plan, but the host cannot guarantee
-research quality, eliminate semantic duplication, or force a useful model reply.
+Keyboard navigation, Accessibility Help, Accessible View, and the collaboration
+verbosity setting remain available. Names accompany author accents; delivery
+state and actionable errors are not conveyed by color alone.
 
-## Implementation map
-
-The room runs through existing VS Code layers, rather than a separate hosted
-dashboard:
-
-```text
-Agents Window room UI
-        |
-Observable collaboration service
-        |
-Local agent-host IPC
-        |
-Persistent room controller and delivery/admission checks
-        |
-Existing Copilot SDK sessions, one per worker plus the coordinator
-        |
-Independent worktrees + explicit shared posts and patches
-```
-
-| Responsibility | Main source |
-|----------------|-------------|
-| Room contracts and capabilities | [agentHostRooms.ts](../platform/agentHost/common/agentHostRooms.ts) |
-| Scheduling, inboxes, follow-ups, and turn ownership | [agentHostRooms.ts](../platform/agentHost/node/agentHostRooms.ts) |
-| Deterministic coordinator projection | [agentHostRoomCoordinator.ts](../platform/agentHost/node/agentHostRoomCoordinator.ts) |
-| Coordinator admission and prompt context | [roomCoordinatorContribution.ts](../platform/agentHost/node/chatContributions/rooms/roomCoordinatorContribution.ts) |
-| Persistence, worktrees, and artifact publication | [agentHostRoomsStorage.ts](../platform/agentHost/node/agentHostRoomsStorage.ts) |
-| Existing session/runtime integration | [agentHostRoomsRuntime.ts](../platform/agentHost/node/agentHostRoomsRuntime.ts) |
-| Model validation and synchronization | [agentHostRoomsModels.ts](../platform/agentHost/node/agentHostRoomsModels.ts), [roomModelContribution.ts](../platform/agentHost/node/chatContributions/rooms/roomModelContribution.ts) |
-| IPC, including default model slots | [agentHostRoomsIpc.ts](../platform/agentHost/common/agentHostRoomsIpc.ts), [agentHostRoomsChannel.ts](../platform/agentHost/node/agentHostRoomsChannel.ts) |
-| Renderer state and Send audience | [collaborationService.ts](services/collaboration/browser/collaborationService.ts) |
-| Continuous history loading and merging | [collaborationHistory.ts](services/collaboration/browser/collaborationHistory.ts) |
-| Approval receipts and workspace trust | [collaborationRoomRequests.ts](services/collaboration/browser/collaborationRoomRequests.ts), [collaborationWorkspaceTrust.ts](services/collaboration/browser/collaborationWorkspaceTrust.ts) |
-| Room composition, coordinator chat, and layout | [collaborationRoomWidget.ts](contrib/collaboration/browser/collaborationRoomWidget.ts), [collaborationCoordinatorView.ts](contrib/collaboration/browser/collaborationCoordinatorView.ts), [collaborationRoomLayout.ts](contrib/collaboration/browser/collaborationRoomLayout.ts) |
-| Virtualized messages and per-peer model menus | [collaborationConversation.ts](contrib/collaboration/browser/collaborationConversation.ts), [collaborationModelPicker.ts](contrib/collaboration/browser/collaborationModelPicker.ts) |
-| Registration and accessibility | [collaboration.contribution.ts](contrib/collaboration/browser/collaboration.contribution.ts), [collaborationAccessibility.ts](contrib/collaboration/browser/collaborationAccessibility.ts) |
-
-The host owns durable room state and execution. The renderer owns presentation,
-drafts, and view state. Rejected or stale operations cannot be represented as
-success, and a late callback cannot revive a stopped run.
-
-For detailed ownership and lifecycle rules, use
-[COLLABORATION.md](COLLABORATION.md),
-[LAYERS.md](LAYERS.md), and the
-[Agent Host provider specification](contrib/providers/agentHost/AGENT_HOST_SESSIONS_PROVIDER.md).
-
-## Validation
-
-Automated coverage exercises concurrency, stable identities, model persistence,
-real IPC serialization, failed provisioning, one-time bootstrap delivery,
-explicit continue/wait admission, sequence-cursor reads, Stop/Resume races, pending
-human guidance, and idempotent delivery. Renderer
-coverage checks model-menu isolation, approvals, draft retention, history
-merging, scroll anchors, long-message wrapping, and accessibility.
-Coordinator coverage includes backward-compatible persistence, deterministic
-projection, event coalescing, assignment delivery, restricted tools, independent
-model persistence, exact worktree trust, standard-chat binding, Activity badges,
-and paired-assignment rendering.
-
-With a prepared checkout and fresh build output, focused test entry points are:
-
-```sh
-# focused: the room host and room renderer
-./scripts/test.sh --runGlob '**/agentHost/test/**/{agentHostRooms*,copilotAgent,copilotSessionLauncher,chatContributions}.test.js'
-./scripts/test.sh --runGlob '**/sessions/**/collaboration*.test.js'
-
-# surrounding suites
-./scripts/test.sh --runGlob '**/agentHost/**/*.test.js'
-./scripts/test.sh --runGlob '**/sessions/**/*.test.js'
-```
-
-The [themed fixtures](contrib/collaboration/test/browser/collaborationRoom.fixture.ts)
-cover different peer counts, initial model choices, pending/error states, long
-conversations, approvals, the side-panel settings, narrow layouts, and high
-contrast.
-
-The runs overlap. Use `npm run typecheck-client`, `npm run valid-layers-check`,
-and scoped hygiene alongside the focused suites when validating cross-layer
-changes.
-
-The build has been exercised against live rooms, not only fixtures: rooms and
-worktrees survive a restart, the real model catalog is reachable per peer, and a
-four-agent room on a Python optimisation task produced peers that claimed
-separate routines in the shared conversation and reported measured speedups.
-This is **not** a claim that ten paid agents were benchmarked simultaneously or
-that the Gemma Challenge's results were reproduced.
+Archives retain original messages, historical participant/session links, and
+patches. Structured legacy evidence is displayed as historical content. Old
+delivery statuses are not retroactively treated as proof that the new inbox
+engine delivered anything. Opening an archive cannot activate its old workers
+or coordinator.
 
 ## Limitations and troubleshooting
 
-- This implementation is local, desktop, and Copilot-backed. Different models
-  can be selected from that host's catalog; arbitrary agent providers, remote
-  rooms, multi-human hosting, HF Jobs, taskforces, and challenge leaderboards are
-  not implemented by this work.
-- Worktrees are not security sandboxes. Keep normal trust, content exclusions,
-  managed settings, and tool restrictions in effect.
-- Published patches are not automatically merged; another peer inspects one and
-  decides whether to apply it in its own worktree. The publication failures seen
-  earlier in development are fixed: content exclusion is now checked against the
-  member's own worktree, which is the session the policy is evaluated in, rather
-  than also against the source repository, whose paths are outside that session
-  and made the whole check report "unavailable" and fail closed.
-- No agent is guaranteed to comply, respond usefully, or avoid overlapping
-  ideas. Inspect evidence, and send guidance when necessary.
-- The coordinator is experimental and event-driven, not an always-running
-  manager. A failure or offline coordinator does not stop worker progress.
-- Existing messages and worktrees survive room navigation. Process restart
-  restores persistent state but does not silently replay ambiguous work or
-  automatically resume spending.
+- The first version is local, desktop, and Copilot-backed. The contracts are
+  provider-neutral; arbitrary providers and distributed room hosting are not
+  implemented.
+- Account quotas, available models, and local resources limit real concurrency.
+- Restart restores history and reconciles reservations. It does not silently
+  resume spending or blindly replay uncertain input.
+- A room can be idle while the task remains unfinished. Check queued mail,
+  remaining budget, errors, and pending approvals before requesting more work.
+- No model is guaranteed to comply, avoid overlapping ideas, or produce a useful
+  result. Inspect evidence rather than treating message volume as progress.
+- The redesign itself is not evidence of a VS Code performance improvement.
+  A speedup claim requires comparable before/after measurements.
 
-| Symptom | What to check |
-|---------|---------------|
-| Agent Collab is missing | This build must include the feature; enable its setting and verify AI features and a compatible local host are available |
-| Model picker has no usable choices | Check sign-in, catalog availability, and policy; an unconfirmed/default label is not a confirmed running model |
-| A stopped peer does not receive new guidance | Select Resume; messages do not bypass Stop. Also inspect delivery status, trust/authentication errors, Pause, or an in-progress Stop |
-| An old post says no agents were notified | It retains its original audience; send new guidance rather than expecting old history to be delivered |
-| Allow or a form response stays pending | Wait for the host receipt; inspect rejection, timeout, disconnect, and request-content errors before retrying |
-| A saved model differs from the running model | An active turn keeps its model; inspect the pending-next-turn label and any model application error |
-| A patch cannot be published | Inspect the peer's detailed error and worktree/baseline; preserve local work and do not claim a merge or artifact exists |
-| The room is Waiting | Check findings and requests; idle execution is not a success verdict |
-| The coordinator is unavailable | Continue in Activity; inspect its state/model error and host availability. Workers do not depend on coordinator recovery |
+## References
 
-## Sources
-
-External references were checked on **2026-09-13**. They describe their own
-projects and may evolve independently of this checkout.
-
-1. [Hugging Face: Gemma collaboration lessons][gemma-lessons] -
-   the motivation, experiment, results, and lessons that inspired this work.
-   Direct links: [How an Agent Collaboration Works][gemma-how] and
-   [The Gemma Challenge][gemma-section].
-2. [The Fast Gemma Challenge][gemma-challenge] and its
-   [live dashboard][gemma-dashboard] - the original challenge and its
-   human-facing collaboration surface.
-3. [huggingface/agent-collabs on GitHub][agent-collabs] -
-   the reusable challenge template, backend, dashboard, and setup runbook.
-   The earlier implementation comparison used
-   [revision 9f18c7a35dc163d7aa151495b68e7a140006c50a][agent-collabs-revision].
-4. [Gemma Challenge backend API design][gemma-api] -
-   reference material for server-mediated authorship and shared storage.
-5. [github/copilot-agent-runtime on GitHub][copilot-runtime] -
-   the Copilot CLI/SDK runtime reference, not a promise of capabilities in
-   every installed SDK.
-6. [microsoft/vscode on GitHub][vscode] -
-   the host editor and Agents Window codebase.
-
-[gemma-lessons]: https://huggingface.co/spaces/agent-collaborations/gemma-collab-lessons
-[gemma-how]: https://huggingface.co/spaces/agent-collaborations/gemma-collab-lessons#how-an-agent-collaboration-works
-[gemma-section]: https://huggingface.co/spaces/agent-collaborations/gemma-collab-lessons#the-gemma-challenge
-[gemma-challenge]: https://huggingface.co/gemma-challenge
-[gemma-dashboard]: https://gemma-challenge-gemma-dashboard.hf.space
-[agent-collabs]: https://github.com/huggingface/agent-collabs
-[agent-collabs-revision]: https://github.com/huggingface/agent-collabs/tree/9f18c7a35dc163d7aa151495b68e7a140006c50a
-[gemma-api]: https://huggingface.co/spaces/gemma-challenge/gemma-bucket-sync/blob/main/DESIGN.md
-[copilot-runtime]: https://github.com/github/copilot-agent-runtime
-[vscode]: https://github.com/microsoft/vscode
-[fork]: https://github.com/federicobrancasi/vscode
-[branch]: https://github.com/federicobrancasi/vscode/tree/fb/agent-collab-coordinator
-[vscode-development]: https://github.com/microsoft/vscode/wiki/How-to-Contribute
+- [Gemma collaboration lessons](https://huggingface.co/spaces/agent-collaborations/gemma-collab-lessons#how-an-agent-collaboration-works),
+  [Fast Gemma Challenge](https://huggingface.co/gemma-challenge), and
+  [challenge dashboard](https://gemma-challenge-gemma-dashboard.hf.space).
+- [HF agent-collabs](https://github.com/huggingface/agent-collabs/tree/9f18c7a35dc163d7aa151495b68e7a140006c50a):
+  durable attributed messages, recipient inboxes, and a watcher/harness boundary.
+  Its watcher waking an HTTP request is not itself a model turn.
+- [Microsoft Agent Framework Group Chat](https://learn.microsoft.com/en-us/agent-framework/workflows/orchestrations/group-chat):
+  context broadcast and speaker activation are distinct; speaker selection may
+  use code or a manager model.
+- [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams):
+  separate contexts and direct peer messages, with a lead-managed team.
+- [OpenAI multi-agent patterns](https://github.com/openai/openai-agents-python/blob/main/docs/multi_agent.md)
+  and [Anthropic's effective agents](https://www.anthropic.com/engineering/building-effective-agents):
+  orchestration, handoff, parallel execution, and synthesis are separate choices.
+- [GitHub Copilot Agent Runtime](https://github.com/github/copilot-agent-runtime):
+  repository access may require authentication. This feature uses VS Code's
+  installed SDK and host capabilities, not assumed support from another
+  repository's main branch.

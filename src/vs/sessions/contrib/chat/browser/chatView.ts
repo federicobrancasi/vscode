@@ -41,6 +41,7 @@ import { ChatInteractivity, getSessionStatusMessage, IChat, isActiveSessionStatu
 import { IChatViewFactory } from '../../../services/chatView/browser/chatViewFactory.js';
 import { NewChatWidget } from './newChatWidget.js';
 import { NewChatInSessionWidget } from './newChatInSessionWidget.js';
+import { SessionModelTeamPicker } from './sessionModelTeamPicker.js';
 import { SessionInputBanners } from '../../sessionInputBanners/browser/sessionInputBanners.js';
 import { SESSION_CHAT_INPUT_TOOLBAR_HEIGHT, SessionChatInputToolbar } from './sessionChatInputToolbar.js';
 import { ResponseSelectionSideChatController } from './responseSelectionSideChatController.js';
@@ -251,6 +252,18 @@ export class ChatView extends AbstractChatView {
 		const scopedInstantiationService = this._register(instantiationService.createChild(
 			new ServiceCollection([IContextKeyService, scopedContextKeyService])
 		));
+		const teamContext = derived(this, reader => {
+			const session = this._currentSessionObs.read(reader);
+			const resource = this._currentChatResourceObs.read(reader);
+			const chat = session?.chats.read(reader).find(chat => isEqual(chat.resource, resource));
+			return session && chat && chat.interactivity.read(reader) === ChatInteractivity.Full ? {
+				sessionId: session.sessionId,
+				providerId: session.providerId,
+				chatResource: chat.resource,
+				modelId: chat.modelId.read(reader),
+			} : undefined;
+		});
+		const teamPicker = this._register(scopedInstantiationService.createInstance(SessionModelTeamPicker, teamContext, undefined));
 
 		// Matches `AGENTS_VOICE_INITIATED_HERE` in agentsVoice.contribution.ts.
 		this._voiceInitiatedHereKey = scopedContextKeyService.createKey<boolean>('agentsVoiceInitiatedHere', false);
@@ -273,6 +286,7 @@ export class ChatView extends AbstractChatView {
 				supportsChangingModes: true,
 				inputEditorMinLines: 2,
 				isSessionsWindow: true,
+				modelPickerDelegate: delegate => teamPicker.decorate(delegate),
 				enableFind: true,
 				persistentContentHeight: SESSION_CHAT_INPUT_TOOLBAR_HEIGHT,
 				renderGettingStartedTip: () => shouldShowSessionChatTip(this._currentSessionObs.get()?.status.get()),

@@ -13,6 +13,7 @@ import { ICommandService } from '../../../../../../../platform/commands/common/c
 import { ChatEntitlement, IChatEntitlementService, isProUser } from '../../../../../../services/chat/common/chatEntitlementService.js';
 import { MANAGE_CHAT_COMMAND_ID } from '../../../../common/constants.js';
 import { IModelControlEntry, ILanguageModelChatMetadataAndIdentifier, IModelsControlManifest } from '../../../../common/languageModels.js';
+import type { IModelPickerAdditionalActionGroup } from './modelPickerActionItem.js';
 import { buildFlatModelItems, buildGroupedModelItems, buildUnavailableStateItems, RESTRICTED_MODE_TRUST_ACTION_ID, SETUP_REQUIRED_SIGN_IN_ACTION_ID } from './modelPickerItemSections.js';
 import type { IBuildModelPickerItemsOptions } from './modelPickerItemTypes.js';
 
@@ -20,6 +21,10 @@ export type { IBuildModelPickerItemsOptions } from './modelPickerItemTypes.js';
 export { ModelPickerSection } from './modelPickerItemSections.js';
 
 const PICKER_COMMAND_ACTION_IDS: ReadonlySet<string> = new Set([RESTRICTED_MODE_TRUST_ACTION_ID, SETUP_REQUIRED_SIGN_IN_ACTION_ID]);
+
+interface IModelPickerActionListItem extends IActionListItem<IActionWidgetDropdownAction> {
+	readonly isAdditionalAction?: boolean;
+}
 
 export function getControlModelsForEntitlement(manifest: IModelsControlManifest, entitlement: ChatEntitlement): IStringDictionary<IModelControlEntry> {
 	return isProUser(entitlement) && entitlement !== ChatEntitlement.EDU ? manifest.paid : manifest.free;
@@ -80,34 +85,81 @@ export function createManageModelsAction(commandService: ICommandService): IActi
 /** Builds the ordered model picker sections for the current presentation state. */
 export function buildModelPickerItems(options: IBuildModelPickerItemsOptions): IActionListItem<IActionWidgetDropdownAction>[] {
 	const unavailableItems = buildUnavailableStateItems(options);
-	if (unavailableItems) {
+	if (unavailableItems && (options.presentation.restrictedMode || options.presentation.setupRequired)) {
 		return unavailableItems;
 	}
-	return options.presentation.useGroupedModelPicker
+	const items = unavailableItems ?? (options.presentation.useGroupedModelPicker
 		? buildGroupedModelItems(options)
-		: buildFlatModelItems(options);
+		: buildFlatModelItems(options));
+	return prependModelPickerActionGroups(items, options.additionalActionGroups);
+}
+
+export function prependModelPickerActionGroups(
+	items: IActionListItem<IActionWidgetDropdownAction>[],
+	groups: readonly IModelPickerAdditionalActionGroup[] | undefined,
+): IActionListItem<IActionWidgetDropdownAction>[] {
+	const additionalItems: IModelPickerActionListItem[] = [];
+	for (const group of groups ?? []) {
+		if (!group.actions.length) {
+			continue;
+		}
+		additionalItems.push({ kind: ActionListItemKind.Separator, label: group.label });
+		for (const action of group.actions) {
+			additionalItems.push({
+				item: action,
+				kind: ActionListItemKind.Action,
+				isAdditionalAction: true,
+				label: action.label,
+				description: action.description,
+				ariaDescription: action.ariaDescription,
+				detail: action.detail,
+				tooltip: action.tooltip,
+				group: { title: '', icon: action.icon ?? (action.checked ? Codicon.check : Codicon.blank) },
+				disabled: !action.enabled,
+				hideIcon: action.checked === undefined && !action.icon,
+				hover: action.hover,
+				toolbarActions: action.toolbarActions,
+				className: action.className,
+				inlineToggle: action.inlineToggle,
+				standaloneToggle: action.standaloneToggle,
+				keybinding: action.keybinding,
+			});
+		}
+	}
+	if (!additionalItems.length) {
+		return items;
+	}
+	if (items[0]?.kind === ActionListItemKind.Action) {
+		additionalItems.push({ kind: ActionListItemKind.Separator });
+	}
+	return [...additionalItems, ...items];
 }
 
 export function getModelPickerAccessibilityProvider(isSearch = false) {
 	return {
-		getAriaLabel(element: IActionListItem<IActionWidgetDropdownAction>) {
+		getAriaLabel(element: IModelPickerActionListItem) {
 			if (element.kind !== ActionListItemKind.Action) {
 				return null;
 			}
 			const description = element.ariaDescription ?? (typeof element.description === 'string' ? element.description : element.description?.value);
-			const currentModel = isSearch && element.item?.checked ? localize('chat.modelPicker.currentModel', "Current model") : undefined;
-			return [element.label, element.badge, description, currentModel].filter((part): part is string => !!part).join(', ');
+			const selection = isSearch && element.item?.checked
+				? element.isAdditionalAction ? localize('chat.modelPicker.selectedAction', "Selected") : localize('chat.modelPicker.currentModel', "Current model")
+				: undefined;
+			return [element.label, element.badge, description, selection].filter((part): part is string => !!part).join(', ');
 		},
-		isChecked(element: IActionListItem<IActionWidgetDropdownAction>) {
+		isChecked(element: IModelPickerActionListItem) {
 			if (isSearch || element.isSectionToggle) {
 				return undefined;
+			}
+			if (element.isAdditionalAction) {
+				return element.item?.checked;
 			}
 			if (element.kind === ActionListItemKind.Action && !(element.item?.id && PICKER_COMMAND_ACTION_IDS.has(element.item.id))) {
 				return !!element.item?.checked;
 			}
 			return undefined;
 		},
-		getRole: (element: IActionListItem<IActionWidgetDropdownAction>) => {
+		getRole: (element: IModelPickerActionListItem) => {
 			if (isSearch) {
 				return element.kind === ActionListItemKind.Action ? 'option' : 'separator';
 			}
@@ -116,6 +168,9 @@ export function getModelPickerAccessibilityProvider(isSearch = false) {
 			}
 			switch (element.kind) {
 				case ActionListItemKind.Action:
+					if (element.isAdditionalAction) {
+						return element.item?.checked === undefined ? 'menuitem' : 'menuitemcheckbox';
+					}
 					return element.item?.id && PICKER_COMMAND_ACTION_IDS.has(element.item.id) ? 'menuitem' : 'menuitemradio';
 				case ActionListItemKind.Separator:
 				default:

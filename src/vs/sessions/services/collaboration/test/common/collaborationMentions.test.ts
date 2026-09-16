@@ -5,7 +5,7 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { CollaborationDraft, getCollaborationMentionQuery, getCollaborationMentionTargets } from '../../common/collaborationMentions.js';
+import { CollaborationDraft, getCollaborationMentionQuery, getCollaborationRecipients } from '../../common/collaborationMentions.js';
 
 suite('CollaborationMentions', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -17,11 +17,26 @@ suite('CollaborationMentions', () => {
 		assert.strictEqual(getCollaborationMentionQuery('@Copilot-1 done', 15), undefined);
 	});
 
-	test('mentions resolve to exact stable members and deduplicate', () => {
-		const members = [{ id: 'one', name: 'Copilot-1' }, { id: 'ten', name: 'Copilot-10' }];
-		assert.deepStrictEqual(getCollaborationMentionTargets('@Copilot-10, @copilot-1 @Copilot-10', members), ['ten', 'one']);
-		assert.deepStrictEqual(getCollaborationMentionTargets('ordinary room post', members), []);
-		assert.throws(() => getCollaborationMentionTargets('@Copilot-11', members), /No peer named/);
+	test('explicit audiences resolve to stable members and exclude removed peers', () => {
+		const members = [{ id: 'one', name: 'Copilot-1' }, { id: 'ten', name: 'Copilot-10' }, { id: 'removed', name: 'Removed', removed: true }];
+		assert.deepStrictEqual([
+			getCollaborationRecipients({ kind: 'note' }, members),
+			getCollaborationRecipients({ kind: 'all' }, members),
+			getCollaborationRecipients({ kind: 'member', memberId: 'ten' }, members),
+		], [[], ['one', 'ten'], ['ten']]);
+		assert.throws(() => getCollaborationRecipients({ kind: 'member', memberId: 'removed' }, members), /no longer in this room/);
+	});
+
+	test('new drafts address all current peers and passive notes remain an explicit choice', () => {
+		const draft = new CollaborationDraft();
+		draft.update('Focus on URI formatting', undefined);
+		const members = [{ id: 'one', name: 'First' }, { id: 'new-peer', name: 'New peer' }];
+		const recipients = getCollaborationRecipients(draft.audience, members);
+		draft.update(draft.text, undefined, { kind: 'note' });
+		assert.deepStrictEqual({
+			recipients,
+			noteRecipients: getCollaborationRecipients(draft.audience, members),
+		}, { recipients: ['one', 'new-peer'], noteRecipients: [] });
 	});
 
 	test('a failed send retains its idempotency key for retry', () => {
@@ -45,12 +60,26 @@ suite('CollaborationMentions', () => {
 		assert.strictEqual(draft.beginSend('message-two').messageId, 'message-two');
 	});
 
-	test('changing a failed send from discussion to steering allocates a different idempotency key', () => {
+	test('changing the visible audience allocates a new idempotency key, but roster changes do not rewrite a pending send', () => {
 		const draft = new CollaborationDraft();
-		draft.update('Change direction', undefined);
-		const discussion = draft.beginSend('discussion', 'message');
-		const steering = draft.beginSend('steering', 'steer');
-		assert.notStrictEqual(discussion.messageId, steering.messageId);
-		assert.strictEqual(draft.beginSend('retry', 'steer').messageId, steering.messageId);
+		draft.update('Change direction', undefined, { kind: 'note' });
+		const note = draft.beginSend('note', []);
+		draft.update(draft.text, draft.replyTo, { kind: 'all' });
+		const addressed = draft.beginSend('addressed', ['one']);
+		const retried = draft.beginSend('retry', ['one', 'two']);
+		assert.deepStrictEqual({
+			note: note.messageId, addressed: addressed.messageId, retried: retried.messageId, recipients: retried.mentions,
+		}, { note: 'note', addressed: 'addressed', retried: 'addressed', recipients: ['one'] });
+	});
+
+	test('text mentions and edits do not change the selected audience', () => {
+		const draft = new CollaborationDraft();
+		draft.update('@Copilot-2 Hello', undefined, { kind: 'member', memberId: 'one' });
+		draft.update('@Copilot-3 Hello', undefined);
+		const pending = draft.beginSend('message', ['one']);
+		draft.update(draft.text, undefined, { kind: 'note' });
+		assert.deepStrictEqual({ cleared: draft.acknowledge(pending.revision), draft: draft.state.get() }, {
+			cleared: false, draft: { text: '@Copilot-3 Hello', replyTo: undefined, audience: { kind: 'note' } },
+		});
 	});
 });
