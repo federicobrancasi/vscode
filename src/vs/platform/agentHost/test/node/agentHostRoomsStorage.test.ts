@@ -1041,6 +1041,40 @@ suite('AgentHostRoomsStorage', function () {
 		});
 	});
 
+	test('a member stash cannot reach a peer, the source repository, or its branches', async () => {
+		const { room } = await initializeRepository();
+		const first = room.members[0];
+		const second = { ...first, id: 'member-two', sessionUri: 'copilotcli:/member-two', worktreeUri: storage.worktreeUri(room.id, 'member-two') };
+		const expanded = { ...room, members: [first, second] };
+		await Promise.all([storage.ensureWorktree(expanded, first), storage.ensureWorktree(expanded, second)]);
+		const firstPath = URI.parse(storage.worktreeUri(room.id, first.id)).fsPath;
+		const secondPath = URI.parse(storage.worktreeUri(room.id, second.id)).fsPath;
+
+		// Both members stash concurrently, as an A/B measurement cycle does.
+		await fs.writeFile(join(firstPath, 'committed.txt'), 'first member secret\n');
+		await git(firstPath, ['stash']);
+		await fs.writeFile(join(secondPath, 'committed.txt'), 'second member secret\n');
+		await git(secondPath, ['stash']);
+		await git(firstPath, ['stash', 'pop']);
+
+		// A member must not be able to move the branch the human is working on.
+		await git(secondPath, ['branch', '-f', 'main', 'HEAD']).then(() => 'moved', () => 'refused');
+
+		assert.deepStrictEqual({
+			restored: await fs.readFile(join(firstPath, 'committed.txt'), 'utf8'),
+			ownStashOnly: (await git(secondPath, ['stash', 'list'])).trim().split('\n').length,
+			sourceStash: (await git(repository, ['stash', 'list'])).trim(),
+			sourceBranch: (await git(repository, ['rev-parse', 'main'])).trim() === room.baseRevision,
+			sourceStatus: (await git(repository, ['status', '--porcelain'])).trim(),
+		}, {
+			restored: 'first member secret\n',
+			ownStashOnly: 1,
+			sourceStash: '',
+			sourceBranch: true,
+			sourceStatus: '',
+		});
+	});
+
 	test('isolates concurrent members editing the same file from each other and the original', async () => {
 		const { room } = await initializeRepository();
 		const first = room.members[0];

@@ -16,7 +16,19 @@ import { IAgentHostRoom, IAgentHostRoomArtifact, IAgentHostRoomMember } from '..
 import { IRoomSessionParticipant, RoomContentValidator } from './agentHostRoomsTypes.js';
 import { checkRoomData, hasRoomFileErrorCode, removeRoomTemporaryFile, roomCommit, RoomFiles, roomFileStat, roomId, roomLocalFile, roomText, sameRoomFile } from './agentHostRoomStorageUtils.js';
 
-/** Git worktrees and immutable patches, independent from mailbox scheduling. */
+/**
+ * Per-member checkouts and immutable patches, independent from mailbox scheduling.
+ *
+ * Members are local `--shared` clones rather than linked worktrees. A linked
+ * worktree keeps `refs/stash` and `refs/heads` in the source repository, so one
+ * member's `git stash` is visible to every other member and to the user, and a
+ * peer's `git stash pop` can take work that is not its own. A clone gives each
+ * member private refs, index and reflog while `objects/info/alternates` still
+ * points at the source object store, so objects are not duplicated on disk.
+ *
+ * Because members borrow objects, the room never prunes the source repository.
+ * Checkouts created by earlier versions remain linked worktrees and stay valid.
+ */
 export class AgentHostRoomWorktrees {
 	private readonly queue = new SequencerByKey<string>();
 
@@ -80,14 +92,47 @@ export class AgentHostRoomWorktrees {
 			checkRoomData(existing.isDirectory() && !existing.isSymbolicLink(), 'worktree is not a real directory');
 		} else {
 			checkRoomData(!requireExisting, 'preserved worktree is missing; restore it before retrying');
-			await this.git(original, ['worktree', 'add', '--detach', '--', worktree, room.baseRevision]);
+			await this.clone(original, worktree, room.baseRevision);
 		}
 		const toplevel = (await this.git(worktree, ['rev-parse', '--show-toplevel'])).trim();
 		checkRoomData(sameRoomFile(await fs.realpath(toplevel), await fs.realpath(worktree)), 'worktree is not the git toplevel');
+		await this.assertBorrowsFrom(original, worktree);
+		await this.git(worktree, ['merge-base', '--is-ancestor', room.baseRevision, 'HEAD']);
+	}
+
+	/** A private clone that borrows the source objects instead of sharing its refs. */
+	private async clone(original: string, worktree: string, baseRevision: string): Promise<void> {
+		try {
+			await this.git(original, ['clone', '--quiet', '--shared', '--no-checkout', '--', original, worktree]);
+			await this.git(worktree, ['checkout', '--quiet', '--detach', baseRevision, '--']);
+		} catch (error) {
+			// A half-created checkout would fail every later identity check.
+			await fs.rm(worktree, { recursive: true, force: true }).catch(() => undefined);
+			throw error;
+		}
+	}
+
+	/**
+	 * A member must read the source repository's objects without sharing its refs.
+	 * Linked checkouts created by earlier versions satisfy this through a common
+	 * directory instead, and stay usable.
+	 */
+	private async assertBorrowsFrom(original: string, worktree: string): Promise<void> {
+		const objects = await fs.realpath((await this.git(original, ['rev-parse', '--path-format=absolute', '--git-path', 'objects'])).trim());
+		const alternates = await fs.readFile(join(worktree, '.git', 'objects', 'info', 'alternates'), 'utf8').catch(error => {
+			if (!hasRoomFileErrorCode(error, 'ENOENT') && !hasRoomFileErrorCode(error, 'ENOTDIR')) {
+				throw error;
+			}
+			return '';
+		});
+		for (const entry of alternates.split('\n').map(value => value.trim()).filter(value => value.length > 0)) {
+			if (sameRoomFile(await fs.realpath(entry).catch(() => entry), objects)) {
+				return;
+			}
+		}
 		const originalCommon = (await this.git(original, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
 		const worktreeCommon = (await this.git(worktree, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
 		checkRoomData(sameRoomFile(await fs.realpath(originalCommon), await fs.realpath(worktreeCommon)), 'worktree belongs to a different repository');
-		await this.git(worktree, ['merge-base', '--is-ancestor', room.baseRevision, 'HEAD']);
 	}
 
 	publishPatch(room: IAgentHostRoom, member: IAgentHostRoomMember, title: string, validateContent?: RoomContentValidator): Promise<IAgentHostRoomArtifact> {
