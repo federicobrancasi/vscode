@@ -14,6 +14,15 @@ import { AGENT_SESSION_RENAME_ACTION_ID } from '../../../browser/agentSessions/a
 suite('Chat Accessibility Help', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
 
+	test('describes Test App and its one-off subagent option only in the Agents Window', () => {
+		const keybindings = new MockKeybindingService();
+		assert.deepStrictEqual([
+			getAccessibilityHelpText('agentView', keybindings, true, true).includes('Test App appears to the right of the status pills above the chat input'),
+			getAccessibilityHelpText('agentView', keybindings, true, true).includes('Test with Subagent requests a separate tester for that run only; if unavailable, the main agent explains this and tests itself'),
+			getAccessibilityHelpText('agentView', keybindings, true, false).includes('Test App'),
+		], [true, true, false]);
+	});
+
 	test('documents model details and activating Auto through Optimize for', () => {
 		const help = getAccessibilityHelpText('agentView', new MockKeybindingService(), true);
 		assert.deepStrictEqual({
